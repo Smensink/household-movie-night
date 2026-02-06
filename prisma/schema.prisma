@@ -1,0 +1,341 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id             String   @id @default(cuid())
+  email          String?  @unique
+  name           String
+  passwordHash   String?
+  avatarUrl      String?
+  isGuest        Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  householdMembers    HouseholdMember[]
+  genreRankings       GenreRanking[]
+  movieRatings        MovieRating[]
+  actorRatings        ActorRating[]
+  directorRatings     DirectorRating[]
+  studioRatings       StudioRating[]
+  sessionParticipants SessionParticipant[]
+  sessionVotes        SessionVote[]
+  letterboxdImports   LetterboxdImport[]
+  settings            UserSettings?
+}
+
+model Household {
+  id          String   @id @default(cuid())
+  name        String
+  inviteCode  String   @unique @default(cuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members  HouseholdMember[]
+  sessions MovieNightSession[]
+}
+
+model HouseholdMember {
+  id          String   @id @default(cuid())
+  userId      String
+  householdId String
+  role        String   @default("member")
+  joinedAt    DateTime @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, householdId])
+}
+
+model Movie {
+  id            String    @id @default(cuid())
+  tmdbId        String?   @unique
+  imdbId        String?   @unique
+  traktSlug     String?   @unique
+  title         String
+  year          Int?
+  posterUrl     String?
+  backdropUrl   String?
+  overview      String?
+  runtime       Int?
+  releaseDate   DateTime?
+  certification String?
+  popularity    Float?    @default(0)
+  voteAverage   Float?    @default(0)
+  era           String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  genres           MovieGenre[]
+  studios          MovieStudio[]
+  cast             MovieCast[]
+  crew             MovieCrew[]
+  ratings          MovieRating[]
+  sessionMovies    SessionMovie[]
+  radarrSync       RadarrSync?
+  plexAvailability PlexAvailability?
+}
+
+model Genre {
+  id   String @id @default(cuid())
+  name String @unique
+  slug String @unique
+
+  movies                  MovieGenre[]
+  genreRankings           GenreRanking[]
+  sessionGenrePreferences SessionGenrePreference[]
+}
+
+model MovieGenre {
+  movieId String
+  genreId String
+
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  genre Genre @relation(fields: [genreId], references: [id], onDelete: Cascade)
+
+  @@id([movieId, genreId])
+}
+
+model Person {
+  id       String  @id @default(cuid())
+  tmdbId   String? @unique
+  name     String
+  photoUrl String?
+  knownFor String?
+
+  moviesCast      MovieCast[]
+  moviesCrew      MovieCrew[]
+  actorRatings    ActorRating[]
+  directorRatings DirectorRating[]
+}
+
+model MovieCast {
+  movieId   String
+  personId  String
+  character String?
+  castOrder Int?
+
+  movie  Movie  @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@id([movieId, personId])
+}
+
+model MovieCrew {
+  movieId  String
+  personId String
+  job      String
+
+  movie  Movie  @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@id([movieId, personId, job])
+}
+
+model GenreRanking {
+  id      String @id @default(cuid())
+  userId  String
+  genreId String
+  rank    Int
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  genre Genre @relation(fields: [genreId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, genreId])
+}
+
+model MovieRating {
+  id         String   @id @default(cuid())
+  userId     String
+  movieId    String
+  rating     Float?
+  hasSeen    Boolean  @default(false)
+  notHeardOf Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, movieId])
+}
+
+model ActorRating {
+  id         String  @id @default(cuid())
+  userId     String
+  personId   String
+  rating     Float?
+  notHeardOf Boolean @default(false)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, personId])
+}
+
+model DirectorRating {
+  id         String  @id @default(cuid())
+  userId     String
+  personId   String
+  rating     Float?
+  notHeardOf Boolean @default(false)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, personId])
+}
+
+model MovieNightSession {
+  id              String   @id @default(cuid())
+  householdId     String
+  status          String   @default("gathering")
+  guestInviteCode String   @unique @default(cuid())
+  decidedMovieId  String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  household        Household              @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  participants     SessionParticipant[]
+  genrePreferences SessionGenrePreference[]
+  movies           SessionMovie[]
+}
+
+model SessionParticipant {
+  id            String  @id @default(cuid())
+  sessionId     String
+  userId        String
+  eraPreference String?
+  isPresent     Boolean @default(true)
+
+  session MovieNightSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, userId])
+}
+
+model SessionGenrePreference {
+  id        String @id @default(cuid())
+  sessionId String
+  genreId   String
+  userId    String
+  rank      Int
+
+  session MovieNightSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  genre   Genre             @relation(fields: [genreId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, userId, genreId])
+}
+
+model SessionMovie {
+  id        String @id @default(cuid())
+  sessionId String
+  movieId   String
+  round     Int    @default(1)
+
+  session MovieNightSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  movie   Movie             @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  votes   SessionVote[]
+
+  @@unique([sessionId, movieId])
+}
+
+model SessionVote {
+  id               String  @id @default(cuid())
+  sessionMovieId   String
+  userId           String
+  rating           Float
+  willingToRewatch Boolean @default(false)
+
+  sessionMovie SessionMovie @relation(fields: [sessionMovieId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionMovieId, userId])
+}
+
+model RadarrSync {
+  id        String  @id @default(cuid())
+  movieId   String  @unique
+  radarrId  Int?
+  monitored Boolean @default(false)
+  available Boolean @default(false)
+
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+}
+
+model PlexAvailability {
+  id        String  @id @default(cuid())
+  movieId   String  @unique
+  plexKey   String?
+  available Boolean @default(false)
+
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+}
+
+model LetterboxdImport {
+  id        String   @id @default(cuid())
+  userId    String
+  filename  String
+  status    String   @default("pending")
+  imported  Int      @default(0)
+  total     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model IntegrationConfig {
+  id      String  @id @default(cuid())
+  service String  @unique
+  baseUrl String?
+  apiKey  String?
+  enabled Boolean @default(false)
+  config  String?
+}
+
+model Studio {
+  id   String @id @default(cuid())
+  name String @unique
+  slug String @unique
+
+  movies  MovieStudio[]
+  ratings StudioRating[]
+}
+
+model MovieStudio {
+  movieId  String
+  studioId String
+
+  movie  Movie  @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  studio Studio @relation(fields: [studioId], references: [id], onDelete: Cascade)
+
+  @@id([movieId, studioId])
+}
+
+model StudioRating {
+  id         String  @id @default(cuid())
+  userId     String
+  studioId   String
+  rating     Float?
+  notHeardOf Boolean @default(false)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  studio Studio @relation(fields: [studioId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, studioId])
+}
+
+model UserSettings {
+  id                   String @id @default(cuid())
+  userId               String @unique
+  explorationFactor    Float  @default(0.5) // 0 = deep dive into known preferences, 1 = max exploration of new content
+  discoverySourcePref  String @default("balanced") // "trending" | "popular" | "top_rated" | "new_releases" | "balanced"
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
