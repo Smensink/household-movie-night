@@ -29,10 +29,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { movieId, rating, hasSeen, notHeardOf } = await req.json();
+  const body = await req.json().catch(() => null);
+  const movieId = typeof body?.movieId === "string" ? body.movieId : "";
+  const rating = typeof body?.rating === "number" ? body.rating : null;
+  const hasSeen = typeof body?.hasSeen === "boolean" ? body.hasSeen : false;
+  const notHeardOf = Boolean(body?.notHeardOf);
 
   if (!movieId) {
     return NextResponse.json({ error: "Movie ID required" }, { status: 400 });
+  }
+
+  if (!notHeardOf && (rating === null || rating < 1 || rating > 5)) {
+    return NextResponse.json(
+      { error: "Rating must be between 1 and 5" },
+      { status: 400 }
+    );
   }
 
   const movieRating = await prisma.movieRating.upsert({

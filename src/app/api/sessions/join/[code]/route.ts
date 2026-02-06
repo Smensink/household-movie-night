@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { v4 as uuidv4 } from "uuid";
+import { createGuestToken } from "@/lib/guest-token";
 
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ code: string }> }
 ) {
   const { code } = await params;
-  const { name } = await req.json();
+  const body = await req.json().catch(() => null);
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
 
   const session = await prisma.movieNightSession.findUnique({
     where: { guestInviteCode: code },
@@ -37,9 +39,17 @@ export async function POST(
     },
   });
 
+  const guestToken = createGuestToken(guestUser.id, session.id);
+  if (!guestToken) {
+    return NextResponse.json(
+      { error: "Guest sessions are not configured (missing NEXTAUTH_SECRET)" },
+      { status: 500 }
+    );
+  }
+
   return NextResponse.json({
     userId: guestUser.id,
     sessionId: session.id,
-    guestToken: guestUser.id, // Simple guest auth
+    guestToken,
   });
 }

@@ -34,8 +34,9 @@ export default function JoinSessionPage() {
 
     const data = await res.json();
     // Store guest token in session storage
-    sessionStorage.setItem("guestToken", data.userId);
+    sessionStorage.setItem("guestToken", data.guestToken);
     sessionStorage.setItem("guestSessionId", data.sessionId);
+    sessionStorage.setItem("guestUserId", data.userId);
     router.push(`/session/${data.sessionId}`);
   };
 

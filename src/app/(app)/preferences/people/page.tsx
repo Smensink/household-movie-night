@@ -14,10 +14,20 @@ interface Person {
   knownFor?: string | null;
 }
 
+interface SearchMovieResult {
+  directors?: string[];
+  actors?: string[];
+}
+
 interface PersonRating {
   personId: string;
+  type: "actor" | "director";
   rating: number | null;
   notHeardOf: boolean;
+}
+
+function getRatingKey(personId: string, type: "actor" | "director") {
+  return `${type}:${personId.trim().toLowerCase()}`;
 }
 
 export default function RatePeoplePage() {
@@ -33,6 +43,46 @@ export default function RatePeoplePage() {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    fetch("/api/ratings/people")
+      .then((r) => r.json())
+      .then((data) => {
+        const next = new Map<string, PersonRating>();
+        if (Array.isArray(data?.actors)) {
+          for (const rating of data.actors) {
+            const personLookupId =
+              typeof rating?.person?.name === "string"
+                ? rating.person.name
+                : rating?.personId;
+            if (!personLookupId) continue;
+            next.set(getRatingKey(personLookupId, "actor"), {
+              personId: personLookupId,
+              type: "actor",
+              rating: rating.rating ?? null,
+              notHeardOf: Boolean(rating.notHeardOf),
+            });
+          }
+        }
+        if (Array.isArray(data?.directors)) {
+          for (const rating of data.directors) {
+            const personLookupId =
+              typeof rating?.person?.name === "string"
+                ? rating.person.name
+                : rating?.personId;
+            if (!personLookupId) continue;
+            next.set(getRatingKey(personLookupId, "director"), {
+              personId: personLookupId,
+              type: "director",
+              rating: rating.rating ?? null,
+              notHeardOf: Boolean(rating.notHeardOf),
+            });
+          }
+        }
+        setRatings(next);
+      });
+  }, [status]);
+
   const searchPeople = async () => {
     if (!searchQuery.trim()) return;
     setSearching(true);
@@ -40,18 +90,22 @@ export default function RatePeoplePage() {
     const res = await fetch(
       `/api/movies/search?q=${encodeURIComponent(searchQuery)}`
     );
-    const movies = await res.json();
-    // For now, show the search results as a proxy
-    // In a full implementation, you'd have a dedicated people search API
+    const movies: SearchMovieResult[] = await res.json();
     const uniquePeople: Person[] = [];
     const seen = new Set<string>();
     for (const movie of movies) {
-      if (movie.director && !seen.has(movie.director)) {
-        seen.add(movie.director);
+      const candidates =
+        activeTab === "director" ? movie.directors || [] : movie.actors || [];
+
+      for (const candidate of candidates) {
+        const name = candidate.trim();
+        const dedupeKey = name.toLowerCase();
+        if (!name || seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
         uniquePeople.push({
-          id: movie.director,
-          name: movie.director,
-          knownFor: "directing",
+          id: name,
+          name,
+          knownFor: activeTab === "director" ? "directing" : "acting",
         });
       }
     }
@@ -61,20 +115,22 @@ export default function RatePeoplePage() {
 
   const ratePerson = async (
     personId: string,
+    personName: string,
     type: "actor" | "director",
     rating: number | null,
     notHeardOf: boolean = false
   ) => {
+    const key = getRatingKey(personId, type);
     setRatings((prev) => {
       const next = new Map(prev);
-      next.set(personId, { personId, rating, notHeardOf });
+      next.set(key, { personId, type, rating, notHeardOf });
       return next;
     });
 
     await fetch("/api/ratings/people", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ personId, type, rating, notHeardOf }),
+      body: JSON.stringify({ personId, personName, type, rating, notHeardOf }),
     });
   };
 
@@ -135,7 +191,8 @@ export default function RatePeoplePage() {
       {/* People list */}
       <div className="space-y-2">
         {people.map((person) => {
-          const r = ratings.get(person.id);
+          const ratingKey = getRatingKey(person.id, activeTab);
+          const r = ratings.get(ratingKey);
           return (
             <div
               key={person.id}
@@ -155,12 +212,14 @@ export default function RatePeoplePage() {
                 <StarRating
                   rating={r?.rating ?? null}
                   onChange={(rating) =>
-                    ratePerson(person.id, activeTab, rating)
+                    ratePerson(person.id, person.name, activeTab, rating)
                   }
                   size="sm"
                 />
                 <button
-                  onClick={() => ratePerson(person.id, activeTab, null, true)}
+                  onClick={() =>
+                    ratePerson(person.id, person.name, activeTab, null, true)
+                  }
                   className={`text-[11px] px-2 py-1 rounded-lg transition-all ${
                     r?.notHeardOf
                       ? "bg-warning/15 text-warning border border-warning/30"

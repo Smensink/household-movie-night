@@ -4,6 +4,35 @@ import { searchOMDB, getOMDBMovie } from "@/lib/api/omdb";
 import { searchTraktMovies } from "@/lib/api/trakt";
 import { prisma } from "@/lib/prisma";
 
+interface SearchMovieCandidate {
+  imdbId: string;
+  tmdbId?: string | null;
+  traktSlug?: string | null;
+  title: string;
+  year: number | null;
+  posterUrl: string | null;
+  overview: string | null;
+  runtime: number | null;
+  directors: string[];
+  actors: string[];
+}
+
+function parseOptionalInt(value: string | undefined): number | null {
+  if (!value) return null;
+  const match = value.match(/\d+/);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[0], 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function splitPeople(value: string | undefined): string[] {
+  if (!value || value === "N/A") return [];
+  return value
+    .split(",")
+    .map((person) => person.trim())
+    .filter(Boolean);
+}
+
 export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -23,7 +52,7 @@ export async function GET(req: NextRequest) {
 
   // Merge and deduplicate by IMDB ID
   const seen = new Set<string>();
-  const movies = [];
+  const movies: SearchMovieCandidate[] = [];
 
   for (const r of omdbResults) {
     if (seen.has(r.imdbID)) continue;
@@ -34,10 +63,12 @@ export async function GET(req: NextRequest) {
     movies.push({
       imdbId: r.imdbID,
       title: r.Title,
-      year: parseInt(r.Year) || null,
+      year: parseOptionalInt(r.Year),
       posterUrl: r.Poster !== "N/A" ? r.Poster : null,
       overview: details?.Plot || null,
-      runtime: details?.Runtime ? parseInt(details.Runtime) : null,
+      runtime: parseOptionalInt(details?.Runtime),
+      directors: splitPeople(details?.Director),
+      actors: splitPeople(details?.Actors),
     });
   }
 
@@ -49,28 +80,55 @@ export async function GET(req: NextRequest) {
       tmdbId: r.movie.ids.tmdb?.toString() || null,
       traktSlug: r.movie.ids.slug,
       title: r.movie.title,
-      year: r.movie.year,
+      year: r.movie.year ?? null,
       posterUrl: null,
+      overview: null,
+      runtime: null,
+      directors: [],
+      actors: [],
     });
   }
 
-  // Upsert movies into our database
+  // Upsert movies into our database and return persisted IDs for rating flows
+  const persistedMovies = [];
   for (const movie of movies) {
-    await prisma.movie.upsert({
+    const persisted = await prisma.movie.upsert({
       where: { imdbId: movie.imdbId },
       create: {
         imdbId: movie.imdbId,
-        tmdbId: "tmdbId" in movie ? (movie.tmdbId as string) : null,
-        traktSlug: "traktSlug" in movie ? (movie.traktSlug as string) : null,
+        tmdbId: movie.tmdbId ?? null,
+        traktSlug: movie.traktSlug ?? null,
         title: movie.title,
         year: movie.year,
         posterUrl: movie.posterUrl || null,
-        overview: "overview" in movie ? (movie.overview as string) : null,
-        runtime: "runtime" in movie ? (movie.runtime as number) : null,
+        overview: movie.overview,
+        runtime: movie.runtime,
       },
-      update: {},
+      update: {
+        title: movie.title,
+        ...(movie.tmdbId !== undefined && { tmdbId: movie.tmdbId }),
+        ...(movie.traktSlug !== undefined && { traktSlug: movie.traktSlug }),
+        ...(movie.year !== null && { year: movie.year }),
+        ...(movie.posterUrl !== null && { posterUrl: movie.posterUrl }),
+        ...(movie.overview !== null && { overview: movie.overview }),
+        ...(movie.runtime !== null && { runtime: movie.runtime }),
+      },
+      select: {
+        id: true,
+        imdbId: true,
+        title: true,
+        year: true,
+        posterUrl: true,
+        overview: true,
+        era: true,
+      },
+    });
+    persistedMovies.push({
+      ...persisted,
+      directors: movie.directors,
+      actors: movie.actors,
     });
   }
 
-  return NextResponse.json(movies.slice(0, 20));
+  return NextResponse.json(persistedMovies.slice(0, 20));
 }

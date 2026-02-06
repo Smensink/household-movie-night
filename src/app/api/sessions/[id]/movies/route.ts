@@ -1,18 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getRecommendationsForSession } from "@/lib/recommendation";
+import { resolveSessionActor } from "@/lib/session-access";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   const { id: sessionId } = await params;
+  const actor = await resolveSessionActor(req, sessionId);
+  if (!actor) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   // Get existing session movies with votes
   const sessionMovies = await prisma.sessionMovie.findMany({
@@ -35,15 +34,28 @@ export async function GET(
 }
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { id: sessionId } = await params;
+  const actor = await resolveSessionActor(req, sessionId);
+  if (!actor) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const { id: sessionId } = await params;
+  const currentSession = await prisma.movieNightSession.findUnique({
+    where: { id: sessionId },
+    select: { status: true },
+  });
+  if (!currentSession) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+  if (currentSession.status === "decided" || currentSession.status === "cancelled") {
+    return NextResponse.json(
+      { error: "Session is no longer active" },
+      { status: 400 }
+    );
+  }
 
   // Generate recommendations
   const recommendations = await getRecommendationsForSession(sessionId, 8);
@@ -65,6 +77,7 @@ export async function POST(
           include: {
             genres: { include: { genre: true } },
             plexAvailability: true,
+            radarrSync: true,
           },
         },
       },

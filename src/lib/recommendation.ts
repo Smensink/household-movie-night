@@ -187,10 +187,11 @@ export async function decideMovie(sessionId: string) {
 
   if (sessionMovies.length === 0) return null;
 
-  const movieScores = sessionMovies.map((sm) => {
-    const votes = sm.votes;
-    if (votes.length === 0) return { movie: sm.movie, score: 0, minRating: 0 };
+  const moviesWithVotes = sessionMovies.filter((sm) => sm.votes.length > 0);
+  if (moviesWithVotes.length === 0) return null;
 
+  const movieScores = moviesWithVotes.map((sm) => {
+    const votes = sm.votes;
     const avgRating = votes.reduce((sum, v) => sum + v.rating, 0) / votes.length;
     const minRating = Math.min(...votes.map((v) => v.rating));
 

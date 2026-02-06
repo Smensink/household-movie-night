@@ -4,12 +4,13 @@ import { prisma } from "@/lib/prisma";
 
 export async function GET() {
   const session = await auth();
-  if (!session?.user?.id) {
+  const userId = session?.user?.id;
+  if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const memberships = await prisma.householdMember.findMany({
-    where: { userId: session.user.id },
+    where: { userId },
     select: { householdId: true },
   });
 
@@ -38,11 +39,17 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   const session = await auth();
-  if (!session?.user?.id) {
+  const userId = session?.user?.id;
+  if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { householdId, participantIds } = await req.json();
+  const body = await req.json().catch(() => null);
+  const householdId =
+    typeof body?.householdId === "string" ? body.householdId : "";
+  const participantIds = Array.isArray(body?.participantIds)
+    ? (body.participantIds as unknown[])
+    : [];
 
   if (!householdId) {
     return NextResponse.json(
@@ -55,7 +62,7 @@ export async function POST(req: NextRequest) {
   const membership = await prisma.householdMember.findUnique({
     where: {
       userId_householdId: {
-        userId: session.user.id,
+        userId,
         householdId,
       },
     },
@@ -65,11 +72,34 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Not a member" }, { status: 403 });
   }
 
+  const householdMembers = await prisma.householdMember.findMany({
+    where: { householdId },
+    select: { userId: true },
+  });
+  const validMemberIds = new Set(householdMembers.map((m) => m.userId));
+
+  const requestedParticipantIds = participantIds.filter(
+    (id): id is string => typeof id === "string" && id.length > 0
+  );
+  const invalidParticipantIds = requestedParticipantIds.filter(
+    (id) => !validMemberIds.has(id)
+  );
+  if (invalidParticipantIds.length > 0) {
+    return NextResponse.json(
+      { error: "participantIds contains users outside the household" },
+      { status: 400 }
+    );
+  }
+
+  const finalParticipantIds = Array.from(
+    new Set([...requestedParticipantIds, userId])
+  );
+
   const movieNight = await prisma.movieNightSession.create({
     data: {
       householdId,
       participants: {
-        create: (participantIds || [session.user.id]).map((id: string) => ({
+        create: finalParticipantIds.map((id) => ({
           userId: id,
         })),
       },

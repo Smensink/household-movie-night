@@ -2,10 +2,26 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
+const ALLOWED_SERVICES = new Set(["radarr", "plex", "trakt", "omdb"]);
+
+async function isUserHouseholdAdmin(userId: string): Promise<boolean> {
+  const adminMembership = await prisma.householdMember.findFirst({
+    where: { userId, role: "admin" },
+    select: { id: true },
+  });
+
+  return Boolean(adminMembership);
+}
+
 export async function GET() {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const isAdmin = await isUserHouseholdAdmin(session.user.id);
+  if (!isAdmin) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const configs = await prisma.integrationConfig.findMany();
@@ -24,10 +40,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { service, baseUrl, apiKey, enabled } = await req.json();
+  const isAdmin = await isUserHouseholdAdmin(session.user.id);
+  if (!isAdmin) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const body = await req.json();
+  const service =
+    typeof body.service === "string" ? body.service.trim().toLowerCase() : "";
+  const baseUrl =
+    typeof body.baseUrl === "string"
+      ? body.baseUrl.trim() || null
+      : body.baseUrl;
+  const apiKey =
+    typeof body.apiKey === "string" ? body.apiKey.trim() || null : body.apiKey;
+  const enabled = typeof body.enabled === "boolean" ? body.enabled : undefined;
 
   if (!service) {
     return NextResponse.json({ error: "Service required" }, { status: 400 });
+  }
+
+  if (!ALLOWED_SERVICES.has(service)) {
+    return NextResponse.json({ error: "Invalid service" }, { status: 400 });
   }
 
   const config = await prisma.integrationConfig.upsert({

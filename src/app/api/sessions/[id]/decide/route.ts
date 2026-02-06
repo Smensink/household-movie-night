@@ -1,17 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
 import { decideMovie } from "@/lib/recommendation";
+import { resolveSessionActor } from "@/lib/session-access";
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { id: sessionId } = await params;
+  const actor = await resolveSessionActor(req, sessionId);
+  if (!actor) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const { id: sessionId } = await params;
+  const currentSession = await prisma.movieNightSession.findUnique({
+    where: { id: sessionId },
+    select: { status: true },
+  });
+  if (!currentSession) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+  if (currentSession.status === "decided") {
+    return NextResponse.json(
+      { error: "Session already decided" },
+      { status: 409 }
+    );
+  }
+
   const result = await decideMovie(sessionId);
 
   if (!result) {
