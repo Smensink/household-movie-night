@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter, useParams } from "next/navigation";
 import GenreRanker from "@/components/GenreRanker";
@@ -44,6 +44,13 @@ interface SessionData {
 
 type Step = "preferences" | "voting" | "decided";
 
+function calculateDecisionScore(votes: SessionMovie["votes"]): number {
+  if (votes.length === 0) return 0;
+  const avgRating = votes.reduce((sum, vote) => sum + vote.rating, 0) / votes.length;
+  const minRating = Math.min(...votes.map((vote) => vote.rating));
+  return avgRating * 0.6 + minRating * 0.4;
+}
+
 export default function SessionPage() {
   const { data: session, status: authStatus } = useSession();
   const router = useRouter();
@@ -69,59 +76,137 @@ export default function SessionPage() {
     score: number;
   } | null>(null);
   const [copied, setCopied] = useState(false);
+  const guestAuth = useMemo(() => {
+    if (typeof window === "undefined") {
+      return { ready: false, token: null as string | null, userId: null as string | null };
+    }
+
+    const storedGuestToken = sessionStorage.getItem("guestToken");
+    const storedGuestSessionId = sessionStorage.getItem("guestSessionId");
+    const storedGuestUserId = sessionStorage.getItem("guestUserId");
+
+    if (storedGuestToken && storedGuestSessionId === sessionId) {
+      return { ready: true, token: storedGuestToken, userId: storedGuestUserId };
+    }
+
+    return { ready: true, token: null as string | null, userId: null as string | null };
+  }, [sessionId]);
+  const guestToken = guestAuth.token;
+  const guestUserId = guestAuth.userId;
+  const guestReady = guestAuth.ready;
 
   useEffect(() => {
-    if (authStatus === "unauthenticated") router.push("/login");
-  }, [authStatus, router]);
+    if (authStatus === "unauthenticated" && guestReady && !guestToken) {
+      router.push("/login");
+    }
+  }, [authStatus, guestReady, guestToken, router]);
 
   // Load session data
   useEffect(() => {
-    if (authStatus !== "authenticated") return;
+    if (authStatus === "loading") return;
+    if (authStatus === "unauthenticated" && !guestReady) return;
+    if (authStatus === "unauthenticated" && !guestToken) return;
+
+    const guestHeader = guestToken ? { "x-guest-token": guestToken } : undefined;
 
     Promise.all([
-      fetch(`/api/sessions`)
-        .then((r) => r.json())
-        .then((sessions) => sessions.find((s: SessionData) => s.id === sessionId)),
-      fetch("/api/genres").then((r) => r.json()),
-      fetch(`/api/sessions/${sessionId}/movies`).then((r) => r.json()),
-      fetch("/api/settings").then((r) => r.json()),
+      fetch(`/api/sessions/${sessionId}`, {
+        headers: guestHeader,
+      }).then((r) => r.json()),
+      fetch("/api/genres", {
+        headers: guestHeader,
+      }).then((r) => r.json()),
+      fetch(`/api/sessions/${sessionId}/movies`, {
+        headers: guestHeader,
+      }).then((r) => r.json()),
+      authStatus === "authenticated"
+        ? fetch("/api/settings").then((r) => r.json())
+        : Promise.resolve(null),
     ]).then(([sess, genreData, movies, settingsData]) => {
+      const parsedMovies: SessionMovie[] = Array.isArray(movies) ? movies : [];
+      const activeUserId = session?.user?.id || guestUserId;
+
       if (settingsData?.explorationFactor !== undefined) {
         setExplorationFactor(settingsData.explorationFactor);
       }
-      setSessionData(sess || null);
+      setSessionData(sess?.id ? sess : null);
       setGenres(genreData.genres || []);
-      setSessionMovies(Array.isArray(movies) ? movies : []);
+      setSessionMovies(parsedMovies);
+      if (activeUserId) {
+        const existingVotes = new Map<
+          string,
+          { rating: number; willingToRewatch: boolean }
+        >();
+        for (const sessionMovie of parsedMovies) {
+          const userVote = sessionMovie.votes.find(
+            (vote) => vote.userId === activeUserId
+          );
+          if (userVote) {
+            existingVotes.set(sessionMovie.id, {
+              rating: userVote.rating,
+              willingToRewatch: userVote.willingToRewatch,
+            });
+          }
+        }
+        setVotes(existingVotes);
+      }
 
       if (sess?.status === "decided") {
         setStep("decided");
-      } else if (sess?.status === "voting" || (Array.isArray(movies) && movies.length > 0)) {
+        const decidedSessionMovie = parsedMovies.find(
+          (sessionMovie) => sessionMovie.movieId === sess.decidedMovieId
+        );
+        if (decidedSessionMovie) {
+          setDecidedMovie({
+            title: decidedSessionMovie.movie.title,
+            year: decidedSessionMovie.movie.year,
+            posterUrl: decidedSessionMovie.movie.posterUrl,
+            score: calculateDecisionScore(decidedSessionMovie.votes),
+          });
+        }
+      } else if (sess?.status === "voting" || parsedMovies.length > 0) {
         setStep("voting");
+        setDecidedMovie(null);
       }
       setLoading(false);
     });
-  }, [authStatus, sessionId]);
+  }, [authStatus, guestReady, guestToken, guestUserId, sessionId, session?.user?.id]);
 
   const savePreferences = async (
     genreRankings: { genreId: string; rank: number }[]
   ) => {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (guestToken) {
+      headers["x-guest-token"] = guestToken;
+    }
+
     await fetch(`/api/sessions/${sessionId}/preferences`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ eraPreference, genreRankings }),
     });
   };
 
   const generateMovies = async () => {
     setGenerating(true);
+    const headers: Record<string, string> = {};
+    if (guestToken) {
+      headers["x-guest-token"] = guestToken;
+    }
+
     // Save current exploration factor before generating
-    await fetch("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ explorationFactor }),
-    });
+    if (authStatus === "authenticated") {
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ explorationFactor }),
+      });
+    }
     const res = await fetch(`/api/sessions/${sessionId}/movies`, {
       method: "POST",
+      headers,
     });
     if (res.ok) {
       const movies = await res.json();
@@ -168,9 +253,16 @@ export default function SessionPage() {
       willingToRewatch: v.willingToRewatch,
     }));
 
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (guestToken) {
+      headers["x-guest-token"] = guestToken;
+    }
+
     await fetch(`/api/sessions/${sessionId}/vote`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ votes: voteArray }),
     });
   };
@@ -179,8 +271,14 @@ export default function SessionPage() {
     setDeciding(true);
     await submitVotes();
 
+    const headers: Record<string, string> = {};
+    if (guestToken) {
+      headers["x-guest-token"] = guestToken;
+    }
+
     const res = await fetch(`/api/sessions/${sessionId}/decide`, {
       method: "POST",
+      headers,
     });
     if (res.ok) {
       const result = await res.json();

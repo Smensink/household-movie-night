@@ -34,10 +34,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { studioId, rating, notHeardOf } = await req.json();
+  const body = await req.json().catch(() => null);
+  const studioId = typeof body?.studioId === "string" ? body.studioId : "";
+  const rating = typeof body?.rating === "number" ? body.rating : null;
+  const notHeardOf = Boolean(body?.notHeardOf);
 
   if (!studioId) {
     return NextResponse.json({ error: "Studio ID required" }, { status: 400 });
+  }
+
+  if (!notHeardOf && (rating === null || rating < 1 || rating > 5)) {
+    return NextResponse.json(
+      { error: "Rating must be between 1 and 5" },
+      { status: 400 }
+    );
   }
 
   const studioRating = await prisma.studioRating.upsert({

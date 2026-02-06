@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
+const ALLOWED_DISCOVERY_SOURCE_PREFS = new Set([
+  "trending",
+  "popular",
+  "top_rated",
+  "new_releases",
+  "balanced",
+]);
+
 export async function GET() {
   const session = await auth();
   if (!session?.user?.id) {
@@ -35,7 +43,37 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { explorationFactor, discoverySourcePref } = await req.json();
+  const body = await req.json().catch(() => null);
+  const explorationFactor =
+    typeof body?.explorationFactor === "number"
+      ? body.explorationFactor
+      : undefined;
+  const discoverySourcePref =
+    typeof body?.discoverySourcePref === "string"
+      ? body.discoverySourcePref
+      : undefined;
+
+  if (
+    explorationFactor !== undefined &&
+    (Number.isNaN(explorationFactor) ||
+      explorationFactor < 0 ||
+      explorationFactor > 1)
+  ) {
+    return NextResponse.json(
+      { error: "explorationFactor must be between 0 and 1" },
+      { status: 400 }
+    );
+  }
+
+  if (
+    discoverySourcePref !== undefined &&
+    !ALLOWED_DISCOVERY_SOURCE_PREFS.has(discoverySourcePref)
+  ) {
+    return NextResponse.json(
+      { error: "Invalid discoverySourcePref" },
+      { status: 400 }
+    );
+  }
 
   const settings = await prisma.userSettings.upsert({
     where: { userId: session.user.id },

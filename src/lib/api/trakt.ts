@@ -16,7 +16,7 @@ interface TraktTrendingItem {
   movie: TraktMovie;
 }
 
-interface TraktPopularItem extends TraktMovie {}
+type TraktPopularItem = TraktMovie;
 
 function getHeaders() {
   return {

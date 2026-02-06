@@ -4,6 +4,16 @@ import { getTrendingMovies, getPopularMovies } from "@/lib/api/trakt";
 import { getOMDBMovie } from "@/lib/api/omdb";
 import { prisma } from "@/lib/prisma";
 
+type DiscoverSource = "trending" | "popular";
+
+function parseOptionalInt(value: string | undefined): number | null {
+  if (!value) return null;
+  const match = value.match(/\d+/);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[0], 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 export async function GET() {
   const session = await auth();
   if (!session?.user?.id) {
@@ -29,9 +39,11 @@ export async function GET() {
   const seen = new Set<string>();
 
   // Combine and process
-  const allTraktMovies = [
-    ...trending.map((t) => ({ ...t.movie, source: "trending" })),
-    ...popular.map((p) => ({ ...p, source: "popular" })),
+  const allTraktMovies: Array<
+    (typeof trending)[number]["movie"] & { source: DiscoverSource }
+  > = [
+    ...trending.map((t) => ({ ...t.movie, source: "trending" as const })),
+    ...popular.map((p) => ({ ...p, source: "popular" as const })),
   ];
 
   for (const m of allTraktMovies) {
@@ -42,8 +54,9 @@ export async function GET() {
     // Get OMDB details for poster
     const details = await getOMDBMovie(imdbId);
 
-    const year = m.year || (details?.Year ? parseInt(details.Year) : null);
+    const year = m.year || parseOptionalInt(details?.Year);
     const era = getEra(year);
+    const runtime = parseOptionalInt(details?.Runtime);
 
     const movie = await prisma.movie.upsert({
       where: { imdbId },
@@ -55,11 +68,15 @@ export async function GET() {
         year,
         posterUrl: details?.Poster !== "N/A" ? details?.Poster || null : null,
         overview: details?.Plot || null,
-        runtime: details?.Runtime ? parseInt(details.Runtime) : null,
+        runtime,
         era,
       },
       update: {
+        title: m.title,
+        ...(year !== null && { year }),
         posterUrl: details?.Poster !== "N/A" ? details?.Poster || null : undefined,
+        ...(details?.Plot && { overview: details.Plot }),
+        ...(runtime !== null && { runtime }),
         era: era || undefined,
       },
     });
@@ -72,7 +89,7 @@ export async function GET() {
       posterUrl: movie.posterUrl,
       overview: movie.overview,
       era,
-      source: (m as Record<string, unknown>).source,
+      source: m.source,
     });
 
     if (movies.length >= 15) break;
