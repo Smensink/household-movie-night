@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { ensureDefaultStudios } from "@/lib/default-catalog";
 
 export async function GET() {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  await ensureDefaultStudios();
 
   const studios = await prisma.studio.findMany({
     orderBy: { name: "asc" },
@@ -33,6 +35,7 @@ export async function POST(req: NextRequest) {
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  await ensureDefaultStudios();
 
   const body = await req.json().catch(() => null);
   const studioId = typeof body?.studioId === "string" ? body.studioId : "";

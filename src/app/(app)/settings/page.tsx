@@ -3,8 +3,6 @@
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-import StarRating from "@/components/StarRating";
 import Input from "@/components/ui/Input";
 import Button from "@/components/ui/Button";
 
@@ -16,16 +14,122 @@ interface Integration {
   enabled: boolean;
 }
 
-interface Studio {
-  id: string;
-  name: string;
-  slug: string;
-}
-
 interface UserSettingsData {
   explorationFactor: number;
   discoverySourcePref: string;
   isAdmin: boolean;
+}
+
+interface AlgorithmSettings {
+  movieDiscovery: {
+    preferenceWeight: number;
+    discoveryWeight: number;
+    noveltyInfluence: number;
+    qualityInfluence: number;
+    sourceInfluence: number;
+    availabilityBonus: number;
+    dislikePenalty: number;
+    randomJitter: number;
+  };
+  peopleDiscovery: {
+    preferenceWeight: number;
+    discoveryWeight: number;
+    randomJitter: number;
+  };
+  studioDiscovery: {
+    preferenceWeight: number;
+    discoveryWeight: number;
+    randomJitter: number;
+  };
+  sessionRecommendation: {
+    preferenceWeight: number;
+    discoveryWeight: number;
+    radarrAvailableBoost: number;
+    radarrMonitoredBoost: number;
+    plexAvailableBoost: number;
+    mixedSeenPenalty: number;
+    randomJitterBase: number;
+    randomJitterExploration: number;
+  };
+}
+
+const DEFAULT_ALGORITHM_SETTINGS: AlgorithmSettings = {
+  movieDiscovery: {
+    preferenceWeight: 1,
+    discoveryWeight: 1,
+    noveltyInfluence: 0.45,
+    qualityInfluence: 0.2,
+    sourceInfluence: 0.35,
+    availabilityBonus: 0.05,
+    dislikePenalty: -0.08,
+    randomJitter: 0.04,
+  },
+  peopleDiscovery: {
+    preferenceWeight: 1,
+    discoveryWeight: 1,
+    randomJitter: 0.03,
+  },
+  studioDiscovery: {
+    preferenceWeight: 1,
+    discoveryWeight: 1,
+    randomJitter: 0.03,
+  },
+  sessionRecommendation: {
+    preferenceWeight: 1,
+    discoveryWeight: 1,
+    radarrAvailableBoost: 0.55,
+    radarrMonitoredBoost: 0.25,
+    plexAvailableBoost: 0.2,
+    mixedSeenPenalty: -0.15,
+    randomJitterBase: 0.05,
+    randomJitterExploration: 0.05,
+  },
+};
+
+interface SliderProps {
+  label: string;
+  description: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  onChange: (value: number) => void;
+}
+
+function formatSliderValue(value: number, step: number): string {
+  const decimals = step < 1 ? Math.max(1, String(step).split(".")[1]?.length || 0) : 0;
+  return value.toFixed(decimals);
+}
+
+function SliderRow({
+  label,
+  description,
+  min,
+  max,
+  step,
+  value,
+  onChange,
+}: SliderProps) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-xs font-medium text-foreground">{label}</label>
+        <span className="text-[11px] text-accent font-semibold">
+          {formatSliderValue(value, step)}
+        </span>
+      </div>
+      <p className="text-[11px] text-muted">{description}</p>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => onChange(parseFloat(event.target.value))}
+        className="w-full h-1.5 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
+      />
+    </div>
+  );
 }
 
 export default function SettingsPage() {
@@ -42,11 +146,12 @@ export default function SettingsPage() {
     discoverySourcePref: "balanced",
     isAdmin: false,
   });
-  const [studios, setStudios] = useState<Studio[]>([]);
-  const [studioRatings, setStudioRatings] = useState<
-    Record<string, { rating: number | null; notHeardOf: boolean }>
-  >({});
   const [settingsSaved, setSettingsSaved] = useState(false);
+  const [algorithmSettings, setAlgorithmSettings] = useState<AlgorithmSettings>(
+    DEFAULT_ALGORITHM_SETTINGS
+  );
+  const [algorithmSaved, setAlgorithmSaved] = useState(false);
+  const [algorithmSaving, setAlgorithmSaving] = useState(false);
 
   const [forms, setForms] = useState<
     Record<string, { baseUrl: string; apiKey: string }>
@@ -64,27 +169,34 @@ export default function SettingsPage() {
   useEffect(() => {
     if (status !== "authenticated") return;
 
-    // Load all settings data
     Promise.all([
-      fetch("/api/integrations").then((r) => r.json()),
-      fetch("/api/settings").then((r) => r.json()),
-      fetch("/api/ratings/studios").then((r) => r.json()),
-    ]).then(([intData, settingsData, studioData]) => {
-      if (Array.isArray(intData)) {
-        setIntegrations(intData);
-        for (const i of intData) {
+      fetch("/api/integrations")
+        .then((response) => (response.ok ? response.json() : []))
+        .catch(() => []),
+      fetch("/api/settings").then((response) => response.json()),
+      fetch("/api/settings/algorithm")
+        .then((response) => (response.ok ? response.json() : null))
+        .catch(() => null),
+    ]).then(([integrationData, userSettingsData, algorithmData]) => {
+      if (Array.isArray(integrationData)) {
+        setIntegrations(integrationData);
+        for (const integration of integrationData) {
           setForms((prev) => ({
             ...prev,
-            [i.service]: { baseUrl: i.baseUrl || "", apiKey: "" },
+            [integration.service]: {
+              baseUrl: integration.baseUrl || "",
+              apiKey: "",
+            },
           }));
         }
       }
-      if (settingsData && !settingsData.error) {
-        setUserSettings(settingsData);
+
+      if (userSettingsData && !userSettingsData.error) {
+        setUserSettings(userSettingsData);
       }
-      if (studioData?.studios) {
-        setStudios(studioData.studios);
-        setStudioRatings(studioData.ratings || {});
+
+      if (algorithmData && typeof algorithmData === "object") {
+        setAlgorithmSettings(algorithmData as AlgorithmSettings);
       }
     });
   }, [status]);
@@ -92,6 +204,7 @@ export default function SettingsPage() {
   const saveIntegration = async (service: string) => {
     setSaving(service);
     const form = forms[service];
+
     await fetch("/api/integrations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -102,6 +215,7 @@ export default function SettingsPage() {
         enabled: true,
       }),
     });
+
     setSaving(null);
     setSaved(service);
     setTimeout(() => setSaved(null), 2000);
@@ -120,21 +234,38 @@ export default function SettingsPage() {
     setTimeout(() => setSettingsSaved(false), 2000);
   };
 
-  const rateStudio = async (
-    studioId: string,
-    rating: number | null,
-    notHeardOf: boolean = false
-  ) => {
-    setStudioRatings((prev) => ({
-      ...prev,
-      [studioId]: { rating, notHeardOf },
-    }));
-
-    await fetch("/api/ratings/studios", {
+  const saveAlgorithmTuning = async () => {
+    setAlgorithmSaving(true);
+    const response = await fetch("/api/settings/algorithm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ studioId, rating, notHeardOf }),
+      body: JSON.stringify(algorithmSettings),
     });
+
+    if (response.ok) {
+      const savedSettings = await response.json();
+      setAlgorithmSettings(savedSettings);
+      setAlgorithmSaved(true);
+      setTimeout(() => setAlgorithmSaved(false), 2000);
+    }
+
+    setAlgorithmSaving(false);
+  };
+
+  const resetAlgorithmTuning = async () => {
+    setAlgorithmSaving(true);
+    const response = await fetch("/api/settings/algorithm", {
+      method: "DELETE",
+    });
+
+    if (response.ok) {
+      const resetSettings = await response.json();
+      setAlgorithmSettings(resetSettings);
+      setAlgorithmSaved(true);
+      setTimeout(() => setAlgorithmSaved(false), 2000);
+    }
+
+    setAlgorithmSaving(false);
   };
 
   const handleLetterboxdImport = async () => {
@@ -197,20 +328,18 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
         <p className="text-sm text-muted mt-1">
-          Configure your preferences, integrations, and import data
+          Configure preferences, integrations, imports, and recommendation behavior.
         </p>
       </div>
 
-      {/* Discovery Settings */}
       <div className="bg-card border border-border rounded-xl p-4 space-y-4">
         <div>
           <h3 className="text-sm font-semibold">Discovery Preferences</h3>
           <p className="text-[11px] text-muted mt-0.5">
-            Control how movies are recommended to you
+            Control how strongly suggestions favor known taste vs new discovery.
           </p>
         </div>
 
-        {/* Exploration vs Deepening slider */}
         <div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs text-muted">Familiar favorites</span>
@@ -241,7 +370,6 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Discovery source preference */}
         <div>
           <label className="text-xs font-medium text-foreground/80 mb-1.5 block">
             Preferred discovery source
@@ -253,22 +381,22 @@ export default function SettingsPage() {
               { value: "popular", label: "Popular" },
               { value: "top_rated", label: "Top Rated" },
               { value: "new_releases", label: "New Releases" },
-            ].map((opt) => (
+            ].map((option) => (
               <button
-                key={opt.value}
+                key={option.value}
                 onClick={() =>
                   setUserSettings((prev) => ({
                     ...prev,
-                    discoverySourcePref: opt.value,
+                    discoverySourcePref: option.value,
                   }))
                 }
                 className={`text-xs p-2 rounded-lg border transition-all ${
-                  userSettings.discoverySourcePref === opt.value
+                  userSettings.discoverySourcePref === option.value
                     ? "border-accent bg-accent/5 text-accent font-medium"
                     : "border-border bg-card-hover text-muted"
                 }`}
               >
-                {opt.label}
+                {option.label}
               </button>
             ))}
           </div>
@@ -279,68 +407,368 @@ export default function SettingsPage() {
             Save Preferences
           </Button>
           {settingsSaved && (
-            <span className="text-xs text-success animate-slide-up">
-              Saved!
-            </span>
+            <span className="text-xs text-success animate-slide-up">Saved!</span>
           )}
         </div>
       </div>
 
-      {/* Studio Ratings */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
+      {userSettings.isAdmin && (
+        <div className="bg-card border border-border rounded-xl p-4 space-y-5">
           <div>
-            <h2 className="text-lg font-semibold">Rate Studios</h2>
-            <p className="text-[11px] text-muted">
-              How much do you enjoy movies from these studios?
+            <h3 className="text-sm font-semibold">Algorithm Tuning (Admin)</h3>
+            <p className="text-[11px] text-muted mt-0.5">
+              These values are score multipliers, not direct sampling probabilities. Higher values increase that signal&apos;s influence in ranking.
             </p>
           </div>
-          <Link
-            href="/preferences"
-            className="text-xs text-accent hover:underline"
-          >
-            Rate movies
-          </Link>
-        </div>
 
-        <div className="space-y-2">
-          {studios.map((studio) => {
-            const r = studioRatings[studio.id];
-            return (
-              <div
-                key={studio.id}
-                className="bg-card border border-border rounded-xl p-3 flex items-center justify-between gap-3"
-              >
-                <span className="text-sm font-medium">{studio.name}</span>
-                <div className="flex items-center gap-2">
-                  <StarRating
-                    rating={r?.rating ?? null}
-                    onChange={(rating) => rateStudio(studio.id, rating)}
-                    size="sm"
-                  />
-                  <button
-                    onClick={() => rateStudio(studio.id, null, true)}
-                    className={`text-[10px] px-2 py-1 rounded-lg transition-all whitespace-nowrap ${
-                      r?.notHeardOf
-                        ? "bg-warning/15 text-warning border border-warning/30"
-                        : "bg-card-hover text-muted border border-border"
-                    }`}
-                  >
-                    {r?.notHeardOf ? "Unknown" : "?"}
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+          <div className="space-y-4">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Movie Discovery</h4>
+            <SliderRow
+              label="Preference Weight"
+              description="How strongly existing household preferences (genres, people, studios, prior movie ratings) influence movie ranking."
+              min={0}
+              max={3}
+              step={0.05}
+              value={algorithmSettings.movieDiscovery.preferenceWeight}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  movieDiscovery: { ...prev.movieDiscovery, preferenceWeight: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Discovery Weight"
+              description="How strongly novelty, quality, and source signals influence movie ranking."
+              min={0}
+              max={3}
+              step={0.05}
+              value={algorithmSettings.movieDiscovery.discoveryWeight}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  movieDiscovery: { ...prev.movieDiscovery, discoveryWeight: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Novelty Influence"
+              description="Weight for surfacing cast/director/studio combinations the user has rated less often."
+              min={0}
+              max={2}
+              step={0.05}
+              value={algorithmSettings.movieDiscovery.noveltyInfluence}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  movieDiscovery: { ...prev.movieDiscovery, noveltyInfluence: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Quality Influence"
+              description="Weight for movie quality/popularity signals (vote average and popularity)."
+              min={0}
+              max={2}
+              step={0.05}
+              value={algorithmSettings.movieDiscovery.qualityInfluence}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  movieDiscovery: { ...prev.movieDiscovery, qualityInfluence: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Source Influence"
+              description="Weight for source preference alignment (trending/popular/box office/library)."
+              min={0}
+              max={2}
+              step={0.05}
+              value={algorithmSettings.movieDiscovery.sourceInfluence}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  movieDiscovery: { ...prev.movieDiscovery, sourceInfluence: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Availability Bonus"
+              description="Extra score added when a movie is already available in Radarr or Plex."
+              min={-1}
+              max={1}
+              step={0.01}
+              value={algorithmSettings.movieDiscovery.availabilityBonus}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  movieDiscovery: { ...prev.movieDiscovery, availabilityBonus: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Dislike Penalty"
+              description="Penalty applied per strong household dislike (rating 2 or below). More negative means stronger suppression."
+              min={-1}
+              max={0}
+              step={0.01}
+              value={algorithmSettings.movieDiscovery.dislikePenalty}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  movieDiscovery: { ...prev.movieDiscovery, dislikePenalty: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Random Jitter"
+              description="Small random tie-breaker in movie ranking. Higher values increase variety run-to-run."
+              min={0}
+              max={1}
+              step={0.01}
+              value={algorithmSettings.movieDiscovery.randomJitter}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  movieDiscovery: { ...prev.movieDiscovery, randomJitter: value },
+                }))
+              }
+            />
+          </div>
 
-      {/* Letterboxd Import */}
+          <div className="space-y-4">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">People Discovery (Actors/Directors)</h4>
+            <SliderRow
+              label="Preference Weight"
+              description="How strongly known people-affinity and related movie affinity affect actor/director ranking."
+              min={0}
+              max={3}
+              step={0.05}
+              value={algorithmSettings.peopleDiscovery.preferenceWeight}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  peopleDiscovery: { ...prev.peopleDiscovery, preferenceWeight: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Discovery Weight"
+              description="How strongly freshness/prominence signals affect actor/director ranking."
+              min={0}
+              max={3}
+              step={0.05}
+              value={algorithmSettings.peopleDiscovery.discoveryWeight}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  peopleDiscovery: { ...prev.peopleDiscovery, discoveryWeight: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Random Jitter"
+              description="Random tie-breaker for actor/director suggestions."
+              min={0}
+              max={1}
+              step={0.01}
+              value={algorithmSettings.peopleDiscovery.randomJitter}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  peopleDiscovery: { ...prev.peopleDiscovery, randomJitter: value },
+                }))
+              }
+            />
+          </div>
+
+          <div className="space-y-4">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Studio Discovery</h4>
+            <SliderRow
+              label="Preference Weight"
+              description="How strongly known studio affinity and related movie affinity affect studio ranking."
+              min={0}
+              max={3}
+              step={0.05}
+              value={algorithmSettings.studioDiscovery.preferenceWeight}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  studioDiscovery: { ...prev.studioDiscovery, preferenceWeight: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Discovery Weight"
+              description="How strongly studio novelty/prominence affects studio ranking."
+              min={0}
+              max={3}
+              step={0.05}
+              value={algorithmSettings.studioDiscovery.discoveryWeight}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  studioDiscovery: { ...prev.studioDiscovery, discoveryWeight: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Random Jitter"
+              description="Random tie-breaker for studio suggestions."
+              min={0}
+              max={1}
+              step={0.01}
+              value={algorithmSettings.studioDiscovery.randomJitter}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  studioDiscovery: { ...prev.studioDiscovery, randomJitter: value },
+                }))
+              }
+            />
+          </div>
+
+          <div className="space-y-4">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Movie Night Matching</h4>
+            <SliderRow
+              label="Preference Weight"
+              description="How strongly background + tonight preference signals (genre/era/people/studio/movie history) drive ranking."
+              min={0}
+              max={3}
+              step={0.05}
+              value={algorithmSettings.sessionRecommendation.preferenceWeight}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  sessionRecommendation: { ...prev.sessionRecommendation, preferenceWeight: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Discovery Weight"
+              description="How strongly novelty/quality signals drive movie-night ranking."
+              min={0}
+              max={3}
+              step={0.05}
+              value={algorithmSettings.sessionRecommendation.discoveryWeight}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  sessionRecommendation: { ...prev.sessionRecommendation, discoveryWeight: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Radarr Available Boost"
+              description="Bonus when a candidate is already available in Radarr."
+              min={-1}
+              max={2}
+              step={0.01}
+              value={algorithmSettings.sessionRecommendation.radarrAvailableBoost}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  sessionRecommendation: { ...prev.sessionRecommendation, radarrAvailableBoost: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Radarr Monitored Boost"
+              description="Bonus when a candidate is monitored in Radarr (priority over non-monitored)."
+              min={-1}
+              max={2}
+              step={0.01}
+              value={algorithmSettings.sessionRecommendation.radarrMonitoredBoost}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  sessionRecommendation: { ...prev.sessionRecommendation, radarrMonitoredBoost: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Plex Available Boost"
+              description="Bonus when a candidate is directly available on Plex."
+              min={-1}
+              max={2}
+              step={0.01}
+              value={algorithmSettings.sessionRecommendation.plexAvailableBoost}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  sessionRecommendation: { ...prev.sessionRecommendation, plexAvailableBoost: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Mixed Seen Penalty"
+              description="Penalty when some session participants have already seen the movie and others have not."
+              min={-1}
+              max={0}
+              step={0.01}
+              value={algorithmSettings.sessionRecommendation.mixedSeenPenalty}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  sessionRecommendation: { ...prev.sessionRecommendation, mixedSeenPenalty: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Random Jitter Base"
+              description="Base random tie-breaker for movie-night ranking regardless of exploration factor."
+              min={0}
+              max={1}
+              step={0.01}
+              value={algorithmSettings.sessionRecommendation.randomJitterBase}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  sessionRecommendation: { ...prev.sessionRecommendation, randomJitterBase: value },
+                }))
+              }
+            />
+            <SliderRow
+              label="Random Jitter Exploration"
+              description="Additional random tie-breaker scaled by session exploration factor."
+              min={0}
+              max={1}
+              step={0.01}
+              value={algorithmSettings.sessionRecommendation.randomJitterExploration}
+              onChange={(value) =>
+                setAlgorithmSettings((prev) => ({
+                  ...prev,
+                  sessionRecommendation: { ...prev.sessionRecommendation, randomJitterExploration: value },
+                }))
+              }
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={saveAlgorithmTuning} loading={algorithmSaving}>
+              Save Algorithm Tuning
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={resetAlgorithmTuning}
+              loading={algorithmSaving}
+            >
+              Reset Defaults
+            </Button>
+            {algorithmSaved && (
+              <span className="text-xs text-success animate-slide-up">Saved!</span>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="bg-card border border-border rounded-xl p-4 space-y-3">
         <div>
           <h3 className="text-sm font-semibold">Letterboxd Import</h3>
           <p className="text-[11px] text-muted mt-0.5">
-            Export your data from Letterboxd and upload the ratings CSV
+            Export your data from Letterboxd and upload the ratings CSV.
           </p>
         </div>
 
@@ -350,9 +778,7 @@ export default function SettingsPage() {
               type="file"
               accept=".csv"
               className="hidden"
-              onChange={(e) =>
-                setLetterboxdFile(e.target.files?.[0] || null)
-              }
+              onChange={(e) => setLetterboxdFile(e.target.files?.[0] || null)}
             />
             <div className="bg-card-hover border border-border rounded-lg px-3 py-2 text-sm text-muted cursor-pointer hover:border-accent/30 transition-all truncate">
               {letterboxdFile ? letterboxdFile.name : "Choose CSV file..."}
@@ -369,13 +795,10 @@ export default function SettingsPage() {
         </div>
 
         {importStatus && (
-          <p className="text-xs text-success animate-slide-up">
-            {importStatus}
-          </p>
+          <p className="text-xs text-success animate-slide-up">{importStatus}</p>
         )}
       </div>
 
-      {/* Integrations - Admin only */}
       {userSettings.isAdmin && (
         <div className="space-y-4">
           <div>
@@ -386,13 +809,8 @@ export default function SettingsPage() {
           </div>
 
           {integrationConfigs.map((config) => {
-            const existing = integrations.find(
-              (i) => i.service === config.service
-            );
-            const form = forms[config.service] || {
-              baseUrl: "",
-              apiKey: "",
-            };
+            const existing = integrations.find((integration) => integration.service === config.service);
+            const form = forms[config.service] || { baseUrl: "", apiKey: "" };
 
             return (
               <div
@@ -402,9 +820,7 @@ export default function SettingsPage() {
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-sm font-semibold">{config.name}</h3>
-                    <p className="text-[11px] text-muted mt-0.5">
-                      {config.desc}
-                    </p>
+                    <p className="text-[11px] text-muted mt-0.5">{config.desc}</p>
                   </div>
                   {existing?.enabled && (
                     <span className="text-[10px] bg-success/15 text-success px-2 py-0.5 rounded-full font-medium">
@@ -453,9 +869,7 @@ export default function SettingsPage() {
                     {existing ? "Update" : "Connect"}
                   </Button>
                   {saved === config.service && (
-                    <span className="text-xs text-success animate-slide-up">
-                      Saved!
-                    </span>
+                    <span className="text-xs text-success animate-slide-up">Saved!</span>
                   )}
                 </div>
               </div>
@@ -467,7 +881,7 @@ export default function SettingsPage() {
       {!userSettings.isAdmin && (
         <div className="bg-card border border-border rounded-xl p-4 text-center">
           <p className="text-xs text-muted">
-            Integration settings are only available to household admins.
+            Integration and algorithm tuning settings are only available to household admins.
           </p>
         </div>
       )}

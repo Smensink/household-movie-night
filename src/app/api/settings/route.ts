@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { isUserHouseholdAdmin } from "@/lib/household-admin";
 
 const ALLOWED_DISCOVERY_SOURCE_PREFS = new Set([
   "trending",
@@ -26,14 +27,9 @@ export async function GET() {
     });
   }
 
-  // Check if user is admin of any household
-  const adminMembership = await prisma.householdMember.findFirst({
-    where: { userId: session.user.id, role: "admin" },
-  });
-
   return NextResponse.json({
     ...settings,
-    isAdmin: !!adminMembership,
+    isAdmin: await isUserHouseholdAdmin(session.user.id),
   });
 }
 

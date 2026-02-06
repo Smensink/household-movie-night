@@ -19,7 +19,8 @@ export default function PreferencesPage() {
   const [rankings, setRankings] = useState<Record<string, number>>({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [ratingCount, setRatingCount] = useState(0);
+  const [movieRatingCount, setMovieRatingCount] = useState(0);
+  const [studioRatingCount, setStudioRatingCount] = useState(0);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -33,9 +34,19 @@ export default function PreferencesPage() {
           setGenres(data.genres || []);
           setRankings(data.rankings || {});
         });
+
       fetch("/api/ratings")
         .then((r) => r.json())
-        .then((data) => setRatingCount(Array.isArray(data) ? data.length : 0));
+        .then((data) =>
+          setMovieRatingCount(Array.isArray(data) ? data.length : 0)
+        );
+
+      fetch("/api/ratings/studios")
+        .then((r) => r.json())
+        .then((data) => {
+          const ratings = data?.ratings || {};
+          setStudioRatingCount(Object.keys(ratings).length);
+        });
     }
   }, [status]);
 
@@ -66,32 +77,52 @@ export default function PreferencesPage() {
       <div>
         <h1 className="text-2xl font-bold">Your Preferences</h1>
         <p className="text-sm text-muted mt-1">
-          Help us find movies you&apos;ll love
+          Help us find movies you&apos;ll love.
         </p>
       </div>
 
       {saved && (
         <div className="bg-success/10 border border-success/20 text-success text-sm px-4 py-2 rounded-xl animate-slide-up">
-          Rankings saved!
+          Rankings saved.
         </div>
       )}
 
-      {/* Quick stats */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <div className="bg-card border border-border rounded-xl p-4">
-          <div className="text-2xl font-bold text-accent">{ratingCount}</div>
+          <div className="text-2xl font-bold text-accent">{movieRatingCount}</div>
           <div className="text-xs text-muted">Movies rated</div>
         </div>
         <div className="bg-card border border-border rounded-xl p-4">
-          <div className="text-2xl font-bold text-accent">
-            {Object.keys(rankings).length}
-          </div>
+          <div className="text-2xl font-bold text-accent">{Object.keys(rankings).length}</div>
           <div className="text-xs text-muted">Genres ranked</div>
+        </div>
+        <div className="bg-card border border-border rounded-xl p-4 col-span-2 sm:col-span-1">
+          <div className="text-2xl font-bold text-accent">{studioRatingCount}</div>
+          <div className="text-xs text-muted">Studios rated</div>
         </div>
       </div>
 
-      {/* Nav links to sub-sections */}
       <div className="space-y-2">
+        <Link
+          href="/preferences/genres"
+          className="flex items-center justify-between bg-card border border-border rounded-xl p-4 hover:border-accent/30 transition-all"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-accent-soft rounded-xl flex items-center justify-center">
+              <svg className="w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3l14 9-14 9V3z" />
+              </svg>
+            </div>
+            <div>
+              <div className="text-sm font-semibold">Rank Genres</div>
+              <div className="text-[11px] text-muted">Set your overall genre order</div>
+            </div>
+          </div>
+          <svg className="w-5 h-5 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
         <Link
           href="/preferences/movies"
           className="flex items-center justify-between bg-card border border-border rounded-xl p-4 hover:border-accent/30 transition-all"
@@ -124,7 +155,27 @@ export default function PreferencesPage() {
             </div>
             <div>
               <div className="text-sm font-semibold">Rate People</div>
-              <div className="text-[11px] text-muted">Rate actors & directors</div>
+              <div className="text-[11px] text-muted">Rate actors and directors</div>
+            </div>
+          </div>
+          <svg className="w-5 h-5 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
+        <Link
+          href="/preferences/studios"
+          className="flex items-center justify-between bg-card border border-border rounded-xl p-4 hover:border-accent/30 transition-all"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-accent-soft rounded-xl flex items-center justify-center">
+              <svg className="w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7h18M5 7v11a2 2 0 002 2h10a2 2 0 002-2V7M9 11h6M9 15h4" />
+              </svg>
+            </div>
+            <div>
+              <div className="text-sm font-semibold">Rate Studios</div>
+              <div className="text-[11px] text-muted">Rate production companies</div>
             </div>
           </div>
           <svg className="w-5 h-5 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -133,14 +184,18 @@ export default function PreferencesPage() {
         </Link>
       </div>
 
-      {/* Genre Rankings */}
-      {genres.length > 0 && (
+      {genres.length > 0 ? (
         <GenreRanker
           genres={genres}
           initialRankings={rankings}
           onSave={handleSaveGenres}
           saving={saving}
+          title="Quick Genre Ranking"
         />
+      ) : (
+        <div className="bg-card border border-border rounded-xl p-4 text-sm text-muted">
+          Genres are loading. You can also use the <Link href="/preferences/genres" className="text-accent hover:underline">full genre ranking page</Link>.
+        </div>
       )}
     </div>
   );

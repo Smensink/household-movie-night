@@ -3,6 +3,36 @@ import { prisma } from "@/lib/prisma";
 import { getRecommendationsForSession } from "@/lib/recommendation";
 import { resolveSessionActor } from "@/lib/session-access";
 
+const sessionMovieInclude = {
+  movie: {
+    include: {
+      genres: { include: { genre: true } },
+      plexAvailability: true,
+      radarrSync: true,
+      cast: {
+        include: { person: { select: { name: true } } },
+        orderBy: { castOrder: "asc" as const },
+        take: 3,
+      },
+      crew: {
+        where: { job: "Director" },
+        include: { person: { select: { name: true } } },
+        take: 3,
+      },
+      studios: {
+        include: { studio: { select: { name: true } } },
+        take: 2,
+      },
+      ratings: {
+        select: { hasSeen: true },
+      },
+    },
+  },
+  votes: {
+    include: { user: { select: { id: true, name: true } } },
+  },
+};
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -17,15 +47,16 @@ export async function GET(
   const sessionMovies = await prisma.sessionMovie.findMany({
     where: { sessionId },
     include: {
+      ...sessionMovieInclude,
       movie: {
+        ...sessionMovieInclude.movie,
         include: {
-          genres: { include: { genre: true } },
-          plexAvailability: true,
-          radarrSync: true,
+          ...sessionMovieInclude.movie.include,
+          ratings: {
+            where: { userId: actor.userId },
+            select: { hasSeen: true },
+          },
         },
-      },
-      votes: {
-        include: { user: { select: { id: true, name: true } } },
       },
     },
   });
@@ -73,11 +104,15 @@ export async function POST(
       },
       update: {},
       include: {
+        ...sessionMovieInclude,
         movie: {
+          ...sessionMovieInclude.movie,
           include: {
-            genres: { include: { genre: true } },
-            plexAvailability: true,
-            radarrSync: true,
+            ...sessionMovieInclude.movie.include,
+            ratings: {
+              where: { userId: actor.userId },
+              select: { hasSeen: true },
+            },
           },
         },
       },

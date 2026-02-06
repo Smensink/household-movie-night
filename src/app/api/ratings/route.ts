@@ -66,3 +66,24 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json(movieRating);
 }
+
+export async function DELETE(req: NextRequest) {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const movieId = req.nextUrl.searchParams.get("movieId")?.trim() || "";
+  if (!movieId) {
+    return NextResponse.json({ error: "Movie ID required" }, { status: 400 });
+  }
+
+  await prisma.movieRating.deleteMany({
+    where: {
+      userId: session.user.id,
+      movieId,
+    },
+  });
+
+  return NextResponse.json({ success: true });
+}

@@ -25,6 +25,9 @@ model User {
   studioRatings       StudioRating[]
   sessionParticipants SessionParticipant[]
   sessionVotes        SessionVote[]
+  createdSessions     MovieNightSession[] @relation("SessionCreator")
+  createdInvites      HouseholdInvite[]   @relation("HouseholdInviteCreator")
+  claimedInvites      HouseholdInvite[]   @relation("HouseholdInviteClaimer")
   letterboxdImports   LetterboxdImport[]
   settings            UserSettings?
 }
@@ -38,6 +41,7 @@ model Household {
 
   members  HouseholdMember[]
   sessions MovieNightSession[]
+  invites  HouseholdInvite[]
 }
 
 model HouseholdMember {
@@ -195,6 +199,7 @@ model DirectorRating {
 model MovieNightSession {
   id              String   @id @default(cuid())
   householdId     String
+  createdByUserId String?
   status          String   @default("gathering")
   guestInviteCode String   @unique @default(cuid())
   decidedMovieId  String?
@@ -202,6 +207,7 @@ model MovieNightSession {
   updatedAt       DateTime @updatedAt
 
   household        Household              @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  createdBy        User?                  @relation("SessionCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   participants     SessionParticipant[]
   genrePreferences SessionGenrePreference[]
   movies           SessionMovie[]
@@ -212,12 +218,34 @@ model SessionParticipant {
   sessionId     String
   userId        String
   eraPreference String?
+  minReleaseYear Int?
+  maxReleaseYear Int?
   isPresent     Boolean @default(true)
 
   session MovieNightSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, userId])
+}
+
+model HouseholdInvite {
+  id              String   @id @default(cuid())
+  householdId     String
+  createdByUserId String
+  claimedByUserId String?
+  token           String   @unique @default(cuid())
+  displayName     String?
+  email           String?
+  role            String   @default("member")
+  status          String   @default("pending")
+  expiresAt       DateTime?
+  claimedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  createdBy User      @relation("HouseholdInviteCreator", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  claimedBy User?     @relation("HouseholdInviteClaimer", fields: [claimedByUserId], references: [id], onDelete: SetNull)
 }
 
 model SessionGenrePreference {

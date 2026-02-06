@@ -19,8 +19,22 @@ interface Session {
   id: string;
   status: string;
   createdAt: string;
+  guestInviteCode: string;
+  canManage: boolean;
+  isParticipant: boolean;
   household: { name: string };
   participants: { user: { name: string } }[];
+}
+
+interface HouseholdInvite {
+  id: string;
+  token: string;
+  status: string;
+  displayName: string | null;
+  email: string | null;
+  createdAt: string;
+  household: { id: string; name: string };
+  invitePath: string;
 }
 
 export default function DashboardPage() {
@@ -32,6 +46,12 @@ export default function DashboardPage() {
   const [showJoin, setShowJoin] = useState(false);
   const [newName, setNewName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
+  const [householdInvites, setHouseholdInvites] = useState<HouseholdInvite[]>([]);
+  const [inviteHouseholdId, setInviteHouseholdId] = useState("");
+  const [inviteDisplayName, setInviteDisplayName] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [createdInviteLink, setCreatedInviteLink] = useState("");
+  const [creatingInvite, setCreatingInvite] = useState(false);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -40,10 +60,31 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (status === "authenticated") {
-      fetch("/api/household").then((r) => r.json()).then(setHouseholds);
-      fetch("/api/sessions").then((r) => r.json()).then(setSessions);
+      fetch("/api/household")
+        .then((response) => response.json())
+        .then((data) => {
+          setHouseholds(data);
+          const firstAdminHousehold = data.find(
+            (household: Household) => household.role === "admin"
+          );
+          if (firstAdminHousehold) {
+            setInviteHouseholdId(firstAdminHousehold.id);
+          }
+        });
+      fetch("/api/sessions").then((response) => response.json()).then(setSessions);
+      fetch("/api/household/invites")
+        .then((response) => (response.ok ? response.json() : []))
+        .then((data) => setHouseholdInvites(Array.isArray(data) ? data : []));
     }
   }, [status]);
+
+  const refreshHouseholds = () =>
+    fetch("/api/household").then((response) => response.json()).then(setHouseholds);
+
+  const refreshInvites = () =>
+    fetch("/api/household/invites")
+      .then((response) => (response.ok ? response.json() : []))
+      .then((data) => setHouseholdInvites(Array.isArray(data) ? data : []));
 
   const createHousehold = async () => {
     if (!newName.trim()) return;
@@ -56,7 +97,7 @@ export default function DashboardPage() {
     if (res.ok) {
       setShowCreate(false);
       setNewName("");
-      fetch("/api/household").then((r) => r.json()).then(setHouseholds);
+      await refreshHouseholds();
     }
     setLoading(false);
   };
@@ -72,10 +113,44 @@ export default function DashboardPage() {
     if (res.ok) {
       setShowJoin(false);
       setInviteCode("");
-      fetch("/api/household").then((r) => r.json()).then(setHouseholds);
+      await refreshHouseholds();
     }
     setLoading(false);
   };
+
+  const createHouseholdInvite = async () => {
+    if (!inviteHouseholdId) return;
+    setCreatingInvite(true);
+    setCreatedInviteLink("");
+
+    const response = await fetch("/api/household/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        householdId: inviteHouseholdId,
+        displayName: inviteDisplayName || undefined,
+        email: inviteEmail || undefined,
+      }),
+    });
+
+    if (response.ok) {
+      const invite = await response.json();
+      const absoluteLink = `${window.location.origin}${invite.invitePath}`;
+      setCreatedInviteLink(absoluteLink);
+      setInviteDisplayName("");
+      setInviteEmail("");
+      await refreshInvites();
+    }
+
+    setCreatingInvite(false);
+  };
+
+  const activeSessions = sessions.filter(
+    (movieNightSession) =>
+      movieNightSession.status === "gathering" ||
+      movieNightSession.status === "voting"
+  );
+  const adminHouseholds = households.filter((household) => household.role === "admin");
 
   if (status === "loading") {
     return (
@@ -128,6 +203,39 @@ export default function DashboardPage() {
           <p className="text-[11px] text-accent/70 mt-0.5">Start a session</p>
         </Link>
       </div>
+
+      {activeSessions.length > 0 && (
+        <div className="bg-card border border-accent/30 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-foreground">Active Movie Nights</h2>
+            <span className="text-[10px] bg-accent-soft text-accent px-2 py-0.5 rounded-full">
+              {activeSessions.length} live
+            </span>
+          </div>
+          <div className="space-y-2">
+            {activeSessions.map((movieNightSession) => (
+              <Link
+                key={movieNightSession.id}
+                href={`/session/${movieNightSession.id}`}
+                className="block bg-background/40 border border-border rounded-xl p-3 hover:border-accent/30 transition-all"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">{movieNightSession.household.name}</div>
+                    <p className="text-[11px] text-muted mt-0.5">
+                      Session token:{" "}
+                      <code className="text-foreground">{movieNightSession.guestInviteCode}</code>
+                    </p>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-warning/15 text-warning">
+                    {movieNightSession.status}
+                  </span>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Households */}
       <div>
@@ -223,6 +331,108 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+
+      {adminHouseholds.length > 0 && (
+        <div className="space-y-3">
+          <div>
+            <h2 className="text-lg font-semibold">Household Account Invites</h2>
+            <p className="text-xs text-muted">
+              Create an invite link for a household member to set up their login.
+            </p>
+          </div>
+          <div className="bg-card border border-border rounded-xl p-4 space-y-3">
+            {adminHouseholds.length > 1 && (
+              <div>
+                <label className="text-xs text-muted mb-1 block">Household</label>
+                <select
+                  value={inviteHouseholdId}
+                  onChange={(event) => setInviteHouseholdId(event.target.value)}
+                  className="w-full bg-card-hover border border-border rounded-xl px-3 py-2 text-sm"
+                >
+                  {adminHouseholds.map((household) => (
+                    <option key={household.id} value={household.id}>
+                      {household.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <Input
+              placeholder="Display name (optional)"
+              value={inviteDisplayName}
+              onChange={(event) => setInviteDisplayName(event.target.value)}
+            />
+            <Input
+              placeholder="Email (optional)"
+              value={inviteEmail}
+              onChange={(event) => setInviteEmail(event.target.value)}
+              type="email"
+            />
+
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                onClick={createHouseholdInvite}
+                loading={creatingInvite}
+                disabled={!inviteHouseholdId}
+              >
+                Create Invite Link
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => void refreshInvites()}>
+                Refresh
+              </Button>
+            </div>
+
+            {createdInviteLink && (
+              <div className="bg-background/40 border border-border rounded-xl p-3">
+                <p className="text-[11px] text-muted mb-1">Invite link</p>
+                <div className="flex items-center gap-2">
+                  <code className="text-[11px] text-foreground truncate flex-1">
+                    {createdInviteLink}
+                  </code>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(createdInviteLink)}
+                    className="text-xs text-accent hover:underline"
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {householdInvites.length > 0 && (
+              <div className="space-y-2 pt-1">
+                {householdInvites.slice(0, 8).map((invite) => (
+                  <div
+                    key={invite.id}
+                    className="bg-background/30 border border-border rounded-xl px-3 py-2 flex items-center gap-2"
+                  >
+                    <div className="flex-1">
+                      <div className="text-xs font-medium">
+                        {invite.displayName || invite.email || "Household member"}
+                      </div>
+                      <p className="text-[11px] text-muted">
+                        {invite.household.name} - {invite.status}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() =>
+                        navigator.clipboard.writeText(
+                          `${window.location.origin}${invite.invitePath}`
+                        )
+                      }
+                      className="text-xs text-accent hover:underline"
+                    >
+                      Copy Link
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Recent Sessions */}
       {sessions.length > 0 && (

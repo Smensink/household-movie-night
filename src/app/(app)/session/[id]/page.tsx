@@ -25,6 +25,10 @@ interface SessionMovie {
     genres: { genre: { name: string } }[];
     plexAvailability?: { available: boolean } | null;
     radarrSync?: { available: boolean } | null;
+    cast?: { person: { name: string } }[];
+    crew?: { job: string; person: { name: string } }[];
+    studios?: { studio: { name: string } }[];
+    ratings?: { hasSeen: boolean }[];
   };
   votes: {
     userId: string;
@@ -39,7 +43,13 @@ interface SessionData {
   status: string;
   guestInviteCode: string;
   decidedMovieId: string | null;
-  participants: { userId: string; user: { name: string } }[];
+  canManage?: boolean;
+  participants: {
+    userId: string;
+    minReleaseYear?: number | null;
+    maxReleaseYear?: number | null;
+    user: { name: string };
+  }[];
 }
 
 type Step = "preferences" | "voting" | "decided";
@@ -52,6 +62,8 @@ function calculateDecisionScore(votes: SessionMovie["votes"]): number {
 }
 
 export default function SessionPage() {
+  const YEAR_MIN = 1950;
+  const YEAR_MAX = new Date().getFullYear() + 1;
   const { data: session, status: authStatus } = useSession();
   const router = useRouter();
   const params = useParams();
@@ -61,7 +73,8 @@ export default function SessionPage() {
   const [genres, setGenres] = useState<Genre[]>([]);
   const [sessionMovies, setSessionMovies] = useState<SessionMovie[]>([]);
   const [step, setStep] = useState<Step>("preferences");
-  const [eraPreference, setEraPreference] = useState<string | null>(null);
+  const [minReleaseYear, setMinReleaseYear] = useState(1990);
+  const [maxReleaseYear, setMaxReleaseYear] = useState(new Date().getFullYear());
   const [votes, setVotes] = useState<
     Map<string, { rating: number; willingToRewatch: boolean }>
   >(new Map());
@@ -76,6 +89,7 @@ export default function SessionPage() {
     score: number;
   } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [endingSession, setEndingSession] = useState(false);
   const guestAuth = useMemo(() => {
     if (typeof window === "undefined") {
       return { ready: false, token: null as string | null, userId: null as string | null };
@@ -133,6 +147,18 @@ export default function SessionPage() {
       setGenres(genreData.genres || []);
       setSessionMovies(parsedMovies);
       if (activeUserId) {
+        const participant = sess?.participants?.find(
+          (candidate: { userId: string }) => candidate.userId === activeUserId
+        );
+        if (
+          participant &&
+          typeof participant.minReleaseYear === "number" &&
+          typeof participant.maxReleaseYear === "number"
+        ) {
+          setMinReleaseYear(participant.minReleaseYear);
+          setMaxReleaseYear(participant.maxReleaseYear);
+        }
+
         const existingVotes = new Map<
           string,
           { rating: number; willingToRewatch: boolean }
@@ -185,7 +211,11 @@ export default function SessionPage() {
     await fetch(`/api/sessions/${sessionId}/preferences`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ eraPreference, genreRankings }),
+      body: JSON.stringify({
+        minReleaseYear,
+        maxReleaseYear,
+        genreRankings,
+      }),
     });
   };
 
@@ -301,6 +331,24 @@ export default function SessionPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const endSession = async () => {
+    if (!sessionData?.canManage) return;
+    const confirmed = window.confirm(
+      "End this movie night session now? Participants will stop being able to vote."
+    );
+    if (!confirmed) return;
+
+    setEndingSession(true);
+    const response = await fetch(`/api/sessions/${sessionId}`, {
+      method: "DELETE",
+    });
+    setEndingSession(false);
+
+    if (response.ok) {
+      router.push("/dashboard");
+    }
+  };
+
   if (authStatus === "loading" || loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -313,6 +361,20 @@ export default function SessionPage() {
     return (
       <div className="text-center py-12">
         <p className="text-sm text-muted">Session not found</p>
+      </div>
+    );
+  }
+
+  if (sessionData.status === "cancelled") {
+    return (
+      <div className="text-center py-12 space-y-4">
+        <h1 className="text-2xl font-bold">Session Ended</h1>
+        <p className="text-sm text-muted">
+          This movie night was ended before a final movie was selected.
+        </p>
+        <Button variant="secondary" onClick={() => router.push("/dashboard")}>
+          Back to Dashboard
+        </Button>
       </div>
     );
   }
@@ -333,13 +395,31 @@ export default function SessionPage() {
               </span>
             ))}
           </div>
+          <p className="text-[11px] text-muted mt-1">
+            Session token:{" "}
+            <code className="bg-card-hover border border-border rounded px-1.5 py-0.5 text-foreground">
+              {sessionData.guestInviteCode}
+            </code>
+          </p>
         </div>
-        <button
-          onClick={copyGuestLink}
-          className="text-xs text-accent hover:underline"
-        >
-          {copied ? "Copied!" : "Invite Guest"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={copyGuestLink}
+            className="text-xs text-accent hover:underline"
+          >
+            {copied ? "Copied!" : "Invite Guest"}
+          </button>
+          {sessionData.canManage && (
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={endSession}
+              loading={endingSession}
+            >
+              End Session
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Steps indicator */}
@@ -370,28 +450,47 @@ export default function SessionPage() {
       {/* Step: Preferences */}
       {step === "preferences" && (
         <div className="space-y-6 animate-slide-up">
-          {/* Era preference */}
+          {/* Release year preference */}
           <div>
-            <h3 className="text-sm font-semibold mb-2">What era are you feeling?</h3>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                { value: null, label: "Any era" },
-                { value: "new_release", label: "New Release" },
-                { value: "modern_classic", label: "Modern Classic (2000+)" },
-                { value: "classic", label: "Classic (pre-2000)" },
-              ].map((era) => (
-                <button
-                  key={era.label}
-                  onClick={() => setEraPreference(era.value)}
-                  className={`text-sm p-3 rounded-xl border transition-all ${
-                    eraPreference === era.value
-                      ? "border-accent bg-accent/5 text-accent font-medium"
-                      : "border-border bg-card text-muted hover:border-accent/30"
-                  }`}
-                >
-                  {era.label}
-                </button>
-              ))}
+            <h3 className="text-sm font-semibold mb-2">Choose your release year range</h3>
+            <div className="bg-card border border-border rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted">From</span>
+                <span className="font-semibold text-foreground">{minReleaseYear}</span>
+                <span className="text-muted">to</span>
+                <span className="font-semibold text-foreground">{maxReleaseYear}</span>
+              </div>
+              <div className="space-y-2">
+                <label className="text-[11px] text-muted">Minimum year</label>
+                <input
+                  type="range"
+                  min={YEAR_MIN}
+                  max={YEAR_MAX}
+                  value={minReleaseYear}
+                  onChange={(event) => {
+                    const next = Number.parseInt(event.target.value, 10);
+                    setMinReleaseYear(Math.min(next, maxReleaseYear));
+                  }}
+                  className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-[11px] text-muted">Maximum year</label>
+                <input
+                  type="range"
+                  min={YEAR_MIN}
+                  max={YEAR_MAX}
+                  value={maxReleaseYear}
+                  onChange={(event) => {
+                    const next = Number.parseInt(event.target.value, 10);
+                    setMaxReleaseYear(Math.max(next, minReleaseYear));
+                  }}
+                  className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
+                />
+              </div>
+              <p className="text-[11px] text-muted">
+                This works like a Tinder age range slider: picks are biased toward this release window.
+              </p>
             </div>
           </div>
 
@@ -460,28 +559,59 @@ export default function SessionPage() {
             </button>
           </div>
 
-          {sessionMovies.map((sm) => {
-            const vote = votes.get(sm.id);
-            const available =
-              sm.movie.plexAvailability?.available ||
-              sm.movie.radarrSync?.available ||
-              false;
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {sessionMovies.map((sm) => {
+              const vote = votes.get(sm.id);
+              const available =
+                sm.movie.plexAvailability?.available ||
+                sm.movie.radarrSync?.available ||
+                false;
+              const directors = Array.from(
+                new Set(
+                  (sm.movie.crew || [])
+                    .filter((member) => member.job.toLowerCase() === "director")
+                    .map((member) => member.person.name)
+                    .filter(Boolean)
+                )
+              ).slice(0, 2);
+              const actors = Array.from(
+                new Set(
+                  (sm.movie.cast || [])
+                    .map((member) => member.person.name)
+                    .filter(Boolean)
+                )
+              ).slice(0, 3);
+              const studios = Array.from(
+                new Set(
+                  (sm.movie.studios || [])
+                    .map((member) => member.studio.name)
+                    .filter(Boolean)
+                )
+              ).slice(0, 2);
+              const userHasSeen = Boolean(sm.movie.ratings?.[0]?.hasSeen);
 
-            return (
-              <SessionVoteCard
-                key={sm.id}
-                movie={sm.movie}
-                sessionMovieId={sm.id}
-                rating={vote?.rating ?? null}
-                willingToRewatch={vote?.willingToRewatch ?? false}
-                onRate={(rating) => handleVote(sm.id, rating)}
-                onRewatchToggle={(willing) =>
-                  handleRewatchToggle(sm.id, willing)
-                }
-                available={available}
-              />
-            );
-          })}
+              return (
+                <SessionVoteCard
+                  key={sm.id}
+                  movie={{
+                    ...sm.movie,
+                    directors,
+                    actors,
+                    studios,
+                  }}
+                  sessionMovieId={sm.id}
+                  userHasSeen={userHasSeen}
+                  rating={vote?.rating ?? null}
+                  willingToRewatch={vote?.willingToRewatch ?? false}
+                  onRate={(rating) => handleVote(sm.id, rating)}
+                  onRewatchToggle={(willing) =>
+                    handleRewatchToggle(sm.id, willing)
+                  }
+                  available={available}
+                />
+              );
+            })}
+          </div>
 
           <Button
             size="lg"

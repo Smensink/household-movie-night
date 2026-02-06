@@ -15,7 +15,7 @@ export default function NavBar() {
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 bg-card/95 backdrop-blur-lg border-t border-border z-50 safe-area-bottom">
-      <div className="max-w-lg mx-auto flex items-center justify-around px-2 py-1">
+      <div className="max-w-lg sm:max-w-3xl lg:max-w-5xl xl:max-w-7xl mx-auto flex items-center justify-around px-2 sm:px-4 py-1">
         {links.map((link) => {
           const isActive = pathname.startsWith(link.href);
           return (
