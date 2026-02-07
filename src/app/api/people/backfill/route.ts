@@ -28,6 +28,7 @@ interface BackfillResult {
  * Limits to MAX_PEOPLE_TO_PROCESS people per run to prevent database bloat.
  */
 export async function POST() {
+  console.log("[People Backfill] Starting actor/director movie backfill...");
   const results: BackfillResult[] = [];
 
   // Find actors likely to appear in rating queues but with incomplete movie data
@@ -157,6 +158,8 @@ export async function POST() {
     photosUpdated: results.filter((r) => r.photoUpdated).length,
     errors: results.filter((r) => r.error).length,
   };
+
+  console.log(`[People Backfill] Complete: ${summary.actorsProcessed} actors, ${summary.directorsProcessed} directors, ${summary.totalMoviesAdded} movies added`);
 
   return NextResponse.json({ summary, results });
 }

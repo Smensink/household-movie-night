@@ -32,6 +32,9 @@ COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/src/generated ./src/generated
 
+# Install curl for startup scripts (busybox wget doesn't support all HTTP methods)
+RUN apk add --no-cache curl
+
 # Create and own the cache directory for image optimization
 RUN mkdir -p /app/.next/cache && chown -R nextjs:nodejs /app/.next
 
@@ -51,15 +54,22 @@ CMD ["sh", "-c", "\
   fi && \
   node server.js & \
   SERVER_PID=$! && \
-  sleep 5 && \
-  wget -q -O /dev/null --post-data='' http://localhost:3000/api/movies/prefill 2>/dev/null || true && \
-  wget -q -O /dev/null -X PATCH http://localhost:3000/api/movies/prefill 2>/dev/null || true && \
-  wget -q -O /dev/null --post-data='' http://localhost:3000/api/studios/backfill 2>/dev/null || true && \
-  wget -q -O /dev/null --post-data='' http://localhost:3000/api/people/backfill 2>/dev/null || true && \
-  wget -q -O /dev/null -X PATCH http://localhost:3000/api/mf/train 2>/dev/null || true && \
+  sleep 10 && \
+  echo '[Startup] Running movie prefill...' && \
+  curl -s -X POST http://localhost:3000/api/movies/prefill 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Upgrading movie posters...' && \
+  curl -s -X PATCH http://localhost:3000/api/movies/prefill 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Running studio backfill...' && \
+  curl -s -X POST http://localhost:3000/api/studios/backfill 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Running people backfill...' && \
+  curl -s -X POST http://localhost:3000/api/people/backfill 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Checking/training recommendation model...' && \
+  curl -s -X PATCH http://localhost:3000/api/mf/train 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] All startup tasks complete.' && \
   while true; do \
     sleep 300; \
-    wget -q -O /dev/null -X PATCH http://localhost:3000/api/mf/train 2>/dev/null || true; \
+    echo '[Background] Checking if model retraining needed...' && \
+    curl -s -X PATCH http://localhost:3000/api/mf/train 2>&1 | head -c 200 && echo ''; \
   done & \
   wait $SERVER_PID \
 "]

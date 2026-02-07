@@ -79,6 +79,7 @@ export async function PATCH() {
   // Check inactivity
   const inactive = await isSystemInactive(INACTIVITY_THRESHOLD_MINUTES);
   if (!inactive) {
+    console.log("[MF Train] System is active, skipping retrain");
     return NextResponse.json({
       message: "System is active, skipping retrain",
       inactive: false,
@@ -88,6 +89,7 @@ export async function PATCH() {
   // Check if retrain is needed
   const needsRetrain = await shouldRetrain();
   if (!needsRetrain) {
+    console.log("[MF Train] No retrain needed (not enough ratings or no new data)");
     return NextResponse.json({
       message: "No retrain needed",
       inactive: true,
@@ -96,7 +98,9 @@ export async function PATCH() {
   }
 
   try {
+    console.log("[MF Train] Starting model training...");
     const result = await trainMatrixFactorization();
+    console.log(`[MF Train] Training complete: ${result.ratingsProcessed} ratings, ${result.featuresLearned} features, RMSE=${result.rmse.toFixed(4)}`);
 
     return NextResponse.json({
       message: "Auto-retrain completed",
@@ -105,6 +109,7 @@ export async function PATCH() {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("[MF Train] Training failed:", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -255,89 +255,104 @@ export default function ProfilePage() {
       </div>
 
       {/* ML Model Status */}
-      {stats.mlModel && (
-        <div className="bg-card border border-border rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-8 h-8 bg-accent-soft rounded-lg flex items-center justify-center">
-              <svg
-                className="w-4 h-4 text-accent"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={1.5}
-                  d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-                />
-              </svg>
-            </div>
-            <h3 className="font-semibold">Recommendation Model</h3>
-            {stats.mlModel.isTraining && (
-              <span className="text-xs bg-accent/20 text-accent px-2 py-0.5 rounded-full animate-pulse">
-                Training...
-              </span>
-            )}
+      <div className="bg-card border border-border rounded-xl p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-8 h-8 bg-accent-soft rounded-lg flex items-center justify-center">
+            <svg
+              className="w-4 h-4 text-accent"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+              />
+            </svg>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-            <div>
-              <div className="text-xs text-muted mb-1">Confidence</div>
-              <div className="flex items-center gap-2">
-                <div className="flex-1 h-2 bg-border rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all ${
-                      stats.mlModel.confidence > 0.7
-                        ? "bg-success"
-                        : stats.mlModel.confidence > 0.3
-                          ? "bg-warning"
-                          : "bg-error"
-                    }`}
-                    style={{ width: `${stats.mlModel.confidence * 100}%` }}
-                  />
-                </div>
-                <span className="text-sm font-medium">
-                  {(stats.mlModel.confidence * 100).toFixed(0)}%
-                </span>
-              </div>
-            </div>
-            <div>
-              <div className="text-xs text-muted mb-1">Ratings</div>
-              <div className="text-sm font-medium">{stats.mlModel.totalRatings}</div>
-            </div>
-            <div>
-              <div className="text-xs text-muted mb-1">Features</div>
-              <div className="text-sm font-medium">{stats.mlModel.featuresLearned}</div>
-            </div>
-            <div>
-              <div className="text-xs text-muted mb-1">Epochs</div>
-              <div className="text-sm font-medium">{stats.mlModel.trainedEpochs}</div>
-            </div>
-            <div>
-              <div className="text-xs text-muted mb-1">Train RMSE</div>
-              <div className="text-sm font-medium">
-                {stats.mlModel.rmse !== null
-                  ? stats.mlModel.rmse.toFixed(3)
-                  : "N/A"}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs text-muted mb-1">Val RMSE</div>
-              <div className="text-sm font-medium">
-                {stats.mlModel.validationRmse !== null
-                  ? stats.mlModel.validationRmse.toFixed(3)
-                  : "N/A"}
-              </div>
-            </div>
-          </div>
-          {stats.mlModel.lastTrainedAt && (
-            <div className="text-xs text-muted mt-3">
-              Last trained:{" "}
-              {new Date(stats.mlModel.lastTrainedAt).toLocaleString()}
-            </div>
+          <h3 className="font-semibold">Recommendation Model</h3>
+          {stats.mlModel?.isTraining && (
+            <span className="text-xs bg-accent/20 text-accent px-2 py-0.5 rounded-full animate-pulse">
+              Training...
+            </span>
           )}
         </div>
-      )}
+        {stats.mlModel ? (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+              <div>
+                <div className="text-xs text-muted mb-1">Confidence</div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 h-2 bg-border rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all ${
+                        stats.mlModel.confidence > 0.7
+                          ? "bg-success"
+                          : stats.mlModel.confidence > 0.3
+                            ? "bg-warning"
+                            : "bg-error"
+                      }`}
+                      style={{ width: `${stats.mlModel.confidence * 100}%` }}
+                    />
+                  </div>
+                  <span className="text-sm font-medium">
+                    {(stats.mlModel.confidence * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-muted mb-1">Ratings</div>
+                <div className="text-sm font-medium">{stats.mlModel.totalRatings}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted mb-1">Features</div>
+                <div className="text-sm font-medium">{stats.mlModel.featuresLearned}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted mb-1">Epochs</div>
+                <div className="text-sm font-medium">{stats.mlModel.trainedEpochs}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted mb-1">Train RMSE</div>
+                <div className="text-sm font-medium">
+                  {stats.mlModel.rmse !== null
+                    ? stats.mlModel.rmse.toFixed(3)
+                    : "N/A"}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-muted mb-1">Val RMSE</div>
+                <div className="text-sm font-medium">
+                  {stats.mlModel.validationRmse !== null
+                    ? stats.mlModel.validationRmse.toFixed(3)
+                    : "N/A"}
+                </div>
+              </div>
+            </div>
+            {stats.mlModel.lastTrainedAt && (
+              <div className="text-xs text-muted mt-3">
+                Last trained:{" "}
+                {new Date(stats.mlModel.lastTrainedAt).toLocaleString()}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="text-sm text-muted">
+            <p>
+              Not trained yet. The model requires at least 20 movie ratings across all
+              household members before it can learn your preferences.
+            </p>
+            <p className="mt-2">
+              You have rated <span className="font-medium text-foreground">{stats.counts.moviesRated}</span> movies.
+              {stats.counts.moviesRated < 20 && (
+                <span> Rate {20 - stats.counts.moviesRated} more to enable personalized recommendations.</span>
+              )}
+            </p>
+          </div>
+        )}
+      </div>
 
       {/* User Settings */}
       <div className="bg-card border border-border rounded-xl p-4">

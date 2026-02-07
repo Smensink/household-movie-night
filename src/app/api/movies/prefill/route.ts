@@ -5,7 +5,7 @@ import { getTMDBMovieByImdbId, extractTMDBRating } from "@/lib/api/tmdb";
 import { prisma } from "@/lib/prisma";
 import { syncMovieMetadataFromOMDB } from "@/lib/movie-metadata";
 
-const PREFILL_LIMIT = 200;
+const PREFILL_LIMIT = 500;
 
 function parseOptionalInt(value: string | undefined): number | null {
   if (!value) return null;
@@ -24,11 +24,14 @@ function getEra(year: number | null): string | null {
 }
 
 export async function POST() {
+  console.log("[Movie Prefill] Starting movie prefill...");
+
   // Check how many movies we already have
   const existingCount = await prisma.movie.count();
 
   // If we already have enough movies, skip prefill
   if (existingCount >= PREFILL_LIMIT) {
+    console.log(`[Movie Prefill] Already have ${existingCount} movies, skipping`);
     return NextResponse.json({
       message: "Database already has sufficient movies",
       existingCount,
@@ -37,8 +40,8 @@ export async function POST() {
   }
 
   const [trending, popular, boxOffice] = await Promise.all([
-    getTrendingMovies(50),
-    getPopularMovies(50),
+    getTrendingMovies(100),
+    getPopularMovies(200),
     getBoxOfficeMovies(),
   ]);
 
@@ -138,6 +141,8 @@ export async function POST() {
     }
   }
 
+  console.log(`[Movie Prefill] Complete: added ${added} movies (total: ${existingCount + added})`);
+
   return NextResponse.json({
     message: `Prefilled ${added} movies`,
     existingCount,
@@ -161,6 +166,8 @@ export async function GET() {
 
 // PATCH - Upgrade existing movies: high-res posters and backfill ratings
 export async function PATCH() {
+  console.log("[Movie Prefill] Starting poster upgrade and ratings backfill...");
+
   // 1. Upgrade low-res poster URLs
   const moviesWithLowResPosters = await prisma.movie.findMany({
     where: {
@@ -242,6 +249,8 @@ export async function PATCH() {
       // Skip on error
     }
   }
+
+  console.log(`[Movie Prefill] Upgrade complete: ${postersUpgraded} posters, ${ratingsUpdated} ratings`);
 
   return NextResponse.json({
     message: `Upgraded ${postersUpgraded} posters, backfilled ${ratingsUpdated} ratings`,

@@ -25,6 +25,7 @@ interface BackfillResult {
  * This is intended to be run as a background task on startup.
  */
 export async function POST() {
+  console.log("[Studio Backfill] Starting studio movie backfill...");
   const results: BackfillResult[] = [];
 
   // Find studios likely to appear in rating queues but with incomplete movie data
@@ -283,6 +284,8 @@ export async function POST() {
     totalMoviesLinked: results.reduce((sum, r) => sum + r.moviesLinked, 0),
     errors: results.filter((r) => r.error).length,
   };
+
+  console.log(`[Studio Backfill] Complete: ${summary.studiosProcessed} studios, ${summary.totalMoviesAdded} added, ${summary.totalMoviesLinked} linked`);
 
   return NextResponse.json({ summary, results });
 }
