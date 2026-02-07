@@ -3,15 +3,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 import StarRating from "@/components/StarRating";
 import Input from "@/components/ui/Input";
 import Button from "@/components/ui/Button";
 
+interface SampleMovie {
+  title: string;
+  year?: number | null;
+  posterUrl?: string | null;
+}
+
 interface Person {
   id: string;
   name: string;
+  photoUrl?: string | null;
   knownFor?: string | null;
-  sampleMovies?: string[];
+  sampleMovies?: SampleMovie[];
 }
 
 interface SearchMovieResult {
@@ -301,31 +309,86 @@ export default function RatePeoplePage() {
 
       {activePerson ? (
         <div className="bg-card border border-border rounded-3xl p-5 lg:p-7 animate-slide-up space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-2xl font-semibold">{activePerson.name}</h2>
+          <div className="flex items-start gap-4">
+            {/* Headshot */}
+            <div className="relative w-24 h-32 sm:w-28 sm:h-36 rounded-xl overflow-hidden bg-card-hover flex-shrink-0">
+              {activePerson.photoUrl ? (
+                <Image
+                  src={activePerson.photoUrl}
+                  alt={activePerson.name}
+                  fill
+                  className="object-cover"
+                  sizes="112px"
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center">
+                  <svg
+                    className="w-10 h-10 text-muted"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={1.5}
+                      d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+                    />
+                  </svg>
+                </div>
+              )}
+            </div>
+
+            {/* Name and info */}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-xl sm:text-2xl font-semibold truncate">
+                  {activePerson.name}
+                </h2>
+                <span className="text-[11px] text-muted uppercase tracking-wide flex-shrink-0">
+                  {activeTab}
+                </span>
+              </div>
               {activePerson.knownFor && (
                 <p className="text-xs text-muted capitalize mt-1">
                   Known for {activePerson.knownFor}
                 </p>
               )}
             </div>
-            <span className="text-[11px] text-muted uppercase tracking-wide">
-              {activeTab}
-            </span>
           </div>
 
+          {/* Sample movies with posters */}
           {activePerson.sampleMovies && activePerson.sampleMovies.length > 0 && (
-            <div className="bg-background/35 border border-border rounded-2xl p-4">
-              <p className="text-xs text-muted mb-2">Popular credits</p>
-              <div className="flex flex-wrap gap-2">
-                {activePerson.sampleMovies.map((title) => (
-                  <span
-                    key={`${activePerson.id}-${title}`}
-                    className="text-xs bg-card-hover border border-border rounded-full px-2 py-1"
+            <div className="space-y-2">
+              <p className="text-xs text-muted">Popular credits</p>
+              <div className="flex gap-3 overflow-x-auto pb-2">
+                {activePerson.sampleMovies.map((movie) => (
+                  <div
+                    key={`${activePerson.id}-${movie.title}`}
+                    className="flex-shrink-0 w-20"
                   >
-                    {title}
-                  </span>
+                    <div className="relative w-20 h-28 rounded-lg overflow-hidden bg-card-hover border border-border">
+                      {movie.posterUrl ? (
+                        <Image
+                          src={movie.posterUrl}
+                          alt={movie.title}
+                          fill
+                          className="object-cover"
+                          sizes="80px"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center p-1">
+                          <span className="text-[9px] text-muted text-center line-clamp-3">
+                            {movie.title}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-muted mt-1 line-clamp-2 text-center">
+                      {movie.title}
+                      {movie.year ? ` (${movie.year})` : ""}
+                    </p>
+                  </div>
                 ))}
               </div>
             </div>

@@ -1,37 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { getBoxOfficeMovies, getPopularMovies, getTrendingMovies } from "@/lib/api/trakt";
-import { getOMDBMovie } from "@/lib/api/omdb";
+import { getHighResPosterUrl } from "@/lib/api/omdb";
 import { prisma } from "@/lib/prisma";
-import {
-  extractMovieMetadataFromRelations,
-  syncMovieMetadataFromOMDB,
-} from "@/lib/movie-metadata";
+import { extractMovieMetadataFromRelations } from "@/lib/movie-metadata";
 import {
   averageAffinityForIds,
   buildDiscoveryPreferenceProfile,
 } from "@/lib/preference-profile";
 import { getAlgorithmSettings } from "@/lib/algorithm-settings";
-
-type DiscoverSource = "trending" | "popular" | "boxoffice" | "library";
+import {
+  getPredictedRatingsForUser,
+  getModelMetadata,
+} from "@/lib/matrix-factorization";
 
 const DEFAULT_LIMIT = 15;
 const MAX_LIMIT = 30;
-const SOURCE_FETCH_LIMIT = 40;
-
-function parseOptionalInt(value: string | undefined): number | null {
-  if (!value) return null;
-  const match = value.match(/\d+/);
-  if (!match) return null;
-  const parsed = Number.parseInt(match[0], 10);
-  return Number.isNaN(parsed) ? null : parsed;
-}
+const COLD_START_THRESHOLD = 10; // Minimum ratings before personalized recommendations
+const DIVERSITY_INJECTION_RATE = 0.15; // 15% of recommendations from diverse sources
 
 function parseLimit(value: string | null): number {
   if (!value) return DEFAULT_LIMIT;
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed)) return DEFAULT_LIMIT;
   return Math.max(1, Math.min(MAX_LIMIT, parsed));
+}
+
+function isColdStartUser(ratedMovieCount: number, ratedGenreCount: number): boolean {
+  // User is in cold start if they have very few ratings
+  return ratedMovieCount < COLD_START_THRESHOLD && ratedGenreCount < 5;
 }
 
 function parseExcludedMovieIds(values: string[]): Set<string> {
@@ -55,23 +51,6 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function getSourcePreferenceWeights(pref: string): Record<DiscoverSource, number> {
-  if (pref === "trending") {
-    return { trending: 1, popular: 0.4, boxoffice: 0.7, library: 0.2 };
-  }
-  if (pref === "popular") {
-    return { trending: 0.4, popular: 1, boxoffice: 0.6, library: 0.2 };
-  }
-  if (pref === "new_releases") {
-    return { trending: 0.8, popular: 0.5, boxoffice: 1, library: 0.1 };
-  }
-  if (pref === "top_rated") {
-    return { trending: 0.4, popular: 0.7, boxoffice: 0.4, library: 0.9 };
-  }
-
-  return { trending: 0.8, popular: 0.8, boxoffice: 0.6, library: 0.4 };
-}
-
 function mergeUnique(values: string[], extras: string[], limit: number): string[] {
   return Array.from(new Set([...values, ...extras])).slice(0, limit);
 }
@@ -88,6 +67,16 @@ export async function GET(req: NextRequest) {
   const algorithmSettings = await getAlgorithmSettings();
   const tuning = algorithmSettings.movieDiscovery;
 
+  // Detect cold start users for special handling
+  const userRatingCount = profile.userRatedMovieIds.size;
+  const userGenreRankingCount = profile.genreAffinity.size;
+  const coldStartUser = isColdStartUser(userRatingCount, userGenreRankingCount);
+
+  // Get Matrix Factorization model for collaborative filtering
+  const mfMetadata = await getModelMetadata();
+  const mfConfidence = mfMetadata?.confidence ?? 0;
+
+  // Build exclusion set from query params and user's rated movies
   const excludedMovieIds = parseExcludedMovieIds(
     req.nextUrl.searchParams.getAll("excludeMovieIds")
   );
@@ -95,184 +84,28 @@ export async function GET(req: NextRequest) {
     excludedMovieIds.add(ratedMovieId);
   }
 
-  const userRatedMovies = await prisma.movie.findMany({
-    where: {
-      ratings: {
-        some: {
-          userId: session.user.id,
-        },
-      },
-    },
-    select: { imdbId: true },
-  });
-  const ratedImdbIds = new Set(
-    userRatedMovies.map((movie) => movie.imdbId).filter((id): id is string => Boolean(id))
-  );
-
-  const [trending, popular, boxOffice] = await Promise.all([
-    getTrendingMovies(SOURCE_FETCH_LIMIT),
-    getPopularMovies(SOURCE_FETCH_LIMIT),
-    getBoxOfficeMovies(),
-  ]);
-
-  const traktPool: Array<{
-    source: DiscoverSource;
-    sourceStrength: number;
-    movie: {
-      title: string;
-      year: number;
-      ids: { imdb?: string; tmdb?: number; slug?: string };
-    };
-  }> = [
-    ...trending.map((item) => ({
-      source: "trending" as const,
-      sourceStrength: clamp(item.watchers / 250, 0, 1),
-      movie: item.movie,
-    })),
-    ...popular.map((item, index) => ({
-      source: "popular" as const,
-      sourceStrength: clamp((SOURCE_FETCH_LIMIT - index) / SOURCE_FETCH_LIMIT, 0, 1),
-      movie: item,
-    })),
-    ...boxOffice.map((item) => ({
-      source: "boxoffice" as const,
-      sourceStrength: clamp(item.revenue / 100_000_000, 0, 1),
-      movie: item.movie,
-    })),
-  ];
-
-  const sourceByMovieId = new Map<string, { source: DiscoverSource; strength: number }>();
-  const candidateMovieIds = new Set<string>();
-  const seenImdbIds = new Set<string>();
-
-  const processLimit = Math.max(limit * 4, 40);
-  for (const candidate of traktPool) {
-    if (candidateMovieIds.size >= processLimit) break;
-
-    const imdbId = candidate.movie.ids?.imdb;
-    if (!imdbId || seenImdbIds.has(imdbId) || ratedImdbIds.has(imdbId)) continue;
-    seenImdbIds.add(imdbId);
-
-    const existingMovie = await prisma.movie.findUnique({
-      where: { imdbId },
-      include: {
-        cast: {
-          include: { person: { select: { name: true } } },
-          orderBy: { castOrder: "asc" },
-          take: 3,
-        },
-        crew: {
-          where: { job: "Director" },
-          include: { person: { select: { name: true } } },
-          take: 3,
-        },
-        studios: {
-          include: { studio: { select: { name: true } } },
-          take: 2,
-        },
-      },
-    });
-
-    if (existingMovie && excludedMovieIds.has(existingMovie.id)) {
-      continue;
-    }
-
-    const relationMetadata = extractMovieMetadataFromRelations(existingMovie);
-    const needsOmdbDetails =
-      !existingMovie ||
-      !existingMovie.posterUrl ||
-      !existingMovie.overview ||
-      existingMovie.runtime === null ||
-      relationMetadata.actors.length === 0 ||
-      relationMetadata.directors.length === 0 ||
-      relationMetadata.studios.length === 0;
-
-    const details = needsOmdbDetails ? await getOMDBMovie(imdbId) : null;
-
-    const year =
-      candidate.movie.year || parseOptionalInt(details?.Year) || existingMovie?.year || null;
-    const runtime = parseOptionalInt(details?.Runtime) ?? existingMovie?.runtime ?? null;
-    const era = getEra(year) || existingMovie?.era || null;
-
-    const persisted = await prisma.movie.upsert({
-      where: { imdbId },
-      create: {
-        imdbId,
-        tmdbId: candidate.movie.ids?.tmdb?.toString() || null,
-        traktSlug: candidate.movie.ids?.slug || null,
-        title: candidate.movie.title,
-        year,
-        posterUrl:
-          details?.Poster && details.Poster !== "N/A"
-            ? details.Poster
-            : existingMovie?.posterUrl || null,
-        overview: details?.Plot || existingMovie?.overview || null,
-        runtime,
-        era,
-      },
-      update: {
-        title: candidate.movie.title,
-        ...(candidate.movie.ids?.tmdb && { tmdbId: candidate.movie.ids.tmdb.toString() }),
-        ...(candidate.movie.ids?.slug && { traktSlug: candidate.movie.ids.slug }),
-        ...(year !== null && { year }),
-        ...(details?.Poster && details.Poster !== "N/A" && { posterUrl: details.Poster }),
-        ...(details?.Plot && { overview: details.Plot }),
-        ...(runtime !== null && { runtime }),
-        ...(era && { era }),
-      },
-      select: { id: true },
-    });
-
-    if (details) {
-      const shouldSyncMetadata =
-        relationMetadata.actors.length === 0 ||
-        relationMetadata.directors.length === 0 ||
-        relationMetadata.studios.length === 0;
-      if (shouldSyncMetadata) {
-        await syncMovieMetadataFromOMDB(persisted.id, details);
-      }
-    }
-
-    if (excludedMovieIds.has(persisted.id)) {
-      continue;
-    }
-
-    candidateMovieIds.add(persisted.id);
-    const existingSource = sourceByMovieId.get(persisted.id);
-    if (!existingSource || candidate.sourceStrength > existingSource.strength) {
-      sourceByMovieId.set(persisted.id, {
-        source: candidate.source,
-        strength: candidate.sourceStrength,
-      });
-    }
-  }
-
-  if (candidateMovieIds.size < limit * 2) {
-    const localFallback = await prisma.movie.findMany({
-      where: {
-        id: { notIn: Array.from(excludedMovieIds) },
-      },
-      orderBy: [{ updatedAt: "desc" }],
-      select: { id: true },
-      take: limit * 4,
-    });
-
-    for (const movie of localFallback) {
-      if (candidateMovieIds.size >= processLimit) break;
-      if (excludedMovieIds.has(movie.id)) continue;
-      candidateMovieIds.add(movie.id);
-      if (!sourceByMovieId.has(movie.id)) {
-        sourceByMovieId.set(movie.id, { source: "library", strength: 0.5 });
-      }
-    }
-  }
+  // FAST PATH: Query local database directly
+  // Get movies the user hasn't rated, with posters, that have been released
+  const currentDate = new Date();
+  const currentYear = currentDate.getFullYear();
 
   const candidateMovies = await prisma.movie.findMany({
     where: {
-      id: { in: Array.from(candidateMovieIds), notIn: Array.from(excludedMovieIds) },
+      id: { notIn: Array.from(excludedMovieIds) },
+      posterUrl: { not: null },
+      // Only show released movies
+      OR: [
+        { releaseDate: { lte: currentDate } },
+        { releaseDate: null, year: { lte: currentYear } },
+      ],
     },
     include: {
-      genres: { select: { genreId: true } },
+      genres: {
+        select: {
+          genreId: true,
+          genre: { select: { name: true } },
+        },
+      },
       cast: {
         select: {
           personId: true,
@@ -310,9 +143,24 @@ export async function GET(req: NextRequest) {
       plexAvailability: true,
       radarrSync: true,
     },
+    orderBy: [
+      { popularity: "desc" },
+      { voteAverage: "desc" },
+      { updatedAt: "desc" },
+    ],
+    take: Math.max(limit * 4, 60), // Get more than needed for scoring
   });
 
-  const sourcePreferenceWeights = getSourcePreferenceWeights(profile.discoverySourcePref);
+  // Get MF predicted ratings for candidate movies (batch)
+  const candidateMovieIds = candidateMovies.map((m) => m.id);
+  const mfPredictions =
+    mfConfidence > 0
+      ? await getPredictedRatingsForUser(userId, candidateMovieIds)
+      : new Map<string, number>();
+
+  // Score and rank movies
+  // Track genre distribution for diversity injection
+  const genreDistribution = new Map<string, number>();
 
   const scored = candidateMovies
     .map((movie) => {
@@ -342,18 +190,16 @@ export async function GET(req: NextRequest) {
           ? explicitRatings.reduce((sum, value) => sum + value, 0) / explicitRatings.length
           : 0;
 
-      const preferenceSignal =
-        genreSignal * 0.3 +
-        actorSignal * 0.2 +
-        directorSignal * 0.15 +
-        studioSignal * 0.15 +
-        movieSignal * 0.15 +
-        householdRatingSignal * 0.05;
-
-      const sourceInfo = sourceByMovieId.get(movie.id) ?? {
-        source: "library" as const,
-        strength: 0.5,
-      };
+      // COLD START: For new users, rely more heavily on global quality signals
+      // rather than non-existent preference signals
+      const preferenceSignal = coldStartUser
+        ? genreSignal * 0.5 + householdRatingSignal * 0.5 // Simplified for cold start
+        : genreSignal * 0.3 +
+          actorSignal * 0.2 +
+          directorSignal * 0.15 +
+          studioSignal * 0.15 +
+          movieSignal * 0.15 +
+          householdRatingSignal * 0.05;
 
       const actorFamiliarity =
         movie.cast.length === 0
@@ -373,23 +219,30 @@ export async function GET(req: NextRequest) {
 
       const noveltySignal =
         1 - (actorFamiliarity * 0.5 + directorFamiliarity * 0.2 + studioFamiliarity * 0.3);
+
+      // COLD START: Weight quality higher for new users
+      const qualityWeight = coldStartUser ? 0.85 : 0.6;
+      const popularityWeight = coldStartUser ? 0.15 : 0.4;
       const qualitySignal =
-        clamp((movie.voteAverage ?? 0) / 10, 0, 1) * 0.6 +
-        clamp((movie.popularity ?? 0) / 100, 0, 1) * 0.4;
-      const sourceSignal = sourcePreferenceWeights[sourceInfo.source] * 0.65 + sourceInfo.strength * 0.35;
+        clamp((movie.voteAverage ?? 0) / 10, 0, 1) * qualityWeight +
+        clamp((movie.popularity ?? 0) / 100, 0, 1) * popularityWeight;
 
       const userRating = movie.ratings.find((rating) => rating.userId === userId);
       const unseenBonus = userRating?.hasSeen ? -0.35 : 0.15;
+
+      // COLD START: Use higher exploration factor for new users
+      const effectiveExplorationFactor = coldStartUser
+        ? Math.max(0.7, profile.explorationFactor) // At least 70% exploration for cold start
+        : profile.explorationFactor;
 
       const discoveryWeightsTotal =
         tuning.noveltyInfluence + tuning.qualityInfluence + tuning.sourceInfluence;
       const discoveryBase =
         discoveryWeightsTotal > 0
           ? (noveltySignal * tuning.noveltyInfluence +
-              qualitySignal * tuning.qualityInfluence +
-              sourceSignal * tuning.sourceInfluence) /
+              qualitySignal * tuning.qualityInfluence) /
             discoveryWeightsTotal
-          : (noveltySignal + qualitySignal + sourceSignal) / 3;
+          : (noveltySignal + qualitySignal) / 2;
       const discoverySignal = discoveryBase * 2 - 1 + unseenBonus;
 
       const strongDislikes = movie.ratings.filter(
@@ -401,23 +254,56 @@ export async function GET(req: NextRequest) {
       const availabilitySignal =
         movie.radarrSync?.available || movie.plexAvailability?.available ? 1 : 0;
 
-      const score =
+      // ACTIVE LEARNING: Boost movies that would teach us the most
+      // Movies with polarizing opinions or from under-explored genres are more informative
+      const genreExplorationBonus = movie.genres.some(
+        (g) => !profile.genreAffinity.has(g.genreId)
+      )
+        ? 0.15
+        : 0;
+
+      // CONFIDENCE: Weight down movies where we have low confidence
+      // (e.g., genres the user hasn't rated much in)
+      const confidenceWeight = coldStartUser ? 0.5 : 1.0;
+
+      // MATRIX FACTORIZATION: Collaborative filtering score
+      // Predicted rating is 1-5, normalize to -1 to 1 scale
+      const mfPredictedRating = mfPredictions.get(movie.id);
+      const mfSignal = mfPredictedRating !== undefined
+        ? (mfPredictedRating - 3) / 2 // Convert 1-5 to -1 to 1
+        : 0;
+
+      // Blend MF with heuristic scoring based on model confidence
+      // As confidence increases, MF gets more weight (up to 40% at full confidence)
+      const mfWeight = mfConfidence * 0.4; // 0% to 40% based on confidence
+      const heuristicWeight = 1 - mfWeight;
+
+      const heuristicScore =
         preferenceSignal *
           tuning.preferenceWeight *
-          (1 - profile.explorationFactor) +
+          (1 - effectiveExplorationFactor) +
         discoverySignal *
           tuning.discoveryWeight *
-          profile.explorationFactor +
+          effectiveExplorationFactor +
         availabilitySignal * tuning.availabilityBonus +
         dislikePenalty +
+        genreExplorationBonus +
         Math.random() * tuning.randomJitter;
 
+      const score =
+        (heuristicScore * heuristicWeight + mfSignal * mfWeight) * confidenceWeight;
+
       const relationMetadata = extractMovieMetadataFromRelations(movie);
-      const omdbMetadata = {
+      const dbMetadata = {
         actors: movie.cast.map((member) => member.person.name).filter(Boolean),
         directors: movie.crew.map((member) => member.person.name).filter(Boolean),
         studios: movie.studios.map((member) => member.studio.name).filter(Boolean),
       };
+
+      const genres = movie.genres
+        .map((g) => g.genre.name)
+        .filter(Boolean)
+        .slice(0, 3);
 
       return {
         id: movie.id,
@@ -427,36 +313,73 @@ export async function GET(req: NextRequest) {
         posterUrl: movie.posterUrl,
         overview: movie.overview,
         era: movie.era,
-        source: sourceInfo.source,
-        actors: mergeUnique(relationMetadata.actors, omdbMetadata.actors, 3),
-        directors: mergeUnique(relationMetadata.directors, omdbMetadata.directors, 2),
-        studios: mergeUnique(relationMetadata.studios, omdbMetadata.studios, 2),
+        imdbRating: movie.imdbRating,
+        rottenTomatoesAudience: movie.rottenTomatoesAudience,
+        genres,
+        actors: mergeUnique(relationMetadata.actors, dbMetadata.actors, 3),
+        directors: mergeUnique(relationMetadata.directors, dbMetadata.directors, 2),
+        studios: mergeUnique(relationMetadata.studios, dbMetadata.studios, 2),
         score,
       };
     })
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => b.score - a.score);
+
+  // DIVERSITY INJECTION: Ensure variety in the final results
+  // Select top movies but ensure genre diversity
+  const diverseResults: typeof scored = [];
+  const usedGenres = new Set<string>();
+  const diversitySlots = Math.floor(limit * DIVERSITY_INJECTION_RATE);
+  const mainSlots = limit - diversitySlots;
+
+  // First pass: fill main slots with top-scored movies
+  for (const movie of scored) {
+    if (diverseResults.length >= mainSlots) break;
+    diverseResults.push(movie);
+    for (const genre of movie.genres) {
+      usedGenres.add(genre);
+    }
+  }
+
+  // Second pass: fill diversity slots with movies from underrepresented genres
+  for (const movie of scored) {
+    if (diverseResults.length >= limit) break;
+    if (diverseResults.some((r) => r.id === movie.id)) continue;
+
+    // Prefer movies with genres we haven't seen much
+    const hasNewGenre = movie.genres.some((g) => !usedGenres.has(g));
+    if (hasNewGenre) {
+      diverseResults.push(movie);
+      for (const genre of movie.genres) {
+        usedGenres.add(genre);
+      }
+    }
+  }
+
+  // Fill remaining slots with next best movies if diversity pass didn't fill
+  for (const movie of scored) {
+    if (diverseResults.length >= limit) break;
+    if (!diverseResults.some((r) => r.id === movie.id)) {
+      diverseResults.push(movie);
+    }
+  }
+
+  const finalResults = diverseResults
     .slice(0, limit)
     .map((movie) => ({
       id: movie.id,
       imdbId: movie.imdbId,
       title: movie.title,
       year: movie.year,
-      posterUrl: movie.posterUrl,
+      posterUrl: getHighResPosterUrl(movie.posterUrl) || movie.posterUrl,
       overview: movie.overview,
       era: movie.era,
-      source: movie.source,
+      imdbRating: movie.imdbRating,
+      rottenTomatoesAudience: movie.rottenTomatoesAudience,
+      genres: movie.genres,
       actors: movie.actors,
       directors: movie.directors,
       studios: movie.studios,
     }));
 
-  return NextResponse.json(scored);
-}
-
-function getEra(year: number | null): string | null {
-  if (!year) return null;
-  const currentYear = new Date().getFullYear();
-  if (year >= currentYear - 1) return "new_release";
-  if (year >= 2000) return "modern_classic";
-  return "classic";
+  return NextResponse.json(finalResults);
 }

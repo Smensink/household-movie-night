@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logActivity } from "@/lib/matrix-factorization";
 
 export async function GET() {
   const session = await auth();
@@ -63,6 +64,9 @@ export async function POST(req: NextRequest) {
       notHeardOf: notHeardOf ?? false,
     },
   });
+
+  // Log activity for MF retraining trigger
+  await logActivity(session.user.id, "rating", "movie", movieId);
 
   return NextResponse.json(movieRating);
 }

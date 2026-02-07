@@ -5,6 +5,7 @@ const TRENDING_CACHE_TTL_MS = 15 * 60_000;
 const POPULAR_CACHE_TTL_MS = 15 * 60_000;
 const BOX_OFFICE_CACHE_TTL_MS = 10 * 60_000;
 const SEARCH_CACHE_TTL_MS = 10 * 60_000;
+const ANTICIPATED_CACHE_TTL_MS = 30 * 60_000;
 const MAX_CACHE_SIZE = 300;
 
 interface TraktMovie {
@@ -35,6 +36,7 @@ const trendingCache = new Map<string, CacheEntry<TraktTrendingItem[]>>();
 const popularCache = new Map<string, CacheEntry<TraktPopularItem[]>>();
 const boxOfficeCache = new Map<string, CacheEntry<{ revenue: number; movie: TraktMovie }[]>>();
 const traktSearchCache = new Map<string, CacheEntry<{ movie: TraktMovie }[]>>();
+const anticipatedCache = new Map<string, CacheEntry<{ list_count: number; movie: TraktMovie }[]>>();
 
 function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string): T | null {
   const cached = cache.get(key);
@@ -179,4 +181,66 @@ export async function searchTraktMovies(
   const movies: { movie: TraktMovie }[] = Array.isArray(data) ? data : [];
   setCached(traktSearchCache, normalizedQuery, movies, SEARCH_CACHE_TTL_MS);
   return movies;
+}
+
+export async function getAnticipatedMovies(
+  limit = 20
+): Promise<{ list_count: number; movie: TraktMovie }[]> {
+  const cacheKey = String(limit);
+  const cached = getCached(anticipatedCache, cacheKey);
+  if (cached) return cached;
+
+  const apiKey = await getTraktApiKey();
+  if (!apiKey) return [];
+
+  const res = await fetch(
+    `${TRAKT_BASE}/movies/anticipated?limit=${limit}`,
+    { headers: getHeaders(apiKey), cache: "no-store" }
+  );
+  if (!res.ok) return [];
+
+  const data = await res.json().catch(() => []);
+  const movies: { list_count: number; movie: TraktMovie }[] = Array.isArray(data) ? data : [];
+  setCached(anticipatedCache, cacheKey, movies, ANTICIPATED_CACHE_TTL_MS);
+  return movies;
+}
+
+export interface TraktRatings {
+  rating: number; // 0-10 scale
+  votes: number;
+  distribution: Record<string, number>;
+}
+
+const ratingsCache = new Map<string, CacheEntry<TraktRatings | null>>();
+const RATINGS_CACHE_TTL_MS = 60 * 60_000; // 1 hour
+
+/**
+ * Get Trakt ratings for a movie by IMDB ID or Trakt slug
+ */
+export async function getTraktMovieRatings(
+  idOrSlug: string
+): Promise<TraktRatings | null> {
+  const cacheKey = `ratings:${idOrSlug}`;
+  const cached = getCached(ratingsCache, cacheKey);
+  if (cached !== null) return cached;
+
+  const apiKey = await getTraktApiKey();
+  if (!apiKey) return null;
+
+  try {
+    const res = await fetch(
+      `${TRAKT_BASE}/movies/${idOrSlug}/ratings`,
+      { headers: getHeaders(apiKey), cache: "no-store" }
+    );
+    if (!res.ok) {
+      setCached(ratingsCache, cacheKey, null, RATINGS_CACHE_TTL_MS);
+      return null;
+    }
+
+    const data: TraktRatings = await res.json();
+    setCached(ratingsCache, cacheKey, data, RATINGS_CACHE_TTL_MS);
+    return data;
+  } catch {
+    return null;
+  }
 }

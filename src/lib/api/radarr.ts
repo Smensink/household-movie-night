@@ -1,6 +1,31 @@
 import { prisma } from "../prisma";
 
-async function getRadarrConfig() {
+interface RadarrConfig {
+  baseUrl: string;
+  apiKey: string;
+}
+
+interface RadarrRootFolder {
+  path: string;
+  accessible: boolean;
+  freeSpace: number;
+  totalSpace: number;
+}
+
+interface RadarrQualityProfile {
+  id: number;
+  name: string;
+}
+
+interface RadarrMovie {
+  id: number;
+  title: string;
+  tmdbId: number;
+  hasFile: boolean;
+  monitored: boolean;
+}
+
+async function getRadarrConfig(): Promise<RadarrConfig | null> {
   const config = await prisma.integrationConfig.findUnique({
     where: { service: "radarr" },
   });
@@ -8,71 +33,419 @@ async function getRadarrConfig() {
   return { baseUrl: config.baseUrl.replace(/\/$/, ""), apiKey: config.apiKey };
 }
 
-export async function getRadarrMovies() {
+async function getRadarrDefaults(config: RadarrConfig): Promise<{
+  rootFolder: string | null;
+  qualityProfileId: number | null;
+}> {
+  try {
+    // Get root folders
+    const foldersRes = await fetch(`${config.baseUrl}/api/v3/rootfolder`, {
+      headers: { "X-Api-Key": config.apiKey },
+      cache: "no-store",
+    });
+
+    let rootFolder: string | null = null;
+    if (foldersRes.ok) {
+      const folders: RadarrRootFolder[] = await foldersRes.json();
+      // Pick first accessible folder
+      const accessibleFolder = folders.find((f) => f.accessible);
+      rootFolder = accessibleFolder?.path || folders[0]?.path || null;
+    }
+
+    // Get quality profiles
+    const profilesRes = await fetch(`${config.baseUrl}/api/v3/qualityprofile`, {
+      headers: { "X-Api-Key": config.apiKey },
+      cache: "no-store",
+    });
+
+    let qualityProfileId: number | null = null;
+    if (profilesRes.ok) {
+      const profiles: RadarrQualityProfile[] = await profilesRes.json();
+      // Prefer HD-1080p or Any profile, fallback to first
+      const preferredProfile =
+        profiles.find((p) => p.name.toLowerCase().includes("1080p")) ||
+        profiles.find((p) => p.name.toLowerCase().includes("any")) ||
+        profiles[0];
+      qualityProfileId = preferredProfile?.id || null;
+    }
+
+    return { rootFolder, qualityProfileId };
+  } catch (error) {
+    console.error("Failed to get Radarr defaults:", error);
+    return { rootFolder: null, qualityProfileId: null };
+  }
+}
+
+export async function getRadarrMovies(): Promise<RadarrMovie[]> {
   const config = await getRadarrConfig();
   if (!config) return [];
 
-  const res = await fetch(`${config.baseUrl}/api/v3/movie`, {
-    headers: { "X-Api-Key": config.apiKey },
-  });
-  if (!res.ok) return [];
-  return res.json();
+  try {
+    const res = await fetch(`${config.baseUrl}/api/v3/movie`, {
+      headers: { "X-Api-Key": config.apiKey },
+      cache: "no-store",
+    });
+    if (!res.ok) return [];
+    return res.json();
+  } catch {
+    return [];
+  }
 }
 
-export async function addToRadarr(tmdbId: string, title: string) {
+/**
+ * Sync all Radarr movie availability to our database
+ * This updates which movies are downloaded and available
+ */
+export async function syncRadarrAvailability(): Promise<{
+  updated: number;
+  added: number;
+  total: number;
+}> {
+  const radarrMovies = await getRadarrMovies();
+  if (radarrMovies.length === 0) {
+    return { updated: 0, added: 0, total: 0 };
+  }
+
+  let updated = 0;
+  let added = 0;
+
+  for (const radarrMovie of radarrMovies) {
+    const tmdbId = radarrMovie.tmdbId?.toString();
+    if (!tmdbId) continue;
+
+    // Find matching movie in our database
+    const movie = await prisma.movie.findUnique({
+      where: { tmdbId },
+      select: { id: true },
+    });
+
+    if (!movie) continue;
+
+    // Upsert RadarrSync record
+    const existing = await prisma.radarrSync.findUnique({
+      where: { movieId: movie.id },
+    });
+
+    await prisma.radarrSync.upsert({
+      where: { movieId: movie.id },
+      create: {
+        movieId: movie.id,
+        radarrId: radarrMovie.id,
+        monitored: radarrMovie.monitored,
+        available: radarrMovie.hasFile,
+      },
+      update: {
+        radarrId: radarrMovie.id,
+        monitored: radarrMovie.monitored,
+        available: radarrMovie.hasFile,
+      },
+    });
+
+    if (existing) {
+      updated++;
+    } else {
+      added++;
+    }
+  }
+
+  return { updated, added, total: radarrMovies.length };
+}
+
+export interface AddToRadarrResult {
+  success: boolean;
+  radarrId?: number;
+  error?: string;
+  alreadyExists?: boolean;
+}
+
+export async function addToRadarr(
+  tmdbId: string,
+  title: string
+): Promise<AddToRadarrResult> {
   const config = await getRadarrConfig();
-  if (!config) return null;
+  if (!config) {
+    return { success: false, error: "Radarr not configured" };
+  }
 
-  // Get root folder
-  const foldersRes = await fetch(`${config.baseUrl}/api/v3/rootfolder`, {
-    headers: { "X-Api-Key": config.apiKey },
-  });
-  const folders = await foldersRes.json();
-  const rootFolder = folders[0]?.path || "/movies";
+  // Check if movie already exists in Radarr
+  const existing = await checkRadarrAvailability(tmdbId);
+  if (existing.radarrId) {
+    return { success: true, alreadyExists: true, radarrId: existing.radarrId };
+  }
 
-  // Get quality profile
-  const profilesRes = await fetch(`${config.baseUrl}/api/v3/qualityprofile`, {
-    headers: { "X-Api-Key": config.apiKey },
-  });
-  const profiles = await profilesRes.json();
-  const qualityProfileId = profiles[0]?.id || 1;
+  // Get defaults
+  const { rootFolder, qualityProfileId } = await getRadarrDefaults(config);
 
-  const res = await fetch(`${config.baseUrl}/api/v3/movie`, {
-    method: "POST",
-    headers: {
-      "X-Api-Key": config.apiKey,
-      "Content-Type": "application/json",
+  if (!rootFolder) {
+    return { success: false, error: "No root folder configured in Radarr" };
+  }
+
+  if (!qualityProfileId) {
+    return { success: false, error: "No quality profile found in Radarr" };
+  }
+
+  const payload = {
+    title,
+    tmdbId: parseInt(tmdbId, 10),
+    qualityProfileId,
+    rootFolderPath: rootFolder,
+    monitored: true,
+    addOptions: {
+      searchForMovie: true,
+      monitor: "movieOnly",
     },
-    body: JSON.stringify({
-      title,
-      tmdbId: parseInt(tmdbId),
-      qualityProfileId,
-      rootFolderPath: rootFolder,
-      monitored: true,
-      addOptions: { searchForMovie: true },
-    }),
-  });
+  };
 
-  if (!res.ok) return null;
-  return res.json();
+  try {
+    const res = await fetch(`${config.baseUrl}/api/v3/movie`, {
+      method: "POST",
+      headers: {
+        "X-Api-Key": config.apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      return {
+        success: false,
+        error: `Radarr API error: ${res.status} - ${errorText}`,
+      };
+    }
+
+    const result: RadarrMovie = await res.json();
+    return { success: true, radarrId: result.id };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
+  }
 }
 
-export async function checkRadarrAvailability(tmdbId: string) {
+export async function checkRadarrAvailability(tmdbId: string): Promise<{
+  available: boolean;
+  monitored: boolean;
+  radarrId?: number;
+}> {
   const config = await getRadarrConfig();
   if (!config) return { available: false, monitored: false };
 
-  const res = await fetch(
-    `${config.baseUrl}/api/v3/movie?tmdbId=${tmdbId}`,
-    { headers: { "X-Api-Key": config.apiKey } }
-  );
-  if (!res.ok) return { available: false, monitored: false };
+  try {
+    const res = await fetch(`${config.baseUrl}/api/v3/movie?tmdbId=${tmdbId}`, {
+      headers: { "X-Api-Key": config.apiKey },
+      cache: "no-store",
+    });
 
-  const movies = await res.json();
-  if (movies.length === 0) return { available: false, monitored: false };
+    if (!res.ok) return { available: false, monitored: false };
 
-  return {
-    available: movies[0].hasFile || false,
-    monitored: movies[0].monitored || false,
-    radarrId: movies[0].id,
-  };
+    const movies: RadarrMovie[] = await res.json();
+    if (movies.length === 0) return { available: false, monitored: false };
+
+    return {
+      available: movies[0].hasFile || false,
+      monitored: movies[0].monitored || false,
+      radarrId: movies[0].id,
+    };
+  } catch {
+    return { available: false, monitored: false };
+  }
+}
+
+/**
+ * Get movies ranked by average household rating that aren't in Radarr yet
+ */
+export async function getTopRatedMoviesForRadarr(limit = 10): Promise<{
+  id: string;
+  title: string;
+  tmdbId: string;
+  avgRating: number;
+  ratingCount: number;
+}[]> {
+  // Get all movies with ratings, not yet in Radarr
+  const movies = await prisma.movie.findMany({
+    where: {
+      tmdbId: { not: null },
+      radarrSync: null, // Not already in Radarr
+    },
+    include: {
+      ratings: {
+        where: {
+          rating: { not: null },
+          hasSeen: false, // Only want-to-watch ratings
+        },
+        select: { rating: true },
+      },
+    },
+  });
+
+  // Calculate average rating for each movie
+  const moviesWithAvg = movies
+    .map((movie) => {
+      const ratings = movie.ratings
+        .filter((r) => r.rating !== null)
+        .map((r) => r.rating as number);
+
+      if (ratings.length === 0) return null;
+
+      const avgRating = ratings.reduce((sum, r) => sum + r, 0) / ratings.length;
+
+      return {
+        id: movie.id,
+        title: movie.title,
+        tmdbId: movie.tmdbId as string,
+        avgRating,
+        ratingCount: ratings.length,
+      };
+    })
+    .filter((m): m is NonNullable<typeof m> => m !== null)
+    .sort((a, b) => {
+      // Sort by average rating first, then by count for tiebreaker
+      if (b.avgRating !== a.avgRating) return b.avgRating - a.avgRating;
+      return b.ratingCount - a.ratingCount;
+    })
+    .slice(0, limit);
+
+  return moviesWithAvg;
+}
+
+/**
+ * Sync top N rated movies to Radarr
+ * Returns the list of movies that were added or already exist
+ */
+export async function syncTopRatedToRadarr(count = 10): Promise<{
+  added: { movieId: string; title: string; radarrId?: number }[];
+  alreadyInRadarr: { movieId: string; title: string }[];
+  failed: { movieId: string; title: string; error: string }[];
+}> {
+  const topMovies = await getTopRatedMoviesForRadarr(count);
+
+  const added: { movieId: string; title: string; radarrId?: number }[] = [];
+  const alreadyInRadarr: { movieId: string; title: string }[] = [];
+  const failed: { movieId: string; title: string; error: string }[] = [];
+
+  for (const movie of topMovies) {
+    const result = await addToRadarr(movie.tmdbId, movie.title);
+
+    if (result.success) {
+      if (result.alreadyExists) {
+        alreadyInRadarr.push({ movieId: movie.id, title: movie.title });
+      } else {
+        added.push({ movieId: movie.id, title: movie.title, radarrId: result.radarrId });
+      }
+
+      // Create RadarrSync record
+      await prisma.radarrSync.upsert({
+        where: { movieId: movie.id },
+        create: {
+          movieId: movie.id,
+          radarrId: result.radarrId,
+          monitored: true,
+          available: result.alreadyExists || false,
+        },
+        update: {
+          radarrId: result.radarrId,
+          monitored: true,
+        },
+      });
+    } else {
+      failed.push({ movieId: movie.id, title: movie.title, error: result.error || "Unknown error" });
+    }
+  }
+
+  return { added, alreadyInRadarr, failed };
+}
+
+/**
+ * Add the next highest-rated movie to Radarr (used when a movie is watched)
+ */
+export async function addNextTopRatedToRadarr(): Promise<{
+  success: boolean;
+  movie?: { id: string; title: string; avgRating: number };
+  error?: string;
+}> {
+  const topMovies = await getTopRatedMoviesForRadarr(1);
+
+  if (topMovies.length === 0) {
+    return { success: false, error: "No more movies to add" };
+  }
+
+  const movie = topMovies[0];
+  const result = await addToRadarr(movie.tmdbId, movie.title);
+
+  if (result.success) {
+    await prisma.radarrSync.upsert({
+      where: { movieId: movie.id },
+      create: {
+        movieId: movie.id,
+        radarrId: result.radarrId,
+        monitored: true,
+        available: false,
+      },
+      update: {
+        radarrId: result.radarrId,
+        monitored: true,
+      },
+    });
+
+    return {
+      success: true,
+      movie: { id: movie.id, title: movie.title, avgRating: movie.avgRating },
+    };
+  }
+
+  return { success: false, error: result.error };
+}
+
+// Sync movies with strong consensus to Radarr
+export async function syncMoviesToRadarr(
+  movieIds: string[]
+): Promise<
+  { movieId: string; title: string; result: AddToRadarrResult }[]
+> {
+  const config = await getRadarrConfig();
+  if (!config) {
+    throw new Error("Radarr not configured");
+  }
+
+  const movies = await prisma.movie.findMany({
+    where: {
+      id: { in: movieIds },
+      tmdbId: { not: null },
+    },
+  });
+
+  const results: { movieId: string; title: string; result: AddToRadarrResult }[] = [];
+
+  for (const movie of movies) {
+    if (!movie.tmdbId) continue;
+
+    const result = await addToRadarr(movie.tmdbId, movie.title);
+
+    // Create or update RadarrSync record on success
+    if (result.success) {
+      await prisma.radarrSync.upsert({
+        where: { movieId: movie.id },
+        create: {
+          movieId: movie.id,
+          radarrId: result.radarrId,
+          monitored: true,
+          available: result.alreadyExists || false,
+        },
+        update: {
+          radarrId: result.radarrId,
+          monitored: true,
+        },
+      });
+    }
+
+    results.push({
+      movieId: movie.id,
+      title: movie.title,
+      result,
+    });
+  }
+
+  return results;
 }

@@ -6,6 +6,11 @@ const SEARCH_CACHE_TTL_MS = 30 * 60_000;
 const MOVIE_CACHE_TTL_MS = 6 * 60 * 60_000;
 const MAX_CACHE_SIZE = 500;
 
+export interface OMDBRating {
+  Source: string;
+  Value: string;
+}
+
 export interface OMDBMovie {
   Title: string;
   Year: string;
@@ -20,6 +25,41 @@ export interface OMDBMovie {
   Production?: string;
   imdbRating?: string;
   Rated?: string;
+  Ratings?: OMDBRating[];
+}
+
+export interface ExtractedRatings {
+  imdbRating: number | null;
+  rottenTomatoesAudience: number | null;
+}
+
+/**
+ * Extract IMDB rating and Rotten Tomatoes audience score from OMDB data
+ */
+export function extractRatingsFromOMDB(movie: OMDBMovie): ExtractedRatings {
+  let imdbRating: number | null = null;
+  let rottenTomatoesAudience: number | null = null;
+
+  // Extract IMDB rating
+  if (movie.imdbRating && movie.imdbRating !== "N/A") {
+    const parsed = parseFloat(movie.imdbRating);
+    if (!isNaN(parsed)) {
+      imdbRating = parsed;
+    }
+  }
+
+  // Extract Rotten Tomatoes from Ratings array
+  if (movie.Ratings && Array.isArray(movie.Ratings)) {
+    const rtRating = movie.Ratings.find(r => r.Source === "Rotten Tomatoes");
+    if (rtRating?.Value) {
+      const match = rtRating.Value.match(/(\d+)%/);
+      if (match) {
+        rottenTomatoesAudience = parseInt(match[1], 10);
+      }
+    }
+  }
+
+  return { imdbRating, rottenTomatoesAudience };
 }
 
 interface CacheEntry<T> {
@@ -109,6 +149,21 @@ export async function searchOMDB(query: string): Promise<OMDBMovie[]> {
   return results;
 }
 
+/**
+ * Upgrades OMDB poster URL to higher resolution.
+ * OMDB returns URLs like: https://m.media-amazon.com/images/M/...@._V1_SX300.jpg
+ * We replace SX300 with SX1000 for better quality.
+ */
+export function getHighResPosterUrl(posterUrl: string | null | undefined): string | null {
+  if (!posterUrl || posterUrl === "N/A") return null;
+  // Replace common low-res suffixes with high-res versions
+  return posterUrl
+    .replace(/_SX\d+\./, "_SX1000.")
+    .replace(/_SY\d+\./, "_SY1500.")
+    .replace(/@\._V1_SX\d+/, "@._V1_SX1000")
+    .replace(/@\._V1_SY\d+/, "@._V1_SY1500");
+}
+
 export async function getOMDBMovie(imdbId: string): Promise<OMDBMovie | null> {
   const normalizedImdbId = imdbId.trim().toLowerCase();
   if (!normalizedImdbId) return null;
@@ -133,6 +188,11 @@ export async function getOMDBMovie(imdbId: string): Promise<OMDBMovie | null> {
   if (!data || data.Response === "False") {
     setCached(omdbMovieCache, normalizedImdbId, null, MOVIE_CACHE_TTL_MS);
     return null;
+  }
+
+  // Upgrade poster to high resolution
+  if (data.Poster) {
+    data.Poster = getHighResPosterUrl(data.Poster) || data.Poster;
   }
 
   setCached(omdbMovieCache, normalizedImdbId, data as OMDBMovie, MOVIE_CACHE_TTL_MS);

@@ -172,3 +172,210 @@ Core entities in `prisma/schema.prisma`:
 - Removed studio-rating controls from Settings page; studio rating now lives only in `/preferences/studios`.
 - Updated visual direction to a more modern mobile-first look with expanded desktop width and refreshed accent/background styling.
 - User preference update: user prefers high-clarity interaction copy, stronger session collaboration features (joinability + cancellation), and admin tools for household onboarding via invite links.
+- 2026-02-07 (Bug fixes and UX improvements):
+  - Fixed studios rating page poster size: enlarged sample movie posters from `w-28 h-40` to `w-40 h-60 sm:w-48 sm:h-72` for better visibility.
+  - Implemented aggressive background preloading for movie discovery: queue-based system with `PRELOAD_BATCH_SIZE=10` and `PRELOAD_THRESHOLD=3` ensures movies are always ready for instant display.
+  - Created new `TinderMovieCard` component with full-screen poster, gradient overlay, and superimposed metadata (title, directors, actors, description toggle) for Tinder-like movie rating UX.
+  - Updated movie rating page (`/preferences/movies`) to use single-card Tinder-style interaction with immediate advancement after rating and undo support.
+  - Replaced dual separate year sliders with unified dual-handle range slider in session preferences (Tinder age-range style with draggable min/max handles).
+  - Fixed Docker permission error: added `mkdir -p /app/.next/cache && chown -R nextjs:nodejs /app/.next` to Dockerfile to prevent EACCES errors on image optimization.
+  - Fixed end session button bug: added proper error handling, guest token headers, and user feedback on failure.
+  - Fixed missing poster issue: discover API now fetches OMDB details for movies missing posters, and re-fetches posters on-demand for existing movies without poster URLs.
+- 2026-02-07 (Upcoming movies & Radarr improvements):
+  - Added Trakt "anticipated" movies endpoint (`getAnticipatedMovies`) for upcoming releases.
+  - Created new `/preferences/upcoming` page for voting on not-yet-released movies.
+  - Implemented consensus logic for Radarr: 2+ users with 4+ star ratings triggers auto-add eligibility.
+  - Added `/api/movies/upcoming` endpoint with GET (list anticipated) and POST (sync consensus to Radarr).
+  - Improved Radarr integration (`src/lib/api/radarr.ts`):
+    - Better error handling with detailed result types (`AddToRadarrResult`).
+    - Automatic root folder selection (prefers accessible folders).
+    - Quality profile selection (prefers 1080p or Any profile).
+    - `syncMoviesToRadarr()` function for batch adding with DB persistence.
+    - Duplicate detection - skips movies already in Radarr.
+  - Upcoming movies UI features:
+    - Card-based navigation through anticipated releases.
+    - Star rating with consensus progress bar.
+    - Stats showing upcoming/rated/in-radarr counts.
+    - Admin-only "Sync to Radarr" button for consensus movies.
+    - List view with status indicators.
+  - Fixed TinderMovieCard flickering bug: added `key={movie.id}` prop so animation only triggers on movie change, not on every re-render from background preloading.
+  - Fixed movie queue flickering between movies: removed unstable callbacks from useEffect dependencies, added `initialLoadDoneRef` to prevent re-running initial load.
+  - Added React.memo to TinderMovieCard with custom comparison for movie.id, rating, and hasSeen.
+  - Added image loading state with spinner placeholder for smooth poster loading.
+  - Fixed pixelated movie posters: added `getHighResPosterUrl()` function to upgrade OMDB poster URLs from SX300 to SX1000 resolution.
+  - Fixed movie queue showing already-rated movies: added `dedupeAndFilterMovies()` to filter by rated IDs, properly exclude rated movies from initial load and preload.
+  - Increased preload queue size from 3 to 10 movies (PRELOAD_THRESHOLD=10, PRELOAD_BATCH_SIZE=15).
+  - Added `/api/movies/prefill` endpoint: POST to prefill database with 100 popular/trending movies, GET to check status, PATCH to upgrade existing low-res poster URLs.
+  - Added automatic database prefill on Docker container startup after server is ready.
+  - Added TMDB API client (`src/lib/api/tmdb.ts`) as backup metadata provider for missing posters, descriptions, cast, crew, and production companies.
+  - Movie discovery now falls back to TMDB when OMDB doesn't provide poster, description, or studio data.
+  - Updated TinderMovieCard to show description by default (2 lines), expandable to full description via info button.
+  - Enhanced people discover API to include headshot photos and up to 5 sample movies with posters (fetched from TMDB if missing).
+  - Enhanced studio discover API to show up to 5 sample movies with high-res posters.
+  - Added `syncMovieMetadataFromTMDB()` function to sync production companies, cast with photos, and crew from TMDB data.
+- 2026-02-07 (UX refinements and poster improvements):
+  - Fixed dual-handle year range slider on movie night preferences page: replaced overlapping HTML range inputs with custom pointer event handling for proper min/max handle dragging.
+  - Added TMDB integration to settings page for API key configuration.
+  - Enhanced studio discover API to prioritize movies with posters and fetch missing posters from TMDB.
+  - Added `fetchAndPersistMoviePoster()` function to TMDB client for on-demand poster fetching.
+  - Movie discover API now falls back to TMDB for poster fetching when OMDB doesn't provide one.
+  - Optimized movie rating page for maximum poster visibility:
+    - Removed header in favor of compact back button and search toggle.
+    - Made search collapsible to maximize screen real estate for poster.
+    - Removed queue indicator dots in favor of subtle badge.
+    - Increased TinderMovieCard height from `calc(100vh-280px)` to `calc(100vh-180px)` with min-height 500px for more immersive experience.
+  - Rewrote movie discover API for instant loading:
+    - Now queries local database directly instead of calling external APIs on every request.
+    - Removed all Trakt/OMDB/TMDB calls from the hot path - movies load in <100ms.
+    - Background prefill adds new movies from Trakt (up to 200 movies maintained).
+    - External API calls only happen during prefill or manual refresh.
+  - Fixed Studio unique constraint errors:
+    - Changed studio upsert to findFirst + create pattern.
+    - Added try-catch around studio sync to prevent crashes.
+    - Same fix applied to TMDB metadata sync.
+  - Increased prefill limit from 100 to 200 movies.
+  - Added external ratings display to movie cards:
+    - New Movie schema fields: `imdbRating`, `rottenTomatoesAudience`, `letterboxdRating`.
+    - IMDB link button on movie cards (yellow IMDb badge that opens IMDB page).
+    - IMDB rating displayed as yellow star badge.
+    - Rotten Tomatoes audience score displayed as red tomato or green splat badge.
+    - `extractRatingsFromOMDB()` function parses IMDB and RT scores from OMDB Ratings array.
+    - PATCH `/api/movies/prefill` now backfills ratings for existing movies.
+    - Discover API returns ratings fields for display in cards.
+  - Radarr/Plex availability and Tautulli watch integration:
+    - Movie night session recommendations now filter to only show movies available on Plex or Radarr (`plexAvailability.available` or `radarrSync.available`).
+    - Added `getTopRatedMoviesForRadarr()` to rank unwatched movies by average household rating.
+    - Added `syncTopRatedToRadarr()` to batch-add top N rated movies to Radarr.
+    - Added `addNextTopRatedToRadarr()` to add the next highest-rated movie when one is watched.
+    - Added `syncRadarrAvailability()` to sync Radarr movie download status back to DB.
+    - New `/api/radarr/sync` endpoints:
+      - GET: List top rated movies eligible for Radarr (admin only).
+      - POST: Sync top N rated movies to Radarr (admin only).
+      - PATCH: Add next top rated movie (for automation).
+    - New `/api/webhooks/tautulli` endpoint:
+      - POST: Tautulli webhook for movie watch detection.
+      - Marks movie as seen for all users with it in watchlist.
+      - Automatically adds next highest-rated movie to Radarr.
+      - GET: Returns webhook configuration instructions.
+    - Workflow: User rates movies → top 10 auto-added to Radarr → movie watched on Plex → Tautulli webhook triggers → next movie added to Radarr.
+  - Tautulli configuration UI in Settings page:
+    - Shows webhook URL for easy copy/paste.
+    - Step-by-step setup instructions displayed inline.
+    - Optional webhook secret field for verification.
+  - Movie discovery now filters to only show released movies:
+    - Excludes movies where `releaseDate > now()` or `year > currentYear`.
+    - Unreleased/upcoming movies should be viewed in `/preferences/upcoming` instead.
+  - Session rewatch preference:
+    - Added `okWithRewatch` boolean field to `SessionParticipant` model (default: true).
+    - Toggle UI in session preferences step: "Open to rewatching movies".
+    - Recommendation scoring applies heavy penalty (-2.0) to movies if any participant who set `okWithRewatch=false` has already seen the movie.
+    - Allows participants to signal they only want fresh movies tonight.
+  - Genre display on movie cards:
+    - TinderMovieCard now shows up to 2 genre badges in the top-left corner.
+    - Discover API returns genre names from database relations.
+  - Ratings fallback sources:
+    - Added `getTraktMovieRatings()` to Trakt client for fetching movie ratings.
+    - Added `extractTMDBRating()` to TMDB client for extracting vote_average.
+    - Prefill and backfill now try ratings sources in order: OMDB → Trakt → TMDB.
+    - All ratings normalized to 0-10 scale (same as IMDB).
+    - Significantly increases coverage for movies without OMDB ratings.
+  - User profile stats page (`/profile`):
+    - New `/api/profile/stats` endpoint returns learned preferences.
+    - Shows top/bottom 5 genres, actors, directors, studios with affinity scores.
+    - Displays rating distribution chart (1-5 stars).
+    - Shows recent high-rated movies (4+ stars) with posters.
+    - Includes user discovery settings (exploration factor, source preference).
+    - Affinity calculated from genre rankings (position-based) and person/studio ratings (normalized to -1 to 1 scale).
+    - Actor/director/studio affinities blend direct ratings (strong, weight=1.0) with inferred affinity from movie ratings (weak, weight=0.3).
+  - Preference profile now infers actor/director/studio affinities from movie ratings:
+    - When a user rates a movie, the cast (top 5), directors, and studios of that movie receive weak affinity influence.
+    - This means movie discovery and session recommendations automatically learn from movie ratings without needing explicit person/studio ratings.
+    - Direct person/studio ratings still have 3x the influence of inferred ratings.
+    - Link added to preferences hub.
+  - Database backup and restore:
+    - `GET /api/backup`: Downloads full JSON backup. Includes API keys and password hashes.
+    - `POST /api/backup/restore`: Restores from backup file. Matches users by email.
+    - `GET|POST /api/setup/restore`: Public restore endpoint for fresh installations with no users. Restores full user accounts.
+    - `/setup/restore` page: UI for restoring backup on new instance.
+    - Settings page: Backup & Restore section for all logged-in users.
+    - Backup includes: user accounts with password hashes, households with memberships, movies, genres, studios, people, cast/crew, all ratings and preferences, user settings, integration configs with API keys.
+    - Full account restore: users can log in with existing credentials after restore (no re-registration needed).
+  - Metadata backfill for rating queue items:
+    - **Studio backfill** (`/api/studios/backfill`):
+      - `GET`: Check which studios need more movies (fewer than 5 linked).
+      - `POST`: Backfill popular movies for studios from TMDB.
+      - Prioritizes studios by quality score (avg movie rating/popularity).
+      - Limits to top 50 items likely to appear in rating queues.
+    - **People backfill** (`/api/people/backfill`):
+      - `GET`: Check which actors/directors need more movies (fewer than 3 linked).
+      - `POST`: Backfill movies for actors/directors from TMDB.
+      - Fetches filmography from TMDB person details.
+      - Updates headshot photos if missing.
+      - Prioritizes by quality score of linked movies.
+      - Limits to top 50 actors + 50 directors likely to appear in queues.
+    - Both endpoints run automatically on Docker container startup.
+  - Recommendation algorithm improvements based on industry research:
+    - **Cold Start Handling**: New users (fewer than 10 ratings) receive special treatment:
+      - Higher exploration factor (minimum 70%) to show diverse options.
+      - More weight on global quality signals (IMDB rating, popularity) vs user preferences.
+      - Genre and household ratings weighted more heavily than actor/director/studio signals.
+    - **Diversity Injection**: 15% of recommendations reserved for genre diversity:
+      - Prevents filter bubbles by ensuring underrepresented genres appear.
+      - Two-pass algorithm: fill main slots by score, then fill diversity slots with new genres.
+    - **Active Learning**: Bonus for items that teach us the most:
+      - Movies/people/studios from genres the user hasn't rated get a scoring boost.
+      - Helps rapidly build a complete preference profile.
+    - **Confidence-Based Weighting**: Cold start users receive lower confidence weight.
+    - Research sources:
+      - Taste App: Uses ~20 ratings for calibration, shows match percentage.
+      - TinVec (Tinder): Embeds preferences into vectors from swipe history.
+      - Academic papers on cold start problem: hybrid filtering, demographic targeting.
+      - Matrix factorization: learns latent user/item attributes.
+  - **Hybrid Factorization Machine - IMPLEMENTED**:
+    - Upgraded from pure Funk SVD to hybrid Factorization Machine for better cold-start handling.
+    - Database models: `LatentVector`, `FeatureEmbedding`, `UserFeatureCache`, `MFModelMetadata`, `ActivityLog`.
+    - Library: `src/lib/matrix-factorization.ts` - Implements hybrid FM with SGD.
+    - API: `/api/mf/train` - GET status, POST manual train, PATCH auto-retrain.
+    - **Input Features (11 types learned)**:
+      - **Movie features**:
+        - Genre embeddings (16 dimensions each)
+        - Era embeddings (decades/modern/classic)
+        - Studio embeddings (top 2 production companies)
+        - Actor embeddings (top 3 cast members)
+        - Director embeddings
+        - Popularity bin (niche/moderate/popular/blockbuster)
+        - Runtime bin (short/standard/long/epic)
+        - Vote average bin (poor/mixed/good/excellent)
+      - **User features**:
+        - Exploration factor bin (conservative/moderate/adventurous)
+        - Rating pattern bin (consistent/generous/critical/varied)
+        - Top genre preferences (user's ranked genre IDs)
+      - **Household features**:
+        - Consensus bin (positive/neutral/negative based on other members' ratings)
+        - Direct household consensus score influence
+      - **Feature interactions**:
+        - Pairwise dot products of active feature embeddings
+        - Captures cross-feature patterns (e.g., "action + Spielberg")
+    - **Hyperparameters**:
+      - 50 latent dimensions for user/movie vectors
+      - 16 feature dimensions for side feature embeddings
+      - 0.005 learning rate, 0.02 regularization
+      - 20 epochs default, 10% validation split
+    - **Cold-Start Handling**:
+      - Cold-start movies (never rated): Uses feature embeddings only, synthesizes pseudo-movie-vector from active features
+      - Cold-start users (no latent vector): Falls back to feature biases only
+      - Quality/popularity bins provide strong signal for new movies
+      - Director/actor embeddings transfer knowledge from their other movies
+    - **Confidence Calculation** (5 factors):
+      - Rating count (30%): More ratings = higher confidence
+      - Training RMSE (20%): Lower error = better
+      - Validation RMSE (25%): Generalization quality
+      - Epochs trained (15%): More training = more refined
+      - Features learned (10%): More features = richer model
+    - **Integration**: Movie discover API blends MF predictions with heuristic scoring.
+    - **Weight**: MF gets 0-40% weight based on model confidence.
+    - **Profile page**: Shows model metrics (confidence, epochs, RMSE, validation RMSE, features learned).
+    - **Auto-retrain**: Background loop checks every 5 minutes, retrains if inactive 10+ minutes and 10%+ new ratings.
+    - **TinVec (pure embedding approach)**: NOT IMPLEMENTED
+      - Designed for binary swipe data, not 5-star ratings.
+      - Household-scale use case doesn't benefit significantly.

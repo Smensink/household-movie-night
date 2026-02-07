@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logActivity } from "@/lib/matrix-factorization";
 
 type PersonType = "actor" | "director";
 
@@ -121,6 +122,7 @@ export async function POST(req: NextRequest) {
         notHeardOf: notHeardOf ?? false,
       },
     });
+    await logActivity(session.user.id, "rating", "actor", personId);
     return NextResponse.json(actorRating);
   }
 
@@ -140,6 +142,7 @@ export async function POST(req: NextRequest) {
         notHeardOf: notHeardOf ?? false,
       },
     });
+    await logActivity(session.user.id, "rating", "director", personId);
     return NextResponse.json(directorRating);
   }
 

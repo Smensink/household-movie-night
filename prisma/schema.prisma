@@ -72,6 +72,9 @@ model Movie {
   certification String?
   popularity    Float?    @default(0)
   voteAverage   Float?    @default(0)
+  imdbRating    Float?
+  rottenTomatoesAudience Int?
+  letterboxdRating Float?
   era           String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -214,13 +217,14 @@ model MovieNightSession {
 }
 
 model SessionParticipant {
-  id            String  @id @default(cuid())
-  sessionId     String
-  userId        String
-  eraPreference String?
+  id             String  @id @default(cuid())
+  sessionId      String
+  userId         String
+  eraPreference  String?
   minReleaseYear Int?
   maxReleaseYear Int?
-  isPresent     Boolean @default(true)
+  okWithRewatch  Boolean @default(true)
+  isPresent      Boolean @default(true)
 
   session MovieNightSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -366,4 +370,73 @@ model UserSettings {
   discoverySourcePref  String @default("balanced") // "trending" | "popular" | "top_rated" | "new_releases" | "balanced"
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Matrix Factorization models for recommendation
+model LatentVector {
+  id         String   @id @default(cuid())
+  entityType String   // "user" or "movie"
+  entityId   String
+  vector     String   // JSON array of floats
+  bias       Float    @default(0)
+  updatedAt  DateTime @updatedAt
+
+  @@unique([entityType, entityId])
+  @@index([entityType])
+}
+
+model MFModelMetadata {
+  id               String   @id @default(cuid())
+  version          Int      @default(1)
+  latentDimensions Int      @default(50)
+  featureDimensions Int     @default(16)  // Dimensions for side features
+  learningRate     Float    @default(0.005)
+  regularization   Float    @default(0.02)
+  trainedEpochs    Int      @default(0)
+  totalRatings     Int      @default(0)
+  rmse             Float?   // Root mean squared error on training data
+  validationRmse   Float?   // RMSE on held-out validation set
+  lastTrainedAt    DateTime?
+  isTraining       Boolean  @default(false)
+  globalMean       Float    @default(3.0)  // Global average rating
+  featureWeights   String?  // JSON object of learned feature weights
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// Feature embeddings for hybrid factorization machine
+model FeatureEmbedding {
+  id           String   @id @default(cuid())
+  featureType  String   // "genre", "era", "studio", "actor", "director", "popularity_bin", "runtime_bin"
+  featureId    String   // The ID or value of the feature
+  vector       String   // JSON array of floats (embedding)
+  bias         Float    @default(0)
+  updatedAt    DateTime @updatedAt
+
+  @@unique([featureType, featureId])
+  @@index([featureType])
+}
+
+// User feature cache for faster inference
+model UserFeatureCache {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  explorationFactor Float    @default(0.5)
+  genreVector       String?  // Aggregated genre preference vector (JSON)
+  ratingMean        Float?   // User's average rating
+  ratingStdDev      Float?   // User's rating standard deviation
+  ratingCount       Int      @default(0)
+  topGenreIds       String?  // JSON array of top 5 genre IDs
+  updatedAt         DateTime @updatedAt
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String   // "rating", "page_view", "session_start", etc.
+  entityType String? // "movie", "actor", "director", "studio"
+  entityId  String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
 }

@@ -180,15 +180,15 @@ export default function StudioPreferencesPage() {
           </div>
 
           {activeStudio.sampleMovies && activeStudio.sampleMovies.length > 0 && (
-            <div className="space-y-2">
+            <div className="space-y-3">
               <p className="text-xs text-muted">
-                Hover a poster for details. On mobile, tap and hold.
+                Sample movies from this studio. Hover for details.
               </p>
-              <div className="flex gap-3 overflow-x-auto pb-2">
+              <div className="flex gap-4 overflow-x-auto pb-3">
                 {activeStudio.sampleMovies.map((movie) => (
                   <div
                     key={`${activeStudio.id}-${movie.title}`}
-                    className="group relative w-28 h-40 sm:w-32 sm:h-48 rounded-xl overflow-hidden border border-border bg-card-hover flex-shrink-0"
+                    className="group relative w-40 h-60 sm:w-48 sm:h-72 rounded-2xl overflow-hidden border border-border bg-card-hover flex-shrink-0 shadow-lg"
                   >
                     {movie.posterUrl ? (
                       <Image

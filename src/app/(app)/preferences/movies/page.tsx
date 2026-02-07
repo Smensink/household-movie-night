@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import MovieCard from "@/components/MovieCard";
+import Link from "next/link";
+import TinderMovieCard from "@/components/TinderMovieCard";
 import Input from "@/components/ui/Input";
 import Button from "@/components/ui/Button";
 
@@ -14,7 +15,10 @@ interface Movie {
   posterUrl?: string | null;
   overview?: string | null;
   era?: string | null;
-  imdbId?: string;
+  imdbId?: string | null;
+  imdbRating?: number | null;
+  rottenTomatoesAudience?: number | null;
+  genres?: string[];
   directors?: string[];
   actors?: string[];
   studios?: string[];
@@ -29,65 +33,53 @@ interface UserRating {
 
 interface UndoAction {
   movie: Movie;
-  removedIndex: number;
   previousRating: UserRating | null;
   hadPreviousRating: boolean;
   replacementMovie: Movie | null;
 }
 
-const DISCOVER_VISIBLE_COUNT = 12;
-const DISCOVER_INITIAL_BATCH = 24;
-const DISCOVER_QUEUE_TARGET = 6;
-const DISCOVER_REFILL_BATCH = 12;
+const PRELOAD_BATCH_SIZE = 15; // Preload this many movies at a time
+const PRELOAD_THRESHOLD = 10; // Fetch more when queue drops below this
+const MIN_QUEUE_SIZE = 10; // Always try to maintain at least this many movies in queue
 
-function dedupeMoviesById(movies: Movie[]): Movie[] {
+function dedupeAndFilterMovies(movies: Movie[], excludeIds: Set<string>): Movie[] {
   const seen = new Set<string>();
-  const deduped: Movie[] = [];
+  const filtered: Movie[] = [];
 
   for (const movie of movies) {
     if (seen.has(movie.id)) continue;
+    if (excludeIds.has(movie.id)) continue;
     seen.add(movie.id);
-    deduped.push(movie);
+    filtered.push(movie);
   }
 
-  return deduped;
+  return filtered;
 }
 
 export default function RateMoviesPage() {
   const { status } = useSession();
   const router = useRouter();
 
-  const [movies, setMovies] = useState<Movie[]>([]);
-  const [discoverQueue, setDiscoverQueue] = useState<Movie[]>([]);
+  const [currentMovie, setCurrentMovie] = useState<Movie | null>(null);
+  const [movieQueue, setMovieQueue] = useState<Movie[]>([]);
   const [ratings, setRatings] = useState<Map<string, UserRating>>(new Map());
   const [searchQuery, setSearchQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [mode, setMode] = useState<"discover" | "search">("discover");
   const [loading, setLoading] = useState(true);
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
+  const [showSearch, setShowSearch] = useState(false);
 
-  const moviesRef = useRef<Movie[]>([]);
   const queueRef = useRef<Movie[]>([]);
   const ratingsRef = useRef<Map<string, UserRating>>(new Map());
-  const queueLoadingRef = useRef(false);
-
-  const setMoviesAndRef = useCallback((nextMovies: Movie[]) => {
-    moviesRef.current = nextMovies;
-    setMovies(nextMovies);
-  }, []);
+  const preloadInProgressRef = useRef(false);
+  const ratedMovieIdsRef = useRef<Set<string>>(new Set());
+  const initialLoadDoneRef = useRef(false);
 
   const setQueueAndRef = useCallback((nextQueue: Movie[]) => {
     queueRef.current = nextQueue;
-    setDiscoverQueue(nextQueue);
+    setMovieQueue(nextQueue);
   }, []);
-
-  useEffect(() => {
-    moviesRef.current = movies;
-  }, [movies]);
-
-  useEffect(() => {
-    queueRef.current = discoverQueue;
-  }, [discoverQueue]);
 
   useEffect(() => {
     ratingsRef.current = ratings;
@@ -111,77 +103,76 @@ export default function RateMoviesPage() {
     return Array.isArray(data) ? (data as Movie[]) : [];
   }, []);
 
-  const getExcludeMovieIds = useCallback((extraIds: string[] = []) => {
+  const getExcludeMovieIds = useCallback(() => {
     return Array.from(
       new Set([
-        ...moviesRef.current.map((movie) => movie.id),
+        ...(currentMovie ? [currentMovie.id] : []),
         ...queueRef.current.map((movie) => movie.id),
-        ...extraIds,
+        ...Array.from(ratedMovieIdsRef.current),
       ])
     );
-  }, []);
+  }, [currentMovie]);
 
-  const refillDiscoverQueue = useCallback(async () => {
-    if (status !== "authenticated" || mode !== "discover") return;
-    if (queueLoadingRef.current) return;
-    if (queueRef.current.length >= DISCOVER_QUEUE_TARGET) return;
+  // Preload movies in background
+  const preloadMovies = useCallback(async () => {
+    if (preloadInProgressRef.current) return;
+    if (mode !== "discover") return;
+    if (queueRef.current.length >= PRELOAD_THRESHOLD) return;
 
-    queueLoadingRef.current = true;
+    preloadInProgressRef.current = true;
+
     try {
-      const batch = await fetchDiscoverBatch(
-        DISCOVER_REFILL_BATCH,
-        getExcludeMovieIds()
-      );
-      if (batch.length === 0) return;
-
-      const merged = dedupeMoviesById([...queueRef.current, ...batch]);
-      setQueueAndRef(merged);
+      const batch = await fetchDiscoverBatch(PRELOAD_BATCH_SIZE, getExcludeMovieIds());
+      if (batch.length > 0) {
+        const merged = dedupeAndFilterMovies(
+          [...queueRef.current, ...batch],
+          ratedMovieIdsRef.current
+        );
+        setQueueAndRef(merged);
+      }
     } finally {
-      queueLoadingRef.current = false;
+      preloadInProgressRef.current = false;
     }
-  }, [fetchDiscoverBatch, getExcludeMovieIds, mode, setQueueAndRef, status]);
+  }, [fetchDiscoverBatch, getExcludeMovieIds, mode, setQueueAndRef]);
 
-  const loadDiscoverMovies = useCallback(async () => {
-    const discoverMovies = await fetchDiscoverBatch(DISCOVER_INITIAL_BATCH, []);
-    const visible = discoverMovies.slice(0, DISCOVER_VISIBLE_COUNT);
-    const queued = discoverMovies.slice(DISCOVER_VISIBLE_COUNT);
-
-    setMoviesAndRef(visible);
-    setQueueAndRef(queued);
-    setMode("discover");
-    setUndoAction(null);
-    void refillDiscoverQueue();
-  }, [fetchDiscoverBatch, refillDiscoverQueue, setMoviesAndRef, setQueueAndRef]);
-
+  // Initial load - only runs once
   useEffect(() => {
     if (status !== "authenticated") return;
+    if (initialLoadDoneRef.current) return;
 
+    initialLoadDoneRef.current = true;
     let cancelled = false;
 
     Promise.all([
-      fetchDiscoverBatch(DISCOVER_INITIAL_BATCH, []),
+      fetchDiscoverBatch(PRELOAD_BATCH_SIZE * 2, []),
       fetch("/api/ratings").then((r) => r.json()),
     ])
       .then(([discoverMovies, userRatings]) => {
         if (cancelled) return;
 
-        const visible = discoverMovies.slice(0, DISCOVER_VISIBLE_COUNT);
-        const queued = discoverMovies.slice(DISCOVER_VISIBLE_COUNT);
-
-        setMoviesAndRef(visible);
-        setQueueAndRef(queued);
-
+        // Process ratings first to know which movies to exclude
         const ratingMap = new Map<string, UserRating>();
+        const ratedIds = new Set<string>();
         if (Array.isArray(userRatings)) {
           for (const rating of userRatings) {
             ratingMap.set(rating.movieId, rating);
+            ratedIds.add(rating.movieId);
+            ratedMovieIdsRef.current.add(rating.movieId);
           }
+        }
+
+        // Filter out already-rated movies from discover results
+        const unratedMovies = dedupeAndFilterMovies(discoverMovies, ratedIds);
+
+        // Set first unrated movie as current
+        if (unratedMovies.length > 0) {
+          setCurrentMovie(unratedMovies[0]);
+          setQueueAndRef(unratedMovies.slice(1));
         }
 
         ratingsRef.current = ratingMap;
         setRatings(ratingMap);
         setLoading(false);
-        void refillDiscoverQueue();
       })
       .catch(() => {
         if (!cancelled) {
@@ -192,7 +183,22 @@ export default function RateMoviesPage() {
     return () => {
       cancelled = true;
     };
-  }, [fetchDiscoverBatch, refillDiscoverQueue, setMoviesAndRef, setQueueAndRef, status]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
+
+  // Background preloading effect - use ref to avoid recreating interval
+  const preloadMoviesRef = useRef(preloadMovies);
+  preloadMoviesRef.current = preloadMovies;
+
+  useEffect(() => {
+    if (mode !== "discover" || loading) return;
+
+    const interval = setInterval(() => {
+      void preloadMoviesRef.current();
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [mode, loading]);
 
   const searchMovies = useCallback(async () => {
     if (!searchQuery.trim()) return;
@@ -205,28 +211,30 @@ export default function RateMoviesPage() {
     );
     const data = await res.json();
     const nextMovies = Array.isArray(data) ? (data as Movie[]) : [];
-    setMoviesAndRef(nextMovies);
-
-    setSearching(false);
-  }, [searchQuery, setMoviesAndRef]);
-
-  const pullReplacementMovie = useCallback(async (): Promise<Movie | null> => {
-    if (queueRef.current.length > 0) {
-      const [nextMovie, ...remainingQueue] = queueRef.current;
-      setQueueAndRef(remainingQueue);
-      return nextMovie;
+    
+    if (nextMovies.length > 0) {
+      setCurrentMovie(nextMovies[0]);
+      setQueueAndRef(nextMovies.slice(1));
+    } else {
+      setCurrentMovie(null);
+      setQueueAndRef([]);
     }
 
-    const batch = await fetchDiscoverBatch(
-      DISCOVER_REFILL_BATCH,
-      getExcludeMovieIds()
-    );
-    if (batch.length === 0) return null;
+    setSearching(false);
+  }, [searchQuery, setQueueAndRef]);
 
-    const [nextMovie, ...remainingQueue] = batch;
-    setQueueAndRef(remainingQueue);
-    return nextMovie;
-  }, [fetchDiscoverBatch, getExcludeMovieIds, setQueueAndRef]);
+  const advanceToNextMovie = useCallback(() => {
+    if (queueRef.current.length > 0) {
+      const [next, ...rest] = queueRef.current;
+      setCurrentMovie(next);
+      setQueueAndRef(rest);
+    } else {
+      setCurrentMovie(null);
+    }
+    
+    // Trigger preload check
+    setTimeout(() => void preloadMovies(), 100);
+  }, [preloadMovies, setQueueAndRef]);
 
   const persistRating = useCallback(async (payload: UserRating) => {
     await fetch("/api/ratings", {
@@ -240,8 +248,7 @@ export default function RateMoviesPage() {
     movieId: string,
     rating: number | null,
     hasSeen?: boolean,
-    notHeardOf?: boolean,
-    advanceOnRate: boolean = false
+    notHeardOf?: boolean
   ) => {
     const existing = ratingsRef.current.get(movieId);
     const payload: UserRating = {
@@ -251,6 +258,9 @@ export default function RateMoviesPage() {
       notHeardOf: notHeardOf ?? false,
     };
 
+    // Track rated movies
+    ratedMovieIdsRef.current.add(movieId);
+
     setRatings((prev) => {
       const next = new Map(prev);
       next.set(movieId, payload);
@@ -258,39 +268,40 @@ export default function RateMoviesPage() {
       return next;
     });
 
-    let removedMovie: Movie | null = null;
-    let removedIndex = -1;
     let replacementMovie: Movie | null = null;
 
-    if (mode === "discover" && advanceOnRate) {
-      const currentMovies = moviesRef.current;
-      removedIndex = currentMovies.findIndex((movie) => movie.id === movieId);
-      if (removedIndex >= 0) {
-        removedMovie = currentMovies[removedIndex];
-        const trimmed = [
-          ...currentMovies.slice(0, removedIndex),
-          ...currentMovies.slice(removedIndex + 1),
-        ];
-        setMoviesAndRef(trimmed);
+    if (mode === "discover") {
+      // Store for undo
+      const currentMovieCopy = currentMovie;
 
-        replacementMovie = await pullReplacementMovie();
-        if (replacementMovie) {
-          setMoviesAndRef([...moviesRef.current, replacementMovie]);
-        }
+      // Advance immediately for snappy feel
+      advanceToNextMovie();
 
-        setUndoAction({
-          movie: removedMovie,
-          removedIndex,
-          previousRating: existing ?? null,
-          hadPreviousRating: existing !== undefined,
-          replacementMovie,
-        });
+      // Fetch replacements in background to maintain queue
+      const excludeIds = getExcludeMovieIds();
+      const batch = await fetchDiscoverBatch(3, excludeIds);
 
-        void refillDiscoverQueue();
+      // Filter out any movies already in queue or already rated
+      const queueIds = new Set(queueRef.current.map((m) => m.id));
+      const validReplacements = batch.filter(
+        (m) => !queueIds.has(m.id) && !ratedMovieIdsRef.current.has(m.id)
+      );
+      replacementMovie = validReplacements[0] ?? null;
+
+      if (validReplacements.length > 0) {
+        setQueueAndRef([...queueRef.current, ...validReplacements]);
       }
+
+      setUndoAction({
+        movie: currentMovieCopy!,
+        previousRating: existing ?? null,
+        hadPreviousRating: existing !== undefined,
+        replacementMovie,
+      });
     }
 
     await persistRating(payload);
+    void preloadMovies();
   };
 
   const toggleSeen = useCallback(
@@ -331,22 +342,24 @@ export default function RateMoviesPage() {
         next.set(action.movie.id, action.previousRating);
       } else {
         next.delete(action.movie.id);
+        ratedMovieIdsRef.current.delete(action.movie.id);
       }
       ratingsRef.current = next;
       return next;
     });
 
-    const withoutDuplicates = moviesRef.current.filter(
-      (movie) => movie.id !== action.movie.id && movie.id !== action.replacementMovie?.id
-    );
-    const insertIndex = Math.max(0, Math.min(action.removedIndex, withoutDuplicates.length));
-    const restored = [...withoutDuplicates];
-    restored.splice(insertIndex, 0, action.movie);
-    setMoviesAndRef(restored);
+    // Put the movie back as current
+    if (currentMovie) {
+      setQueueAndRef([currentMovie, ...queueRef.current]);
+    }
+    setCurrentMovie(action.movie);
 
     if (action.replacementMovie) {
-      const nextQueue = dedupeMoviesById([action.replacementMovie, ...queueRef.current]);
-      setQueueAndRef(nextQueue);
+      // Remove the replacement from queue if it was added
+      const withoutReplacement = queueRef.current.filter(
+        (m) => m.id !== action.replacementMovie?.id
+      );
+      setQueueAndRef(withoutReplacement);
     }
 
     if (action.hadPreviousRating && action.previousRating) {
@@ -356,111 +369,142 @@ export default function RateMoviesPage() {
         method: "DELETE",
       });
     }
-  }, [persistRating, setMoviesAndRef, setQueueAndRef, undoAction]);
+  }, [currentMovie, persistRating, setQueueAndRef, undoAction]);
+
+  const loadDiscoverMovies = useCallback(async () => {
+    setLoading(true);
+    const excludeIds = Array.from(ratedMovieIdsRef.current);
+    const discoverMovies = await fetchDiscoverBatch(PRELOAD_BATCH_SIZE * 2, excludeIds);
+
+    // Filter out any rated movies that slipped through
+    const unratedMovies = dedupeAndFilterMovies(discoverMovies, ratedMovieIdsRef.current);
+
+    if (unratedMovies.length > 0) {
+      setCurrentMovie(unratedMovies[0]);
+      setQueueAndRef(unratedMovies.slice(1));
+    } else {
+      setCurrentMovie(null);
+      setQueueAndRef([]);
+    }
+
+    setMode("discover");
+    setUndoAction(null);
+    setLoading(false);
+  }, [fetchDiscoverBatch, setQueueAndRef]);
 
   if (status === "loading" || loading) {
     return (
-      <div className="flex items-center justify-center h-64">
+      <div className="flex flex-col items-center justify-center h-64 gap-4">
         <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm text-muted">Loading movies...</p>
       </div>
     );
   }
 
+  const currentRating = currentMovie ? ratings.get(currentMovie.id) : null;
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Rate Movies</h1>
-        <p className="text-sm text-muted mt-1">
-          Search or discover movies to rate. If you haven&apos;t seen a movie, your rating means willingness to watch it.
-        </p>
+    <div className="space-y-3">
+      {/* Compact header bar */}
+      <div className="flex items-center justify-between gap-2">
+        <Link href="/preferences" className="text-xs text-accent hover:underline flex items-center gap-1">
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+          Back
+        </Link>
+        <div className="flex items-center gap-3">
+          {movieQueue.length > 0 && (
+            <span className="text-[10px] text-muted bg-card-hover px-2 py-0.5 rounded-full">
+              {movieQueue.length} queued
+            </span>
+          )}
+          <button
+            onClick={() => setShowSearch(!showSearch)}
+            className={`p-2 rounded-lg transition-all ${showSearch ? "bg-accent text-white" : "bg-card-hover text-muted hover:text-foreground"}`}
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </button>
+        </div>
       </div>
 
+      {/* Collapsible search */}
+      {showSearch && (
+        <div className="bg-card border border-border rounded-xl p-3 space-y-2 animate-slide-up">
+          <div className="flex gap-2">
+            <Input
+              placeholder="Search movies..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && searchMovies()}
+              autoFocus
+            />
+            <Button onClick={searchMovies} loading={searching} size="sm">
+              Search
+            </Button>
+          </div>
+          {mode === "search" && (
+            <button
+              onClick={() => {
+                setSearchQuery("");
+                setShowSearch(false);
+                void loadDiscoverMovies();
+              }}
+              className="text-xs text-accent hover:underline"
+            >
+              Back to discover
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Undo action bar - floating */}
       {undoAction && (
-        <div className="bg-card border border-border rounded-xl p-3 flex items-center justify-between gap-3">
-          <p className="text-xs text-muted">
-            Rated <span className="text-foreground font-medium">{undoAction.movie.title}</span>. Undo?
+        <div className="bg-card/90 backdrop-blur-sm border border-border rounded-xl p-2.5 flex items-center justify-between gap-3 animate-slide-up">
+          <p className="text-xs text-muted truncate">
+            Rated <span className="text-foreground font-medium">{undoAction.movie.title}</span>
           </p>
           <button
             onClick={undoLastRating}
-            className="text-xs text-accent font-medium hover:underline"
+            className="text-xs text-accent font-medium hover:underline shrink-0"
           >
             Undo
           </button>
         </div>
       )}
 
-      {/* Search */}
-      <div className="flex gap-2">
-        <Input
-          placeholder="Search movies..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && searchMovies()}
+      {/* Full-screen movie card */}
+      {currentMovie ? (
+        <TinderMovieCard
+          key={currentMovie.id}
+          movie={currentMovie}
+          rating={currentRating?.rating ?? null}
+          hasSeen={currentRating?.hasSeen ?? false}
+          onRate={(value) =>
+            rateMovie(currentMovie.id, value, currentRating?.hasSeen ?? false, false)
+          }
+          onSeenToggle={(seen) => toggleSeen(currentMovie.id, seen)}
+          onNotHeardOf={() => rateMovie(currentMovie.id, null, false, true)}
         />
-        <Button onClick={searchMovies} loading={searching}>
-          Search
-        </Button>
-      </div>
-
-      {mode === "search" && (
-        <button
-          onClick={() => {
-            setSearchQuery("");
-            void loadDiscoverMovies();
-          }}
-          className="text-xs text-accent hover:underline"
-        >
-          Back to discover
-        </button>
-      )}
-
-      {/* Movie list */}
-      {movies.length > 0 && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between text-xs text-muted">
-            <span>
-              {mode === "discover"
-                ? "Swipe-style queue"
-                : `Search results (${movies.length})`}
-            </span>
-            <span>{mode === "discover" ? `${discoverQueue.length} queued` : ""}</span>
+      ) : (
+        <div className="h-[calc(100vh-180px)] min-h-[500px] flex flex-col items-center justify-center text-center">
+          <div className="w-20 h-20 mx-auto bg-card-hover rounded-full flex items-center justify-center mb-4">
+            <svg className="w-10 h-10 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
+            </svg>
           </div>
-
-          <div className="max-w-4xl mx-auto">
-            {(() => {
-              const movie = movies[0];
-              const rating = ratings.get(movie.id);
-              return (
-                <MovieCard
-                  key={movie.id}
-                  movie={movie}
-                  rating={rating?.rating ?? null}
-                  hasSeen={rating?.hasSeen ?? false}
-                  onRate={(value) =>
-                    rateMovie(movie.id, value, rating?.hasSeen ?? false, false, true)
-                  }
-                  onSeenToggle={(seen) => toggleSeen(movie.id, seen)}
-                  onNotHeardOf={() => rateMovie(movie.id, null, false, true, true)}
-                />
-              );
-            })()}
-          </div>
-
-          {movies.length > 1 && (
-            <div className="text-[11px] text-muted text-center">
-              {movies.length - 1} more loaded behind this card.
-            </div>
-          )}
-        </div>
-      )}
-
-      {movies.length === 0 && !loading && (
-        <div className="text-center py-12">
-          <p className="text-sm text-muted">
+          <p className="text-sm text-muted mb-4">
             {mode === "search"
               ? "No results found. Try a different search."
-              : "No movies to discover. Configure your Trakt or OMDB API keys in Settings."}
+              : "No more movies to rate!"}
           </p>
+          {mode === "discover" && (
+            <Button onClick={loadDiscoverMovies} variant="secondary">
+              Load More Movies
+            </Button>
+          )}
         </div>
       )}
     </div>

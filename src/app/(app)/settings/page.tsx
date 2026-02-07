@@ -152,6 +152,12 @@ export default function SettingsPage() {
   );
   const [algorithmSaved, setAlgorithmSaved] = useState(false);
   const [algorithmSaving, setAlgorithmSaving] = useState(false);
+  const [backupFile, setBackupFile] = useState<File | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [restoreStatus, setRestoreStatus] = useState<{
+    message: string;
+    success: boolean;
+  } | null>(null);
 
   const [forms, setForms] = useState<
     Record<string, { baseUrl: string; apiKey: string }>
@@ -160,6 +166,8 @@ export default function SettingsPage() {
     plex: { baseUrl: "", apiKey: "" },
     trakt: { baseUrl: "", apiKey: "" },
     omdb: { baseUrl: "", apiKey: "" },
+    tmdb: { baseUrl: "", apiKey: "" },
+    tautulli: { baseUrl: "", apiKey: "" },
   });
 
   useEffect(() => {
@@ -288,6 +296,63 @@ export default function SettingsPage() {
     setImporting(false);
   };
 
+  const handleBackupDownload = async () => {
+    const res = await fetch("/api/backup");
+    if (!res.ok) {
+      alert("Failed to create backup. Make sure you are an admin.");
+      return;
+    }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `movie-night-backup-${new Date().toISOString().split("T")[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleBackupRestore = async () => {
+    if (!backupFile) return;
+    setRestoring(true);
+    setRestoreStatus(null);
+
+    try {
+      const text = await backupFile.text();
+      const backup = JSON.parse(text);
+
+      const res = await fetch("/api/backup/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(backup),
+      });
+
+      const data = await res.json();
+
+      if (res.ok) {
+        setRestoreStatus({
+          message: `Restored: ${data.stats.movies} movies, ${data.stats.movieRatings} ratings, ${data.stats.genreRankings} genre rankings. Users matched: ${data.usersMatched}`,
+          success: true,
+        });
+      } else {
+        setRestoreStatus({
+          message: data.error || "Restore failed",
+          success: false,
+        });
+      }
+    } catch {
+      setRestoreStatus({
+        message: "Invalid backup file format",
+        success: false,
+      });
+    }
+
+    setRestoring(false);
+    setBackupFile(null);
+  };
+
   const integrationConfigs = [
     {
       service: "radarr",
@@ -310,8 +375,21 @@ export default function SettingsPage() {
     {
       service: "omdb",
       name: "OMDB",
-      desc: "Get movie details, posters, and metadata.",
+      desc: "Get movie details, posters, and metadata. Free API key at omdbapi.com.",
       hasUrl: false,
+    },
+    {
+      service: "tmdb",
+      name: "TMDB",
+      desc: "Backup metadata, cast photos, and production companies. Free API key at themoviedb.org.",
+      hasUrl: false,
+    },
+    {
+      service: "tautulli",
+      name: "Tautulli",
+      desc: "Auto-detect watched movies from Plex. Configure webhook in Tautulli pointing to your server.",
+      hasUrl: true,
+      isWebhook: true,
     },
   ];
 
@@ -811,6 +889,7 @@ export default function SettingsPage() {
           {integrationConfigs.map((config) => {
             const existing = integrations.find((integration) => integration.service === config.service);
             const form = forms[config.service] || { baseUrl: "", apiKey: "" };
+            const isWebhook = "isWebhook" in config && config.isWebhook;
 
             return (
               <div
@@ -829,7 +908,25 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                {config.hasUrl && (
+                {isWebhook && (
+                  <div className="bg-card-hover border border-border rounded-lg p-3 space-y-2">
+                    <p className="text-[11px] font-medium text-foreground">Webhook URL:</p>
+                    <code className="block text-[11px] bg-background p-2 rounded border border-border text-accent break-all">
+                      {typeof window !== "undefined" ? window.location.origin : ""}/api/webhooks/tautulli
+                    </code>
+                    <div className="text-[10px] text-muted space-y-1 mt-2">
+                      <p className="font-medium">Tautulli Setup:</p>
+                      <ol className="list-decimal list-inside space-y-0.5">
+                        <li>Settings → Notification Agents → Add Webhook</li>
+                        <li>Set URL to the webhook above, Method: POST</li>
+                        <li>Triggers: Enable &quot;Playback Stop&quot;</li>
+                        <li>Conditions: Media Type is movie, Watched % ≥ 80</li>
+                      </ol>
+                    </div>
+                  </div>
+                )}
+
+                {config.hasUrl && !isWebhook && (
                   <Input
                     placeholder="Server URL (e.g., http://192.168.1.100:7878)"
                     value={form.baseUrl}
@@ -845,20 +942,39 @@ export default function SettingsPage() {
                   />
                 )}
 
-                <Input
-                  placeholder="API Key"
-                  type="password"
-                  value={form.apiKey}
-                  onChange={(e) =>
-                    setForms((prev) => ({
-                      ...prev,
-                      [config.service]: {
-                        ...prev[config.service],
-                        apiKey: e.target.value,
-                      },
-                    }))
-                  }
-                />
+                {!isWebhook && (
+                  <Input
+                    placeholder="API Key"
+                    type="password"
+                    value={form.apiKey}
+                    onChange={(e) =>
+                      setForms((prev) => ({
+                        ...prev,
+                        [config.service]: {
+                          ...prev[config.service],
+                          apiKey: e.target.value,
+                        },
+                      }))
+                    }
+                  />
+                )}
+
+                {isWebhook && (
+                  <Input
+                    placeholder="Webhook Secret (optional, for verification)"
+                    type="password"
+                    value={form.apiKey}
+                    onChange={(e) =>
+                      setForms((prev) => ({
+                        ...prev,
+                        [config.service]: {
+                          ...prev[config.service],
+                          apiKey: e.target.value,
+                        },
+                      }))
+                    }
+                  />
+                )}
 
                 <div className="flex items-center gap-2">
                   <Button
@@ -866,7 +982,7 @@ export default function SettingsPage() {
                     onClick={() => saveIntegration(config.service)}
                     loading={saving === config.service}
                   >
-                    {existing ? "Update" : "Connect"}
+                    {existing ? "Update" : isWebhook ? "Enable" : "Connect"}
                   </Button>
                   {saved === config.service && (
                     <span className="text-xs text-success animate-slide-up">Saved!</span>
@@ -877,6 +993,65 @@ export default function SettingsPage() {
           })}
         </div>
       )}
+
+      <div className="bg-card border border-border rounded-xl p-4 space-y-4">
+        <div>
+          <h3 className="text-sm font-semibold">Backup &amp; Restore</h3>
+          <p className="text-[11px] text-muted mt-0.5">
+            Export all data for migration or backup. Restore to import data from another instance.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-2">
+            <p className="text-xs font-medium">Export Backup</p>
+            <Button size="sm" onClick={handleBackupDownload}>
+              Download Backup
+            </Button>
+            <p className="text-[10px] text-muted">
+              Downloads movies, ratings, preferences, accounts, and API keys.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-xs font-medium">Import Backup</p>
+            <div className="flex items-center gap-2">
+              <label className="flex-1">
+                <input
+                  type="file"
+                  accept=".json"
+                  className="hidden"
+                  onChange={(e) => setBackupFile(e.target.files?.[0] || null)}
+                />
+                <div className="bg-card-hover border border-border rounded-lg px-2 py-1.5 text-[11px] text-muted cursor-pointer hover:border-accent/30 transition-all truncate">
+                  {backupFile ? backupFile.name : "Choose file..."}
+                </div>
+              </label>
+              <Button
+                size="sm"
+                onClick={handleBackupRestore}
+                loading={restoring}
+                disabled={!backupFile}
+              >
+                Restore
+              </Button>
+            </div>
+            <p className="text-[10px] text-muted">
+              Restores all data including user accounts.
+            </p>
+          </div>
+        </div>
+
+        {restoreStatus && (
+          <p
+            className={`text-xs ${
+              restoreStatus.success ? "text-success" : "text-error"
+            } animate-slide-up`}
+          >
+            {restoreStatus.message}
+          </p>
+        )}
+      </div>
 
       {!userSettings.isAdmin && (
         <div className="bg-card border border-border rounded-xl p-4 text-center">

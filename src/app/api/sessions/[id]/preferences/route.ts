@@ -53,6 +53,8 @@ export async function POST(
     typeof body?.maxReleaseYear === "number"
       ? Math.trunc(body.maxReleaseYear)
       : undefined;
+  const okWithRewatch =
+    typeof body?.okWithRewatch === "boolean" ? body.okWithRewatch : undefined;
 
   if (
     eraPreference !== undefined &&
@@ -110,8 +112,27 @@ export async function POST(
   );
 
   await prisma.$transaction(async (tx) => {
-    // Update era preference
+    // Build participant update data
+    const participantUpdateData: {
+      eraPreference?: string | null;
+      minReleaseYear?: number;
+      maxReleaseYear?: number;
+      okWithRewatch?: boolean;
+    } = {};
+
     if (eraPreference !== undefined) {
+      participantUpdateData.eraPreference = eraPreference;
+    }
+    if (hasAnyYearRange) {
+      participantUpdateData.minReleaseYear = minReleaseYear;
+      participantUpdateData.maxReleaseYear = maxReleaseYear;
+    }
+    if (okWithRewatch !== undefined) {
+      participantUpdateData.okWithRewatch = okWithRewatch;
+    }
+
+    // Update participant preferences if any data to update
+    if (Object.keys(participantUpdateData).length > 0) {
       await tx.sessionParticipant.update({
         where: {
           sessionId_userId: {
@@ -119,26 +140,7 @@ export async function POST(
             userId,
           },
         },
-        data: {
-          eraPreference,
-          ...(hasAnyYearRange && {
-            minReleaseYear,
-            maxReleaseYear,
-          }),
-        },
-      });
-    } else if (hasAnyYearRange) {
-      await tx.sessionParticipant.update({
-        where: {
-          sessionId_userId: {
-            sessionId,
-            userId,
-          },
-        },
-        data: {
-          minReleaseYear,
-          maxReleaseYear,
-        },
+        data: participantUpdateData,
       });
     }
 

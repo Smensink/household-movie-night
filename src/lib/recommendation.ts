@@ -36,7 +36,13 @@ export async function getRecommendationsForSession(
     where: { id: sessionId },
     include: {
       participants: {
-        include: { user: true },
+        select: {
+          userId: true,
+          minReleaseYear: true,
+          maxReleaseYear: true,
+          okWithRewatch: true,
+          user: { select: { id: true, name: true } },
+        },
       },
       genrePreferences: true,
     },
@@ -70,15 +76,27 @@ export async function getRecommendationsForSession(
       typeof participant.maxReleaseYear === "number"
   );
 
+  // Track participants who don't want to rewatch movies
+  const noRewatchParticipantIds = new Set(
+    session.participants
+      .filter((participant) => participant.okWithRewatch === false)
+      .map((participant) => participant.userId)
+  );
+
   const existingSessionMovies = await prisma.sessionMovie.findMany({
     where: { sessionId },
     select: { movieId: true },
   });
   const excludedMovieIds = existingSessionMovies.map((movie) => movie.movieId);
 
+  // Only show movies that are available on Plex or Radarr (with file)
   const movies = await prisma.movie.findMany({
     where: {
       id: { notIn: excludedMovieIds },
+      OR: [
+        { plexAvailability: { available: true } },
+        { radarrSync: { available: true } },
+      ],
     },
     include: {
       genres: { select: { genreId: true } },
@@ -188,6 +206,13 @@ export async function getRecommendationsForSession(
         ? tuning.mixedSeenPenalty
         : 0;
 
+    // Heavy penalty if any participant who doesn't want rewatches has seen this movie
+    const noRewatchSeenPenalty = movie.ratings.some(
+      (rating) => rating.hasSeen && noRewatchParticipantIds.has(rating.userId)
+    )
+      ? -2.0 // Strong penalty to effectively exclude these movies
+      : 0;
+
     const availabilityBonus =
       (movie.radarrSync?.available ? tuning.radarrAvailableBoost : 0) +
       (movie.radarrSync?.monitored ? tuning.radarrMonitoredBoost : 0) +
@@ -221,6 +246,7 @@ export async function getRecommendationsForSession(
         tuning.discoveryWeight *
         profile.avgExplorationFactor +
       availabilityBonus +
+      noRewatchSeenPenalty +
       Math.random() *
         (tuning.randomJitterBase +
           profile.avgExplorationFactor * tuning.randomJitterExploration);

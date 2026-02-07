@@ -6,17 +6,24 @@ import {
   buildDiscoveryPreferenceProfile,
 } from "@/lib/preference-profile";
 import { getAlgorithmSettings } from "@/lib/algorithm-settings";
+import { getTMDBPersonByName, getTMDBProfileUrl } from "@/lib/api/tmdb";
 
 type DiscoverPersonType = "actor" | "director";
 
 const DEFAULT_LIMIT = 16;
 const MAX_LIMIT = 40;
+const COLD_START_THRESHOLD = 10;
+const DIVERSITY_INJECTION_RATE = 0.15;
 
 function parseLimit(value: string | null): number {
   if (!value) return DEFAULT_LIMIT;
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed)) return DEFAULT_LIMIT;
   return Math.max(1, Math.min(MAX_LIMIT, parsed));
+}
+
+function isColdStartUser(ratedCount: number): boolean {
+  return ratedCount < COLD_START_THRESHOLD;
 }
 
 function parseExcludedIds(values: string[]): Set<string> {
@@ -63,6 +70,9 @@ export async function GET(req: NextRequest) {
     excludedPersonIds.add(ratedId);
   }
 
+  // Detect cold start for special handling
+  const coldStartUser = isColdStartUser(ratedIds.size);
+
   if (type === "actor") {
     const candidates = await prisma.person.findMany({
       where: {
@@ -72,6 +82,8 @@ export async function GET(req: NextRequest) {
       select: {
         id: true,
         name: true,
+        photoUrl: true,
+        tmdbId: true,
         moviesCast: {
           select: {
             movie: {
@@ -79,6 +91,7 @@ export async function GET(req: NextRequest) {
                 id: true,
                 title: true,
                 year: true,
+                posterUrl: true,
                 genres: { select: { genreId: true } },
                 studios: { select: { studioId: true } },
                 ratings: {
@@ -120,12 +133,13 @@ export async function GET(req: NextRequest) {
             return ratings.reduce((sum, value) => sum + value, 0) / ratings.length;
           })();
 
-          return (
-            movieSignal * 0.45 +
-            genreSignal * 0.3 +
-            studioSignal * 0.15 +
-            householdMovieSignal * 0.1
-          );
+          // COLD START: For new users, rely more on genre and household signals
+          return coldStartUser
+            ? genreSignal * 0.5 + householdMovieSignal * 0.5
+            : movieSignal * 0.45 +
+              genreSignal * 0.3 +
+              studioSignal * 0.15 +
+              householdMovieSignal * 0.1;
         });
 
         const movieSignal =
@@ -137,36 +151,116 @@ export async function GET(req: NextRequest) {
         const noveltySignal = 1;
         const discoverySignal = (prominenceSignal * 0.55 + noveltySignal * 0.45) * 2 - 1;
 
+        // COLD START: Higher exploration for new users, show prominent/popular actors
+        const effectiveExplorationFactor = coldStartUser
+          ? Math.max(0.7, profile.explorationFactor)
+          : profile.explorationFactor;
+
+        // ACTIVE LEARNING: Bonus for actors in underexplored genres
+        const genreExplorationBonus = person.moviesCast.some(({ movie }) =>
+          movie.genres.some((g) => !profile.genreAffinity.has(g.genreId))
+        )
+          ? 0.1
+          : 0;
+
         const score =
           (explicitSignal * 0.45 + movieSignal * 0.55) *
             tuning.preferenceWeight *
-            (1 - profile.explorationFactor) +
+            (1 - effectiveExplorationFactor) +
           discoverySignal *
             tuning.discoveryWeight *
-            profile.explorationFactor +
+            effectiveExplorationFactor +
+          genreExplorationBonus +
           Math.random() * tuning.randomJitter;
+
+        // Collect genres for diversity tracking
+        const genres = new Set<string>();
+        person.moviesCast.forEach(({ movie }) =>
+          movie.genres.forEach((g) => genres.add(g.genreId))
+        );
 
         return {
           id: person.id,
           name: person.name,
+          photoUrl: person.photoUrl,
+          tmdbId: person.tmdbId,
           knownFor: "acting",
           sampleMovies: person.moviesCast
-            .map((item) => item.movie.title)
-            .filter(Boolean)
-            .slice(0, 3),
+            .slice(0, 5)
+            .map((item) => ({
+              title: item.movie.title,
+              year: item.movie.year,
+              posterUrl: item.movie.posterUrl,
+            })),
+          genres: Array.from(genres),
           score,
         };
       })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map((person) => ({
+      .sort((a, b) => b.score - a.score);
+
+    // DIVERSITY INJECTION: Ensure variety in actor genres
+    const diverseResults: typeof scored = [];
+    const usedGenres = new Set<string>();
+    const diversitySlots = Math.floor(limit * DIVERSITY_INJECTION_RATE);
+    const mainSlots = limit - diversitySlots;
+
+    for (const person of scored) {
+      if (diverseResults.length >= mainSlots) break;
+      diverseResults.push(person);
+      person.genres.forEach((g) => usedGenres.add(g));
+    }
+
+    for (const person of scored) {
+      if (diverseResults.length >= limit) break;
+      if (diverseResults.some((r) => r.id === person.id)) continue;
+      if (person.genres.some((g) => !usedGenres.has(g))) {
+        diverseResults.push(person);
+        person.genres.forEach((g) => usedGenres.add(g));
+      }
+    }
+
+    for (const person of scored) {
+      if (diverseResults.length >= limit) break;
+      if (!diverseResults.some((r) => r.id === person.id)) {
+        diverseResults.push(person);
+      }
+    }
+
+    const finalScored = diverseResults.slice(0, limit);
+
+    // Fetch TMDB photos for people without photos
+    const peopleNeedingPhotos = finalScored.filter((p) => !p.photoUrl).slice(0, 5);
+    for (const person of peopleNeedingPhotos) {
+      try {
+        const tmdbPerson = await getTMDBPersonByName(person.name);
+        if (tmdbPerson?.profile_path) {
+          const photoUrl = getTMDBProfileUrl(tmdbPerson.profile_path);
+          if (photoUrl) {
+            person.photoUrl = photoUrl;
+            // Update in DB for future requests
+            await prisma.person.update({
+              where: { id: person.id },
+              data: {
+                photoUrl,
+                tmdbId: person.tmdbId || tmdbPerson.id.toString(),
+              },
+            });
+          }
+        }
+      } catch {
+        // Ignore errors
+      }
+    }
+
+    return NextResponse.json(
+      finalScored.map((person) => ({
         id: person.id,
         name: person.name,
+        photoUrl: person.photoUrl,
         knownFor: person.knownFor,
         sampleMovies: person.sampleMovies,
-      }));
-
-    return NextResponse.json(scored);
+      }))
+    );
   }
 
   const candidates = await prisma.person.findMany({
@@ -179,6 +273,8 @@ export async function GET(req: NextRequest) {
     select: {
       id: true,
       name: true,
+      photoUrl: true,
+      tmdbId: true,
       moviesCrew: {
         where: { job: "Director" },
         select: {
@@ -187,6 +283,7 @@ export async function GET(req: NextRequest) {
               id: true,
               title: true,
               year: true,
+              posterUrl: true,
               genres: { select: { genreId: true } },
               studios: { select: { studioId: true } },
               ratings: {
@@ -205,7 +302,7 @@ export async function GET(req: NextRequest) {
     take: 220,
   });
 
-  const scored = candidates
+  const directorScored = candidates
     .map((person) => {
       const explicitSignal = profile.directorAffinity.get(person.id) ?? 0;
 
@@ -227,12 +324,13 @@ export async function GET(req: NextRequest) {
           return ratings.reduce((sum, value) => sum + value, 0) / ratings.length;
         })();
 
-        return (
-          movieSignal * 0.45 +
-          genreSignal * 0.3 +
-          studioSignal * 0.15 +
-          householdMovieSignal * 0.1
-        );
+        // COLD START: For new users, rely more on genre and household signals
+        return coldStartUser
+          ? genreSignal * 0.5 + householdMovieSignal * 0.5
+          : movieSignal * 0.45 +
+            genreSignal * 0.3 +
+            studioSignal * 0.15 +
+            householdMovieSignal * 0.1;
       });
 
       const movieSignal =
@@ -244,32 +342,112 @@ export async function GET(req: NextRequest) {
       const noveltySignal = 1;
       const discoverySignal = (prominenceSignal * 0.55 + noveltySignal * 0.45) * 2 - 1;
 
+      // COLD START: Higher exploration for new users
+      const effectiveExplorationFactor = coldStartUser
+        ? Math.max(0.7, profile.explorationFactor)
+        : profile.explorationFactor;
+
+      // ACTIVE LEARNING: Bonus for directors in underexplored genres
+      const genreExplorationBonus = person.moviesCrew.some(({ movie }) =>
+        movie.genres.some((g) => !profile.genreAffinity.has(g.genreId))
+      )
+        ? 0.1
+        : 0;
+
       const score =
         (explicitSignal * 0.45 + movieSignal * 0.55) *
           tuning.preferenceWeight *
-          (1 - profile.explorationFactor) +
-        discoverySignal * tuning.discoveryWeight * profile.explorationFactor +
+          (1 - effectiveExplorationFactor) +
+        discoverySignal * tuning.discoveryWeight * effectiveExplorationFactor +
+        genreExplorationBonus +
         Math.random() * tuning.randomJitter;
+
+      // Collect genres for diversity tracking
+      const genres = new Set<string>();
+      person.moviesCrew.forEach(({ movie }) =>
+        movie.genres.forEach((g) => genres.add(g.genreId))
+      );
 
       return {
         id: person.id,
         name: person.name,
+        photoUrl: person.photoUrl,
+        tmdbId: person.tmdbId,
         knownFor: "directing",
         sampleMovies: person.moviesCrew
-          .map((item) => item.movie.title)
-          .filter(Boolean)
-          .slice(0, 3),
+          .slice(0, 5)
+          .map((item) => ({
+            title: item.movie.title,
+            year: item.movie.year,
+            posterUrl: item.movie.posterUrl,
+          })),
+        genres: Array.from(genres),
         score,
       };
     })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map((person) => ({
+    .sort((a, b) => b.score - a.score);
+
+  // DIVERSITY INJECTION for directors
+  const directorDiverseResults: typeof directorScored = [];
+  const directorUsedGenres = new Set<string>();
+  const directorDiversitySlots = Math.floor(limit * DIVERSITY_INJECTION_RATE);
+  const directorMainSlots = limit - directorDiversitySlots;
+
+  for (const person of directorScored) {
+    if (directorDiverseResults.length >= directorMainSlots) break;
+    directorDiverseResults.push(person);
+    person.genres.forEach((g) => directorUsedGenres.add(g));
+  }
+
+  for (const person of directorScored) {
+    if (directorDiverseResults.length >= limit) break;
+    if (directorDiverseResults.some((r) => r.id === person.id)) continue;
+    if (person.genres.some((g) => !directorUsedGenres.has(g))) {
+      directorDiverseResults.push(person);
+      person.genres.forEach((g) => directorUsedGenres.add(g));
+    }
+  }
+
+  for (const person of directorScored) {
+    if (directorDiverseResults.length >= limit) break;
+    if (!directorDiverseResults.some((r) => r.id === person.id)) {
+      directorDiverseResults.push(person);
+    }
+  }
+
+  const directorFinalScored = directorDiverseResults.slice(0, limit);
+
+  // Fetch TMDB photos for people without photos
+  const directorPeopleNeedingPhotos = directorFinalScored.filter((p) => !p.photoUrl).slice(0, 5);
+  for (const person of directorPeopleNeedingPhotos) {
+    try {
+      const tmdbPerson = await getTMDBPersonByName(person.name);
+      if (tmdbPerson?.profile_path) {
+        const photoUrl = getTMDBProfileUrl(tmdbPerson.profile_path);
+        if (photoUrl) {
+          person.photoUrl = photoUrl;
+          // Update in DB for future requests
+          await prisma.person.update({
+            where: { id: person.id },
+            data: {
+              photoUrl,
+              tmdbId: person.tmdbId || tmdbPerson.id.toString(),
+            },
+          });
+        }
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  return NextResponse.json(
+    directorFinalScored.map((person) => ({
       id: person.id,
       name: person.name,
+      photoUrl: person.photoUrl,
       knownFor: person.knownFor,
       sampleMovies: person.sampleMovies,
-    }));
-
-  return NextResponse.json(scored);
+    }))
+  );
 }

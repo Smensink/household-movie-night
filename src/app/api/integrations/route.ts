@@ -3,7 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { isUserHouseholdAdmin } from "@/lib/household-admin";
 
-const ALLOWED_SERVICES = new Set(["radarr", "plex", "trakt", "omdb"]);
+const ALLOWED_SERVICES = new Set(["radarr", "plex", "trakt", "omdb", "tmdb", "tautulli"]);
 
 export async function GET() {
   const session = await auth();

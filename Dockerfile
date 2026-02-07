@@ -32,6 +32,9 @@ COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/src/generated ./src/generated
 
+# Create and own the cache directory for image optimization
+RUN mkdir -p /app/.next/cache && chown -R nextjs:nodejs /app/.next
+
 USER nextjs
 
 EXPOSE 3000
@@ -39,4 +42,24 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-CMD ["sh", "-c", "if [ -d prisma/migrations ] && [ \"$(ls -A prisma/migrations 2>/dev/null)\" ]; then ./node_modules/.bin/prisma migrate deploy; else ./node_modules/.bin/prisma db push; fi && node server.js"]
+# Startup script: run migrations, start server, prefill data, and run background retraining loop
+CMD ["sh", "-c", "\
+  if [ -d prisma/migrations ] && [ \"$(ls -A prisma/migrations 2>/dev/null)\" ]; then \
+    ./node_modules/.bin/prisma migrate deploy; \
+  else \
+    ./node_modules/.bin/prisma db push; \
+  fi && \
+  node server.js & \
+  SERVER_PID=$! && \
+  sleep 5 && \
+  wget -q -O /dev/null --post-data='' http://localhost:3000/api/movies/prefill 2>/dev/null || true && \
+  wget -q -O /dev/null -X PATCH http://localhost:3000/api/movies/prefill 2>/dev/null || true && \
+  wget -q -O /dev/null --post-data='' http://localhost:3000/api/studios/backfill 2>/dev/null || true && \
+  wget -q -O /dev/null --post-data='' http://localhost:3000/api/people/backfill 2>/dev/null || true && \
+  wget -q -O /dev/null -X PATCH http://localhost:3000/api/mf/train 2>/dev/null || true && \
+  while true; do \
+    sleep 300; \
+    wget -q -O /dev/null -X PATCH http://localhost:3000/api/mf/train 2>/dev/null || true; \
+  done & \
+  wait $SERVER_PID \
+"]

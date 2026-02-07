@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import type { OMDBMovie } from "./api/omdb";
+import type { TMDBMovie } from "./api/tmdb";
 
 interface MovieWithRelations {
   cast?: Array<{ person: { name: string } }>;
@@ -141,31 +142,38 @@ export async function syncMovieMetadataFromOMDB(
     const slug = slugify(studioName);
     if (!slug) continue;
 
-    const studio = await prisma.studio.upsert({
-      where: { slug },
-      create: {
-        name: studioName,
-        slug,
-      },
-      update: {
-        name: studioName,
-      },
-      select: { id: true },
-    });
+    try {
+      // First try to find by slug or name
+      let studio = await prisma.studio.findFirst({
+        where: {
+          OR: [{ slug }, { name: studioName }],
+        },
+        select: { id: true },
+      });
 
-    await prisma.movieStudio.upsert({
-      where: {
-        movieId_studioId: {
+      if (!studio) {
+        studio = await prisma.studio.create({
+          data: { name: studioName, slug },
+          select: { id: true },
+        });
+      }
+
+      await prisma.movieStudio.upsert({
+        where: {
+          movieId_studioId: {
+            movieId,
+            studioId: studio.id,
+          },
+        },
+        create: {
           movieId,
           studioId: studio.id,
         },
-      },
-      create: {
-        movieId,
-        studioId: studio.id,
-      },
-      update: {},
-    });
+        update: {},
+      });
+    } catch {
+      // Skip this studio if there's a constraint error
+    }
   }
 
   for (const genreName of genres) {
@@ -211,4 +219,138 @@ function normalizeGenreName(genreName: string): string {
   }
 
   return normalized;
+}
+
+/**
+ * Sync movie metadata (studios, cast, crew) from TMDB
+ * Use this as fallback when OMDB doesn't provide production company data
+ */
+export async function syncMovieMetadataFromTMDB(
+  movieId: string,
+  tmdbMovie: TMDBMovie
+): Promise<{ studios: string[]; actors: string[]; directors: string[] }> {
+  const studios: string[] = [];
+  const actors: string[] = [];
+  const directors: string[] = [];
+
+  // Sync production companies as studios
+  if (tmdbMovie.production_companies) {
+    for (const company of tmdbMovie.production_companies.slice(0, 3)) {
+      if (!company.name) continue;
+      const slug = slugify(company.name);
+      if (!slug) continue;
+
+      try {
+        studios.push(company.name);
+
+        // First try to find by slug or name
+        let studio = await prisma.studio.findFirst({
+          where: {
+            OR: [{ slug }, { name: company.name }],
+          },
+          select: { id: true },
+        });
+
+        if (!studio) {
+          studio = await prisma.studio.create({
+            data: { name: company.name, slug },
+            select: { id: true },
+          });
+        }
+
+        await prisma.movieStudio.upsert({
+          where: {
+            movieId_studioId: {
+              movieId,
+              studioId: studio.id,
+            },
+          },
+          create: {
+            movieId,
+            studioId: studio.id,
+          },
+          update: {},
+        });
+      } catch {
+        // Skip this studio if there's a constraint error
+      }
+    }
+  }
+
+  // Sync cast (actors)
+  if (tmdbMovie.credits?.cast) {
+    for (const castMember of tmdbMovie.credits.cast.slice(0, 5)) {
+      if (!castMember.name) continue;
+      actors.push(castMember.name);
+
+      const personId = await findOrCreatePersonIdByName(castMember.name);
+
+      // Update person with TMDB ID and photo if available
+      if (castMember.profile_path) {
+        await prisma.person.update({
+          where: { id: personId },
+          data: {
+            tmdbId: castMember.id.toString(),
+            photoUrl: `https://image.tmdb.org/t/p/h632${castMember.profile_path}`,
+          },
+        });
+      }
+
+      await prisma.movieCast.upsert({
+        where: {
+          movieId_personId: {
+            movieId,
+            personId,
+          },
+        },
+        create: {
+          movieId,
+          personId,
+          castOrder: castMember.order,
+        },
+        update: {
+          castOrder: castMember.order,
+        },
+      });
+    }
+  }
+
+  // Sync crew (directors)
+  if (tmdbMovie.credits?.crew) {
+    for (const crewMember of tmdbMovie.credits.crew) {
+      if (crewMember.job !== "Director" || !crewMember.name) continue;
+      directors.push(crewMember.name);
+
+      const personId = await findOrCreatePersonIdByName(crewMember.name);
+
+      // Update person with TMDB ID and photo if available
+      if (crewMember.profile_path) {
+        await prisma.person.update({
+          where: { id: personId },
+          data: {
+            tmdbId: crewMember.id.toString(),
+            photoUrl: `https://image.tmdb.org/t/p/h632${crewMember.profile_path}`,
+          },
+        });
+      }
+
+      await prisma.movieCrew.upsert({
+        where: {
+          movieId_personId_job: {
+            movieId,
+            personId,
+            job: "Director",
+          },
+        },
+        create: {
+          movieId,
+          personId,
+          job: "Director",
+        },
+        update: {},
+      });
+    }
+  }
+
+  return { studios, actors, directors };
 }

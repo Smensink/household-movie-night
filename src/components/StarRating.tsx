@@ -5,7 +5,7 @@ import { useState } from "react";
 interface StarRatingProps {
   rating: number | null;
   onChange?: (rating: number) => void;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xl";
   readonly?: boolean;
 }
 
@@ -18,8 +18,8 @@ export default function StarRating({
   const [hovered, setHovered] = useState<number | null>(null);
   const [animating, setAnimating] = useState<number | null>(null);
 
-  const sizes = { sm: "w-5 h-5", md: "w-7 h-7", lg: "w-9 h-9" };
-  const gaps = { sm: "gap-0.5", md: "gap-1", lg: "gap-1.5" };
+  const sizes = { sm: "w-5 h-5", md: "w-7 h-7", lg: "w-9 h-9", xl: "w-12 h-12" };
+  const gaps = { sm: "gap-0.5", md: "gap-1", lg: "gap-1.5", xl: "gap-2" };
 
   const displayRating = hovered ?? rating ?? 0;
 

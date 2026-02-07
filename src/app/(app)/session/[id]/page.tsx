@@ -48,6 +48,7 @@ interface SessionData {
     userId: string;
     minReleaseYear?: number | null;
     maxReleaseYear?: number | null;
+    okWithRewatch?: boolean;
     user: { name: string };
   }[];
 }
@@ -75,6 +76,7 @@ export default function SessionPage() {
   const [step, setStep] = useState<Step>("preferences");
   const [minReleaseYear, setMinReleaseYear] = useState(1990);
   const [maxReleaseYear, setMaxReleaseYear] = useState(new Date().getFullYear());
+  const [okWithRewatch, setOkWithRewatch] = useState(true);
   const [votes, setVotes] = useState<
     Map<string, { rating: number; willingToRewatch: boolean }>
   >(new Map());
@@ -158,6 +160,9 @@ export default function SessionPage() {
           setMinReleaseYear(participant.minReleaseYear);
           setMaxReleaseYear(participant.maxReleaseYear);
         }
+        if (participant && typeof participant.okWithRewatch === "boolean") {
+          setOkWithRewatch(participant.okWithRewatch);
+        }
 
         const existingVotes = new Map<
           string,
@@ -214,6 +219,7 @@ export default function SessionPage() {
       body: JSON.stringify({
         minReleaseYear,
         maxReleaseYear,
+        okWithRewatch,
         genreRankings,
       }),
     });
@@ -339,13 +345,28 @@ export default function SessionPage() {
     if (!confirmed) return;
 
     setEndingSession(true);
-    const response = await fetch(`/api/sessions/${sessionId}`, {
-      method: "DELETE",
-    });
-    setEndingSession(false);
-
-    if (response.ok) {
-      router.push("/dashboard");
+    
+    const headers: Record<string, string> = {};
+    if (guestToken) {
+      headers["x-guest-token"] = guestToken;
+    }
+    
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}`, {
+        method: "DELETE",
+        headers,
+      });
+      
+      if (response.ok) {
+        router.push("/dashboard");
+      } else {
+        const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
+        alert(`Failed to end session: ${errorData.error || response.statusText}`);
+      }
+    } catch {
+      alert("Network error while ending session. Please try again.");
+    } finally {
+      setEndingSession(false);
     }
   };
 
@@ -453,44 +474,116 @@ export default function SessionPage() {
           {/* Release year preference */}
           <div>
             <h3 className="text-sm font-semibold mb-2">Choose your release year range</h3>
-            <div className="bg-card border border-border rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted">From</span>
-                <span className="font-semibold text-foreground">{minReleaseYear}</span>
-                <span className="text-muted">to</span>
-                <span className="font-semibold text-foreground">{maxReleaseYear}</span>
+            <div className="bg-card border border-border rounded-xl p-4 space-y-4">
+              <div className="flex items-center justify-center gap-2 text-sm">
+                <span className="font-semibold text-accent text-lg">{minReleaseYear}</span>
+                <span className="text-muted">-</span>
+                <span className="font-semibold text-accent text-lg">{maxReleaseYear}</span>
               </div>
-              <div className="space-y-2">
-                <label className="text-[11px] text-muted">Minimum year</label>
-                <input
-                  type="range"
-                  min={YEAR_MIN}
-                  max={YEAR_MAX}
-                  value={minReleaseYear}
-                  onChange={(event) => {
-                    const next = Number.parseInt(event.target.value, 10);
-                    setMinReleaseYear(Math.min(next, maxReleaseYear));
+              
+              {/* Dual handle range slider */}
+              <div
+                className="relative h-10 touch-none select-none"
+                onPointerDown={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const percent = (e.clientX - rect.left) / rect.width;
+                  const yearAtClick = Math.round(YEAR_MIN + percent * (YEAR_MAX - YEAR_MIN));
+
+                  // Determine which handle is closer
+                  const distToMin = Math.abs(yearAtClick - minReleaseYear);
+                  const distToMax = Math.abs(yearAtClick - maxReleaseYear);
+                  const targetHandle = distToMin <= distToMax ? 'min' : 'max';
+
+                  const updateValue = (clientX: number) => {
+                    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+                    const year = Math.round(YEAR_MIN + pct * (YEAR_MAX - YEAR_MIN));
+
+                    if (targetHandle === 'min') {
+                      if (year <= maxReleaseYear - 5 && year >= YEAR_MIN) {
+                        setMinReleaseYear(year);
+                      }
+                    } else {
+                      if (year >= minReleaseYear + 5 && year <= YEAR_MAX) {
+                        setMaxReleaseYear(year);
+                      }
+                    }
+                  };
+
+                  updateValue(e.clientX);
+
+                  const onMove = (moveEvent: PointerEvent) => {
+                    updateValue(moveEvent.clientX);
+                  };
+
+                  const onUp = () => {
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                  };
+
+                  window.addEventListener('pointermove', onMove);
+                  window.addEventListener('pointerup', onUp);
+                }}
+              >
+                {/* Track background */}
+                <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-2 bg-border rounded-full" />
+                {/* Active range */}
+                <div
+                  className="absolute top-1/2 -translate-y-1/2 h-2 bg-accent rounded-full"
+                  style={{
+                    left: `${((minReleaseYear - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)) * 100}%`,
+                    right: `${100 - ((maxReleaseYear - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)) * 100}%`,
                   }}
-                  className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
+                />
+                {/* Min handle */}
+                <div
+                  className="absolute top-1/2 -translate-y-1/2 w-6 h-6 bg-accent rounded-full shadow-lg border-2 border-background cursor-grab active:cursor-grabbing transition-transform hover:scale-110"
+                  style={{ left: `calc(${((minReleaseYear - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)) * 100}% - 12px)` }}
+                />
+                {/* Max handle */}
+                <div
+                  className="absolute top-1/2 -translate-y-1/2 w-6 h-6 bg-accent rounded-full shadow-lg border-2 border-background cursor-grab active:cursor-grabbing transition-transform hover:scale-110"
+                  style={{ left: `calc(${((maxReleaseYear - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)) * 100}% - 12px)` }}
                 />
               </div>
-              <div className="space-y-2">
-                <label className="text-[11px] text-muted">Maximum year</label>
-                <input
-                  type="range"
-                  min={YEAR_MIN}
-                  max={YEAR_MAX}
-                  value={maxReleaseYear}
-                  onChange={(event) => {
-                    const next = Number.parseInt(event.target.value, 10);
-                    setMaxReleaseYear(Math.max(next, minReleaseYear));
-                  }}
-                  className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
-                />
+              
+              <div className="flex justify-between text-[10px] text-muted px-1">
+                <span>{YEAR_MIN}</span>
+                <span>{YEAR_MAX}</span>
               </div>
+              
               <p className="text-[11px] text-muted">
-                This works like a Tinder age range slider: picks are biased toward this release window.
+                Drag either handle to adjust your preferred release year range. Movies outside this range are less likely to be suggested.
               </p>
+            </div>
+          </div>
+
+          {/* Rewatch preference */}
+          <div>
+            <h3 className="text-sm font-semibold mb-2">Rewatch preference</h3>
+            <div className="bg-card border border-border rounded-xl p-4">
+              <label className="flex items-center justify-between cursor-pointer">
+                <div>
+                  <p className="text-sm font-medium">Open to rewatching movies</p>
+                  <p className="text-[11px] text-muted mt-0.5">
+                    Would you be okay watching a movie you&apos;ve already seen?
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={okWithRewatch}
+                  onClick={() => setOkWithRewatch(!okWithRewatch)}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    okWithRewatch ? "bg-accent" : "bg-border"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      okWithRewatch ? "translate-x-6" : "translate-x-1"
+                    }`}
+                  />
+                </button>
+              </label>
             </div>
           </div>
 
