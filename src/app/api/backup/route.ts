@@ -1,8 +1,17 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
 const BACKUP_VERSION = 2;
+
+// Global backup progress state
+let backupProgress = {
+  inProgress: false,
+  phase: "",
+  current: 0,
+  total: 0,
+  startedAt: null as Date | null,
+};
 
 // Fetch image and convert to base64
 async function fetchImageAsBase64(url: string): Promise<string | null> {
@@ -21,19 +30,23 @@ async function fetchImageAsBase64(url: string): Promise<string | null> {
   }
 }
 
-// Batch fetch images with concurrency limit
-async function fetchImagesInBatches<T extends { url: string | null }>(
-  items: T[],
-  concurrency: number = 20
+// Batch fetch images with concurrency limit and progress tracking
+async function fetchImagesInBatches(
+  urls: string[],
+  concurrency: number,
+  phase: string,
+  onProgress: (current: number, total: number) => void
 ): Promise<Map<string, string>> {
   const results = new Map<string, string>();
-  const urls = items.filter(i => i.url).map(i => i.url as string);
+  let completed = 0;
 
   for (let i = 0; i < urls.length; i += concurrency) {
     const batch = urls.slice(i, i + concurrency);
     const promises = batch.map(async (url) => {
       const data = await fetchImageAsBase64(url);
       if (data) results.set(url, data);
+      completed++;
+      onProgress(completed, urls.length);
     });
     await Promise.all(promises);
   }
@@ -77,7 +90,7 @@ interface BackupData {
     tmdbId: string | null;
     name: string;
     photoUrl: string | null;
-    photoData: string | null; // base64 encoded image
+    photoData: string | null;
     knownFor: string | null;
   }[];
   movies: {
@@ -88,9 +101,9 @@ interface BackupData {
     title: string;
     year: number | null;
     posterUrl: string | null;
-    posterData: string | null; // base64 encoded image
+    posterData: string | null;
     backdropUrl: string | null;
-    backdropData: string | null; // base64 encoded image
+    backdropData: string | null;
     overview: string | null;
     runtime: number | null;
     releaseDate: string | null;
@@ -164,7 +177,6 @@ interface BackupData {
     apiKey: string | null;
     enabled: boolean;
   }[];
-  // ML Model data
   latentVectors: {
     entityType: string;
     entityId: string;
@@ -201,7 +213,6 @@ interface BackupData {
     ratingCount: number;
     topGenreIds: string | null;
   }[];
-  // Availability data
   radarrSyncs: {
     movieId: string;
     radarrId: number | null;
@@ -213,7 +224,6 @@ interface BackupData {
     plexKey: string | null;
     available: boolean;
   }[];
-  // Activity log for ML training
   activityLogs: {
     userId: string | null;
     action: string;
@@ -223,258 +233,383 @@ interface BackupData {
   }[];
 }
 
-export async function GET() {
+// GET with ?status=true returns progress, otherwise generates backup
+export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Fetch all data in parallel
-  const [
-    users,
-    households,
-    householdMembers,
-    genres,
-    studios,
-    people,
-    movies,
-    movieGenres,
-    movieStudios,
-    movieCast,
-    movieCrew,
-    genreRankings,
-    movieRatings,
-    actorRatings,
-    directorRatings,
-    studioRatings,
-    userSettings,
-    integrationConfigs,
-    latentVectors,
-    featureEmbeddings,
-    mfModelMetadata,
-    userFeatureCaches,
-    radarrSyncs,
-    plexAvailabilities,
-    activityLogs,
-  ] = await Promise.all([
-    prisma.user.findMany({
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        passwordHash: true,
-        avatarUrl: true,
-        isGuest: true,
-      },
-    }),
-    prisma.household.findMany({
-      select: { id: true, name: true, inviteCode: true },
-    }),
-    prisma.householdMember.findMany({
-      select: { userId: true, householdId: true, role: true },
-    }),
-    prisma.genre.findMany({
-      select: { id: true, name: true, slug: true },
-    }),
-    prisma.studio.findMany({
-      select: { id: true, name: true, slug: true },
-    }),
-    prisma.person.findMany({
-      select: { id: true, tmdbId: true, name: true, photoUrl: true, knownFor: true },
-    }),
-    prisma.movie.findMany({
-      select: {
-        id: true,
-        imdbId: true,
-        tmdbId: true,
-        traktSlug: true,
-        title: true,
-        year: true,
-        posterUrl: true,
-        backdropUrl: true,
-        overview: true,
-        runtime: true,
-        releaseDate: true,
-        certification: true,
-        popularity: true,
-        voteAverage: true,
-        voteCount: true,
-        imdbRating: true,
-        imdbVotes: true,
-        rottenTomatoesAudience: true,
-        letterboxdRating: true,
-        era: true,
-      },
-    }),
-    prisma.movieGenre.findMany({
-      select: { movieId: true, genreId: true },
-    }),
-    prisma.movieStudio.findMany({
-      select: { movieId: true, studioId: true },
-    }),
-    prisma.movieCast.findMany({
-      select: { movieId: true, personId: true, character: true, castOrder: true },
-    }),
-    prisma.movieCrew.findMany({
-      select: { movieId: true, personId: true, job: true },
-    }),
-    prisma.genreRanking.findMany({
-      select: { userId: true, genreId: true, rank: true },
-    }),
-    prisma.movieRating.findMany({
-      select: {
-        userId: true,
-        movieId: true,
-        rating: true,
-        hasSeen: true,
-        notHeardOf: true,
-      },
-    }),
-    prisma.actorRating.findMany({
-      select: { userId: true, personId: true, rating: true, notHeardOf: true },
-    }),
-    prisma.directorRating.findMany({
-      select: { userId: true, personId: true, rating: true, notHeardOf: true },
-    }),
-    prisma.studioRating.findMany({
-      select: { userId: true, studioId: true, rating: true, notHeardOf: true },
-    }),
-    prisma.userSettings.findMany({
-      select: { userId: true, explorationFactor: true, discoverySourcePref: true },
-    }),
-    prisma.integrationConfig.findMany({
-      select: { service: true, baseUrl: true, apiKey: true, enabled: true },
-    }),
-    // ML Model data
-    prisma.latentVector.findMany({
-      select: { entityType: true, entityId: true, vector: true, bias: true },
-    }),
-    prisma.featureEmbedding.findMany({
-      select: { featureType: true, featureId: true, vector: true, bias: true },
-    }),
-    prisma.mFModelMetadata.findFirst({
-      select: {
-        version: true,
-        latentDimensions: true,
-        featureDimensions: true,
-        learningRate: true,
-        regularization: true,
-        trainedEpochs: true,
-        lastTrainedAt: true,
-        rmse: true,
-        validationRmse: true,
-        totalRatings: true,
-        isTraining: true,
-        globalMean: true,
-        featureWeights: true,
-      },
-    }),
-    prisma.userFeatureCache.findMany({
-      select: {
-        userId: true,
-        explorationFactor: true,
-        genreVector: true,
-        ratingMean: true,
-        ratingStdDev: true,
-        ratingCount: true,
-        topGenreIds: true,
-      },
-    }),
-    // Availability data
-    prisma.radarrSync.findMany({
-      select: {
-        movieId: true,
-        radarrId: true,
-        monitored: true,
-        available: true,
-      },
-    }),
-    prisma.plexAvailability.findMany({
-      select: {
-        movieId: true,
-        plexKey: true,
-        available: true,
-      },
-    }),
-    // Activity log
-    prisma.activityLog.findMany({
-      select: {
-        userId: true,
-        action: true,
-        entityType: true,
-        entityId: true,
-        createdAt: true,
-      },
-    }),
-  ]);
+  // Check if status query param is present
+  const status = req.nextUrl.searchParams.get("status");
+  if (status === "true") {
+    return NextResponse.json({
+      ...backupProgress,
+      startedAt: backupProgress.startedAt?.toISOString() || null,
+    });
+  }
 
-  // Fetch all images in parallel batches
-  console.log(`Fetching ${movies.length} movie posters and ${people.length} person photos...`);
+  // Check if backup is already in progress
+  if (backupProgress.inProgress) {
+    return NextResponse.json({
+      error: "Backup already in progress",
+      progress: backupProgress,
+    }, { status: 409 });
+  }
 
-  // Collect all URLs to fetch
-  const posterUrls = movies.filter(m => m.posterUrl).map(m => ({ url: m.posterUrl }));
-  const backdropUrls = movies.filter(m => m.backdropUrl).map(m => ({ url: m.backdropUrl }));
-  const photoUrls = people.filter(p => p.photoUrl).map(p => ({ url: p.photoUrl }));
-
-  // Fetch all images with concurrency limit
-  const [posterData, backdropData, photoData] = await Promise.all([
-    fetchImagesInBatches(posterUrls, 30),
-    fetchImagesInBatches(backdropUrls, 30),
-    fetchImagesInBatches(photoUrls, 30),
-  ]);
-
-  console.log(`Fetched ${posterData.size} posters, ${backdropData.size} backdrops, ${photoData.size} photos`);
-
-  const backup: BackupData = {
-    version: BACKUP_VERSION,
-    createdAt: new Date().toISOString(),
-    users,
-    households,
-    householdMembers,
-    genres,
-    studios,
-    people: people.map((p) => ({
-      ...p,
-      photoData: p.photoUrl ? photoData.get(p.photoUrl) || null : null,
-    })),
-    movies: movies.map((m) => ({
-      ...m,
-      releaseDate: m.releaseDate?.toISOString() || null,
-      posterData: m.posterUrl ? posterData.get(m.posterUrl) || null : null,
-      backdropData: m.backdropUrl ? backdropData.get(m.backdropUrl) || null : null,
-    })),
-    movieGenres,
-    movieStudios,
-    movieCast,
-    movieCrew,
-    genreRankings,
-    movieRatings,
-    actorRatings,
-    directorRatings,
-    studioRatings,
-    userSettings,
-    integrationConfigs,
-    latentVectors,
-    featureEmbeddings,
-    mfModelMetadata: mfModelMetadata
-      ? {
-          ...mfModelMetadata,
-          lastTrainedAt: mfModelMetadata.lastTrainedAt?.toISOString() || null,
-        }
-      : null,
-    userFeatureCaches,
-    radarrSyncs,
-    plexAvailabilities,
-    activityLogs: activityLogs.map((a) => ({
-      ...a,
-      createdAt: a.createdAt.toISOString(),
-    })),
+  // Start backup
+  backupProgress = {
+    inProgress: true,
+    phase: "Loading database...",
+    current: 0,
+    total: 0,
+    startedAt: new Date(),
   };
 
-  return new NextResponse(JSON.stringify(backup, null, 2), {
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Disposition": `attachment; filename="movie-night-backup-${new Date().toISOString().split("T")[0]}.json"`,
-    },
-  });
+  try {
+    // Fetch all data in parallel
+    const [
+      users,
+      households,
+      householdMembers,
+      genres,
+      studios,
+      people,
+      movies,
+      movieGenres,
+      movieStudios,
+      movieCast,
+      movieCrew,
+      genreRankings,
+      movieRatings,
+      actorRatings,
+      directorRatings,
+      studioRatings,
+      userSettings,
+      integrationConfigs,
+      latentVectors,
+      featureEmbeddings,
+      mfModelMetadata,
+      userFeatureCaches,
+      radarrSyncs,
+      plexAvailabilities,
+      activityLogs,
+    ] = await Promise.all([
+      prisma.user.findMany({
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          passwordHash: true,
+          avatarUrl: true,
+          isGuest: true,
+        },
+      }),
+      prisma.household.findMany({
+        select: { id: true, name: true, inviteCode: true },
+      }),
+      prisma.householdMember.findMany({
+        select: { userId: true, householdId: true, role: true },
+      }),
+      prisma.genre.findMany({
+        select: { id: true, name: true, slug: true },
+      }),
+      prisma.studio.findMany({
+        select: { id: true, name: true, slug: true },
+      }),
+      prisma.person.findMany({
+        select: { id: true, tmdbId: true, name: true, photoUrl: true, knownFor: true },
+      }),
+      prisma.movie.findMany({
+        select: {
+          id: true,
+          imdbId: true,
+          tmdbId: true,
+          traktSlug: true,
+          title: true,
+          year: true,
+          posterUrl: true,
+          backdropUrl: true,
+          overview: true,
+          runtime: true,
+          releaseDate: true,
+          certification: true,
+          popularity: true,
+          voteAverage: true,
+          voteCount: true,
+          imdbRating: true,
+          imdbVotes: true,
+          rottenTomatoesAudience: true,
+          letterboxdRating: true,
+          era: true,
+        },
+      }),
+      prisma.movieGenre.findMany({
+        select: { movieId: true, genreId: true },
+      }),
+      prisma.movieStudio.findMany({
+        select: { movieId: true, studioId: true },
+      }),
+      prisma.movieCast.findMany({
+        select: { movieId: true, personId: true, character: true, castOrder: true },
+      }),
+      prisma.movieCrew.findMany({
+        select: { movieId: true, personId: true, job: true },
+      }),
+      prisma.genreRanking.findMany({
+        select: { userId: true, genreId: true, rank: true },
+      }),
+      prisma.movieRating.findMany({
+        select: {
+          userId: true,
+          movieId: true,
+          rating: true,
+          hasSeen: true,
+          notHeardOf: true,
+        },
+      }),
+      prisma.actorRating.findMany({
+        select: { userId: true, personId: true, rating: true, notHeardOf: true },
+      }),
+      prisma.directorRating.findMany({
+        select: { userId: true, personId: true, rating: true, notHeardOf: true },
+      }),
+      prisma.studioRating.findMany({
+        select: { userId: true, studioId: true, rating: true, notHeardOf: true },
+      }),
+      prisma.userSettings.findMany({
+        select: { userId: true, explorationFactor: true, discoverySourcePref: true },
+      }),
+      prisma.integrationConfig.findMany({
+        select: { service: true, baseUrl: true, apiKey: true, enabled: true },
+      }),
+      prisma.latentVector.findMany({
+        select: { entityType: true, entityId: true, vector: true, bias: true },
+      }),
+      prisma.featureEmbedding.findMany({
+        select: { featureType: true, featureId: true, vector: true, bias: true },
+      }),
+      prisma.mFModelMetadata.findFirst({
+        select: {
+          version: true,
+          latentDimensions: true,
+          featureDimensions: true,
+          learningRate: true,
+          regularization: true,
+          trainedEpochs: true,
+          lastTrainedAt: true,
+          rmse: true,
+          validationRmse: true,
+          totalRatings: true,
+          isTraining: true,
+          globalMean: true,
+          featureWeights: true,
+        },
+      }),
+      prisma.userFeatureCache.findMany({
+        select: {
+          userId: true,
+          explorationFactor: true,
+          genreVector: true,
+          ratingMean: true,
+          ratingStdDev: true,
+          ratingCount: true,
+          topGenreIds: true,
+        },
+      }),
+      prisma.radarrSync.findMany({
+        select: {
+          movieId: true,
+          radarrId: true,
+          monitored: true,
+          available: true,
+        },
+      }),
+      prisma.plexAvailability.findMany({
+        select: {
+          movieId: true,
+          plexKey: true,
+          available: true,
+        },
+      }),
+      prisma.activityLog.findMany({
+        select: {
+          userId: true,
+          action: true,
+          entityType: true,
+          entityId: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    // Collect all URLs to fetch
+    const posterUrls = movies.filter(m => m.posterUrl).map(m => m.posterUrl as string);
+    const backdropUrls = movies.filter(m => m.backdropUrl).map(m => m.backdropUrl as string);
+    const photoUrls = people.filter(p => p.photoUrl).map(p => p.photoUrl as string);
+
+    const totalImages = posterUrls.length + backdropUrls.length + photoUrls.length;
+    console.log(`[Backup] Fetching ${totalImages} images (${posterUrls.length} posters, ${backdropUrls.length} backdrops, ${photoUrls.length} photos)`);
+
+    // Fetch posters
+    backupProgress.phase = "Fetching movie posters...";
+    backupProgress.current = 0;
+    backupProgress.total = posterUrls.length;
+    const posterData = await fetchImagesInBatches(posterUrls, 30, "posters", (current, total) => {
+      backupProgress.current = current;
+      backupProgress.total = total;
+    });
+    console.log(`[Backup] Fetched ${posterData.size}/${posterUrls.length} posters`);
+
+    // Fetch backdrops
+    backupProgress.phase = "Fetching movie backdrops...";
+    backupProgress.current = 0;
+    backupProgress.total = backdropUrls.length;
+    const backdropData = await fetchImagesInBatches(backdropUrls, 30, "backdrops", (current, total) => {
+      backupProgress.current = current;
+      backupProgress.total = total;
+    });
+    console.log(`[Backup] Fetched ${backdropData.size}/${backdropUrls.length} backdrops`);
+
+    // Fetch photos
+    backupProgress.phase = "Fetching person photos...";
+    backupProgress.current = 0;
+    backupProgress.total = photoUrls.length;
+    const photoData = await fetchImagesInBatches(photoUrls, 30, "photos", (current, total) => {
+      backupProgress.current = current;
+      backupProgress.total = total;
+    });
+    console.log(`[Backup] Fetched ${photoData.size}/${photoUrls.length} photos`);
+
+    backupProgress.phase = "Generating backup file...";
+
+    const backup: BackupData = {
+      version: BACKUP_VERSION,
+      createdAt: new Date().toISOString(),
+      users,
+      households,
+      householdMembers,
+      genres,
+      studios,
+      people: people.map((p) => ({
+        ...p,
+        photoData: p.photoUrl ? photoData.get(p.photoUrl) || null : null,
+      })),
+      movies: movies.map((m) => ({
+        ...m,
+        releaseDate: m.releaseDate?.toISOString() || null,
+        posterData: m.posterUrl ? posterData.get(m.posterUrl) || null : null,
+        backdropData: m.backdropUrl ? backdropData.get(m.backdropUrl) || null : null,
+      })),
+      movieGenres,
+      movieStudios,
+      movieCast,
+      movieCrew,
+      genreRankings,
+      movieRatings,
+      actorRatings,
+      directorRatings,
+      studioRatings,
+      userSettings,
+      integrationConfigs,
+      latentVectors,
+      featureEmbeddings,
+      mfModelMetadata: mfModelMetadata
+        ? {
+            ...mfModelMetadata,
+            lastTrainedAt: mfModelMetadata.lastTrainedAt?.toISOString() || null,
+          }
+        : null,
+      userFeatureCaches,
+      radarrSyncs,
+      plexAvailabilities,
+      activityLogs: activityLogs.map((a) => ({
+        ...a,
+        createdAt: a.createdAt.toISOString(),
+      })),
+    };
+
+    backupProgress.phase = "Complete";
+    backupProgress.inProgress = false;
+    console.log(`[Backup] Complete - ${movies.length} movies, ${people.length} people, ${latentVectors.length} latent vectors, ${featureEmbeddings.length} feature embeddings`);
+
+    // Stream the JSON to avoid memory limits
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        // Helper to write a chunk
+        const write = (str: string) => controller.enqueue(encoder.encode(str));
+
+        write('{\n');
+        write(`  "version": ${backup.version},\n`);
+        write(`  "createdAt": ${JSON.stringify(backup.createdAt)},\n`);
+
+        // Write simple arrays
+        const simpleArrays: [string, unknown[]][] = [
+          ['users', backup.users],
+          ['households', backup.households],
+          ['householdMembers', backup.householdMembers],
+          ['genres', backup.genres],
+          ['studios', backup.studios],
+          ['movieGenres', backup.movieGenres],
+          ['movieStudios', backup.movieStudios],
+          ['movieCast', backup.movieCast],
+          ['movieCrew', backup.movieCrew],
+          ['genreRankings', backup.genreRankings],
+          ['movieRatings', backup.movieRatings],
+          ['actorRatings', backup.actorRatings],
+          ['directorRatings', backup.directorRatings],
+          ['studioRatings', backup.studioRatings],
+          ['userSettings', backup.userSettings],
+          ['integrationConfigs', backup.integrationConfigs],
+          ['latentVectors', backup.latentVectors],
+          ['featureEmbeddings', backup.featureEmbeddings],
+          ['userFeatureCaches', backup.userFeatureCaches],
+          ['radarrSyncs', backup.radarrSyncs],
+          ['plexAvailabilities', backup.plexAvailabilities],
+          ['activityLogs', backup.activityLogs],
+        ];
+
+        for (const [key, arr] of simpleArrays) {
+          write(`  "${key}": ${JSON.stringify(arr)},\n`);
+        }
+
+        // Write mfModelMetadata
+        write(`  "mfModelMetadata": ${JSON.stringify(backup.mfModelMetadata)},\n`);
+
+        // Stream people array (with photos)
+        write('  "people": [\n');
+        for (let i = 0; i < backup.people.length; i++) {
+          const person = backup.people[i];
+          write('    ' + JSON.stringify(person));
+          write(i < backup.people.length - 1 ? ',\n' : '\n');
+        }
+        write('  ],\n');
+
+        // Stream movies array (with posters/backdrops - the largest data)
+        write('  "movies": [\n');
+        for (let i = 0; i < backup.movies.length; i++) {
+          const movie = backup.movies[i];
+          write('    ' + JSON.stringify(movie));
+          write(i < backup.movies.length - 1 ? ',\n' : '\n');
+        }
+        write('  ]\n');
+
+        write('}\n');
+        controller.close();
+      },
+    });
+
+    return new NextResponse(stream, {
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Disposition": `attachment; filename="movie-night-backup-${new Date().toISOString().split("T")[0]}.json"`,
+      },
+    });
+  } catch (error) {
+    console.error("[Backup] Error:", error);
+    backupProgress.inProgress = false;
+    backupProgress.phase = "Error";
+    throw error;
+  }
 }
