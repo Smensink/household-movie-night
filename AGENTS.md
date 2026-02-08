@@ -433,3 +433,21 @@ Core entities in `prisma/schema.prisma`:
   - Added a secondary `Restore from backup` link on the login page for faster recovery workflows.
   - Learned behavior: restore flow exists at `/setup/restore`, but discoverability depended on users knowing the route manually.
   - Learned user workflow preference: setup/restore actions should be visible from first-touch entry screens (intro/login), not hidden behind implicit routing knowledge.
+- 2026-02-08 (Large backup restore reliability):
+  - Fixed setup restore UX OOM risk: `/setup/restore` now uploads backup files via `multipart/form-data` instead of parsing full JSON in browser memory before submit.
+  - Upgraded public setup restore API (`/api/setup/restore`) to support backup versions `1` and `2` (including comprehensive backup fields introduced in v2).
+  - Setup restore now accepts file uploads (`backupFile`) and restores v2 media/model fields (embedded poster/photo/backdrop data, ML vectors/metadata/cache, Radarr/Plex availability, activity logs) in fresh-install mode.
+  - Docker runtime now sets `NODE_OPTIONS=--max-old-space-size=4096` in `docker-compose.yml` to reduce Node heap OOM failures during very large restore imports.
+  - Learned edge case: legacy setup restore route had stayed at v1 while backup export moved to v2 with large embedded images, causing restore failures even on empty databases.
+  - Learned user workflow preference: restore must work reliably for very large single-file backups without requiring users to manually trim JSON content.
+- 2026-02-08 (Backup format v3 - streamed, low-memory):
+  - Added new streamed backup export endpoint `GET /api/backup/v3` that outputs `v3.ndjson.gz` instead of monolithic JSON.
+  - Added new fresh-install restore endpoint `GET|POST /api/setup/restore-v3` that restores v3 backups record-by-record from a gzip stream.
+  - New shared implementation in `src/lib/backup-v3.ts`:
+    - Export is incremental (chunked table pagination) and gzip-compressed.
+    - Restore is line-by-line NDJSON processing, avoiding full-file JSON parsing in memory.
+    - Embedded `data:` URLs can be stripped during export for smaller files (`includeEmbeddedAssets=false` default).
+  - Updated setup restore UI (`/setup/restore`) to upload raw file streams to `/api/setup/restore-v3` with expected format `.v3.ndjson.gz`.
+  - Updated Settings backup download to use `/api/backup/v3` and save as `.v3.ndjson.gz`; kept settings import labeled as legacy JSON merge flow.
+  - Learned architecture edge case: monolithic JSON + embedded assets causes browser and server OOM failure modes; streaming NDJSON with compression is substantially safer for household-scale and ML-augmented datasets.
+  - Learned user workflow preference: backup/restore must prioritize reliability over single-file JSON convenience, with explicit format guidance in UI.

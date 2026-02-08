@@ -15,7 +15,7 @@ export default function SetupRestorePage() {
   } | null>(null);
 
   useEffect(() => {
-    fetch("/api/setup/restore")
+    fetch("/api/setup/restore-v3")
       .then((res) => res.json())
       .then((data) => setCanRestore(data.canRestore))
       .catch(() => setCanRestore(false));
@@ -27,13 +27,16 @@ export default function SetupRestorePage() {
     setStatus(null);
 
     try {
-      const text = await backupFile.text();
-      const backup = JSON.parse(text);
+      const isGzip = backupFile.name.toLowerCase().endsWith(".gz");
 
-      const res = await fetch("/api/setup/restore", {
+      const res = await fetch("/api/setup/restore-v3", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(backup),
+        headers: {
+          "Content-Type": isGzip ? "application/gzip" : "application/x-ndjson",
+          "X-Backup-Format": isGzip ? "v3-gzip" : "v3-plain",
+          "X-Backup-Filename": backupFile.name,
+        },
+        body: backupFile,
       });
 
       const data = await res.json();
@@ -48,11 +51,12 @@ export default function SetupRestorePage() {
         setStatus({
           message: data.error || "Restore failed",
           success: false,
+          details: data.details,
         });
       }
     } catch {
       setStatus({
-        message: "Invalid backup file format. Make sure it's a valid JSON backup file.",
+        message: "Restore failed. Check that the backup file is a valid v3 backup.",
         success: false,
       });
     }
@@ -131,7 +135,7 @@ export default function SetupRestorePage() {
             <label className="block">
               <input
                 type="file"
-                accept=".json"
+                accept=".gz,.ndjson"
                 className="hidden"
                 onChange={(e) => {
                   setBackupFile(e.target.files?.[0] || null);
@@ -139,7 +143,7 @@ export default function SetupRestorePage() {
                 }}
               />
               <div className="bg-card-hover border border-border rounded-lg px-4 py-3 text-sm text-muted cursor-pointer hover:border-accent/30 transition-all text-center">
-                {backupFile ? backupFile.name : "Choose backup JSON file..."}
+                {backupFile ? backupFile.name : "Choose backup v3 file..."}
               </div>
             </label>
           </div>
@@ -177,7 +181,13 @@ export default function SetupRestorePage() {
               <li>Integration configurations with API keys</li>
             </ul>
             <p className="text-[10px] text-muted mt-2">
+              Expected file format: <code>.v3.ndjson.gz</code>
+            </p>
+            <p className="text-[10px] text-muted mt-2">
               Users can log in with their existing credentials after restore.
+            </p>
+            <p className="text-[10px] text-muted">
+              Large backups are uploaded directly to the server to reduce browser memory usage.
             </p>
           </div>
         </div>

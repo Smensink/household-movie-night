@@ -310,7 +310,7 @@ export default function SettingsPage() {
     // Start polling for progress
     const pollInterval = setInterval(async () => {
       try {
-        const statusRes = await fetch("/api/backup?status=true");
+        const statusRes = await fetch("/api/backup/v3?status=true");
         if (statusRes.ok) {
           const progress = await statusRes.json();
           setBackupProgress(progress);
@@ -324,7 +324,7 @@ export default function SettingsPage() {
     }, 500);
 
     try {
-      const res = await fetch("/api/backup");
+      const res = await fetch("/api/backup/v3");
       clearInterval(pollInterval);
 
       if (!res.ok) {
@@ -333,7 +333,7 @@ export default function SettingsPage() {
           setBackupProgress({ inProgress: true, phase: "Backup already in progress...", current: 0, total: 0 });
           // Keep polling until complete
           const waitInterval = setInterval(async () => {
-            const statusRes = await fetch("/api/backup?status=true");
+            const statusRes = await fetch("/api/backup/v3?status=true");
             if (statusRes.ok) {
               const progress = await statusRes.json();
               setBackupProgress(progress);
@@ -360,7 +360,7 @@ export default function SettingsPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `movie-night-backup-${new Date().toISOString().split("T")[0]}.json`;
+      a.download = `movie-night-backup-${new Date().toISOString().split("T")[0]}.v3.ndjson.gz`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1089,13 +1089,13 @@ export default function SettingsPage() {
             )}
             {!backupProgress && (
               <p className="text-[10px] text-muted">
-                Downloads movies, ratings, preferences, accounts, images, and ML model.
+                Downloads streamed v3 backup (<code>.ndjson.gz</code>) for low-memory restore.
               </p>
             )}
           </div>
 
           <div className="space-y-2">
-            <p className="text-xs font-medium">Import Backup</p>
+            <p className="text-xs font-medium">Import Backup (Legacy JSON)</p>
             <div className="flex items-center gap-2">
               <label className="flex-1">
                 <input
@@ -1118,7 +1118,7 @@ export default function SettingsPage() {
               </Button>
             </div>
             <p className="text-[10px] text-muted">
-              Restores all data including user accounts.
+              In-place restore currently supports legacy JSON backups. Use setup restore for v3 backups.
             </p>
           </div>
         </div>
