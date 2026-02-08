@@ -489,3 +489,52 @@ Core entities in `prisma/schema.prisma`:
     - Excludes very recent releases (must be at least ~9 months old, or prior-year when only `year` exists).
   - Indie mode query ordering now prefers higher-rated, lower-popularity candidates (`voteAverage desc`, `popularity asc`).
   - Learned product preference: when a user picks `indie_darlings`, mainstream family tentpoles should be actively filtered out, not just down-ranked.
+- 2026-02-08 (Rated movies search + Radarr majority gating):
+  - Added search input in the rated-movies edit pane on `/preferences/movies` so users can quickly find previously rated titles by title or year without losing scroll context.
+  - Updated Radarr top-rated eligibility (`getTopRatedMoviesForRadarr`) to require household-majority participation:
+    - A movie now qualifies only if more than half of household members have an unseen-rating vote for it.
+    - Ranking uses the best qualifying household consensus per movie (average rating, then vote count tiebreaker).
+  - Learned user workflow preference: maintenance/edit flows need fast filtering at scale, and Radarr automation should reflect explicit household consensus breadth, not sparse single-user votes.
+- 2026-02-08 (Radarr quality floor):
+  - Added minimum consensus quality threshold for Radarr auto-add in `getTopRatedMoviesForRadarr`: movies must now meet `avgRating >= 3.5` in addition to majority-household participation.
+  - Learned product preference: Radarr automation should gate on both consensus breadth (majority participation) and consensus quality (minimum average score), preventing weakly-liked titles from being auto-monitored.
+- 2026-02-08 (External ratings badges consistency):
+  - Fixed item-card ratings visibility by wiring external rating fields consistently across movie feeds:
+    - Discover API now includes `tmdbRating` (`voteAverage`) in card payloads.
+    - Search API now persists/parses OMDB ratings (`imdbRating`, `rottenTomatoesAudience`, `imdbVotes`) and returns `tmdbRating`/IMDb/RT fields in search card payloads.
+    - Upcoming API now includes `tmdbRating`/IMDb/RT fields in responses and refreshes missing OMDB ratings during fetch.
+  - Updated `TinderMovieCard` badges:
+    - Added TMDB badge display.
+    - Switched rating badge guards to explicit null/undefined checks (instead of truthy checks) for reliability.
+  - Updated movie/upcoming page TypeScript interfaces to pass new rating fields through to cards.
+  - Learned behavior edge case: external rating fields existed in DB for many records but were inconsistently exposed by route payloads, which made badges appear absent despite available data.
+- 2026-02-08 (Upcoming poster fallback + one-off backfill):
+  - Added TMDB poster fallback into `/api/movies/upcoming` so anticipated movie cards self-heal missing posters when OMDB has no usable poster.
+  - Ran one-off TMDB poster backfill against currently missing-poster catalog entries:
+    - Missing posters before: 464
+    - Candidates scanned: 144
+    - Posters filled: 23
+    - Missing posters after: 441
+  - Learned behavior edge case: anticipated/trakt entries can lack poster data from OMDB, so explicit TMDB fallback at read-time plus periodic backfill is needed for consistent card visuals.
+- 2026-02-08 (Upcoming page performance parity with movie ratings):
+  - Refactored `GET /api/movies/upcoming` to use local database reads only on the request hot path (no Trakt/OMDB/TMDB network calls per request).
+  - Upcoming query now returns future-release candidates from local `Movie` rows, includes local cast/director/studio metadata, household consensus, and Radarr status.
+  - Added non-blocking pool replenishment trigger (`maybeExpandPoolForUser`) so external fetch/enrichment remains background behavior instead of blocking the page.
+  - Updated `/preferences/upcoming` prefetch behavior to match `/preferences/movies` more closely:
+    - Raised preload threshold from 5 to 10.
+    - Kept preload batch at 15.
+    - Initial load now warms with a double batch (`PRELOAD_BATCH_SIZE * 2`) plus `/api/ratings` in parallel, then filters rated IDs before showing the first card.
+    - Background preload cadence now checks every 2 seconds (was 3 seconds).
+  - Learned behavior: upcoming-page latency was dominated by external API calls in the route; local-first reads eliminate the hot-path bottleneck.
+  - Learned user workflow preference: upcoming should feel as responsive as movie ratings and follow the same queue/prefetch/local-access pattern for consistent interaction speed.
+  - Clarified current architecture: upcoming feed does not currently use the discovery ranking algorithm or matrix-factorization model; it is a local upcoming-candidate feed with consensus filtering.
+- 2026-02-08 (Upcoming ranking now uses discovery algorithm + ML):
+  - Upgraded `GET /api/movies/upcoming` to rank local upcoming candidates using the same core scoring stack as movie discovery.
+  - Added upcoming-route use of shared preference profile + algorithm settings + matrix-factorization predictions:
+    - `buildDiscoveryPreferenceProfile`
+    - `getAlgorithmSettings` (`movieDiscovery` tuning)
+    - `getPredictedRatingsForUser` / model-confidence blending
+  - Ranking now blends preference signal (genre/movie/actor/director/studio + household ratings), discovery/source signals, exploration factor, dislike penalties, and confidence-weighted MF score.
+  - Added release-proximity scoring (`releaseSoonBoost`) so near-term releases are prioritized within the ML + heuristic ranking.
+  - Preserved local-access performance constraint: request path remains DB-only for upcoming candidates; external catalog expansion continues as non-blocking background behavior.
+  - Learned user workflow preference: upcoming should not only load as fast as movie ratings, it should also honor personalized ranking quality from the same algorithm/ML system.

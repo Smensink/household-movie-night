@@ -1,14 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { getAnticipatedMovies } from "@/lib/api/trakt";
-import { getOMDBMovie } from "@/lib/api/omdb";
 import { prisma } from "@/lib/prisma";
-import { syncMovieMetadataFromOMDB } from "@/lib/movie-metadata";
 import { syncMoviesToRadarr } from "@/lib/api/radarr";
 import { isUserHouseholdAdmin } from "@/lib/household-admin";
+import { maybeExpandPoolForUser } from "@/lib/movie-pool-expansion";
+import {
+  averageAffinityForIds,
+  buildDiscoveryPreferenceProfile,
+} from "@/lib/preference-profile";
+import { getAlgorithmSettings } from "@/lib/algorithm-settings";
+import {
+  getModelMetadata,
+  getPredictedRatingsForUser,
+} from "@/lib/matrix-factorization";
 
 const DEFAULT_LIMIT = 15;
 const MAX_LIMIT = 30;
+const COLD_START_THRESHOLD = 10;
 
 interface UpcomingMovieResponse {
   id: string;
@@ -18,6 +26,9 @@ interface UpcomingMovieResponse {
   year: number | null;
   posterUrl: string | null;
   overview: string | null;
+  tmdbRating: number | null;
+  imdbRating: number | null;
+  rottenTomatoesAudience: number | null;
   releaseDate: string | null;
   listCount: number;
   actors: string[];
@@ -42,7 +53,74 @@ function parseLimit(value: string | null): number {
   return Math.max(1, Math.min(MAX_LIMIT, parsed));
 }
 
-// GET /api/movies/upcoming - Fetch anticipated movies
+function parseExcludedMovieIds(values: string[]): Set<string> {
+  const excluded = new Set<string>();
+  for (const value of values) {
+    for (const id of value.split(",")) {
+      const trimmed = id.trim();
+      if (trimmed) excluded.add(trimmed);
+    }
+  }
+  return excluded;
+}
+
+function normalizeRating(rating: number): number {
+  return (rating - 3) / 2;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function isColdStartUser(ratedMovieCount: number, ratedGenreCount: number): boolean {
+  return ratedMovieCount < COLD_START_THRESHOLD && ratedGenreCount < 5;
+}
+
+function mergeUnique(values: string[], extras: string[], limit: number): string[] {
+  return Array.from(new Set([...values, ...extras])).slice(0, limit);
+}
+
+function computeSourceSignal(
+  sourcePref: string,
+  metrics: {
+    mainstream: number;
+    recentness: number;
+    ratingQuality: number;
+    voteConfidence: number;
+  }
+): number {
+  const { mainstream, recentness, ratingQuality, voteConfidence } = metrics;
+  let score01 = 0.5;
+
+  switch (sourcePref) {
+    case "trending":
+      score01 = mainstream * 0.55 + recentness * 0.3 + ratingQuality * 0.15;
+      break;
+    case "popular":
+      score01 = mainstream * 0.7 + voteConfidence * 0.2 + ratingQuality * 0.1;
+      break;
+    case "top_rated":
+      score01 = ratingQuality * 0.7 + voteConfidence * 0.3;
+      break;
+    case "new_releases":
+      score01 = recentness * 0.75 + mainstream * 0.15 + ratingQuality * 0.1;
+      break;
+    case "indie_darlings":
+      score01 =
+        ratingQuality * 0.5 +
+        (1 - mainstream) * 0.4 +
+        voteConfidence * 0.1;
+      break;
+    case "balanced":
+    default:
+      score01 = 0.5;
+      break;
+  }
+
+  return score01 * 2 - 1;
+}
+
+// GET /api/movies/upcoming - Local upcoming feed with discover-style ranking
 export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -54,191 +132,305 @@ export async function GET(req: NextRequest) {
   const excludeRadarr = req.nextUrl.searchParams.get("excludeRadarr") === "true";
   const excludeRated = req.nextUrl.searchParams.get("excludeRated") === "true";
 
-  // Parse excluded movie IDs (for deduplication on client preload)
-  const excludeMovieIdsParam = req.nextUrl.searchParams.get("excludeMovieIds");
-  const excludeMovieIds = new Set(
-    excludeMovieIdsParam ? excludeMovieIdsParam.split(",").filter(Boolean) : []
+  const excludedMovieIds = parseExcludedMovieIds(
+    req.nextUrl.searchParams.getAll("excludeMovieIds")
   );
 
   try {
-    // Fetch anticipated movies from Trakt
-    const anticipated = await getAnticipatedMovies(limit * 3); // Fetch more to account for filtering
+    const [profile, algorithmSettings, mfMetadata] = await Promise.all([
+      buildDiscoveryPreferenceProfile(userId),
+      getAlgorithmSettings(),
+      getModelMetadata(),
+    ]);
 
-    // Get user's household
-    const householdMember = await prisma.householdMember.findFirst({
-      where: { userId },
-      select: { householdId: true },
+    const tuning = algorithmSettings.movieDiscovery;
+    const mfConfidence = mfMetadata?.confidence ?? 0;
+    const coldStartUser = isColdStartUser(
+      profile.userRatedMovieIds.size,
+      profile.genreAffinity.size
+    );
+
+    const now = new Date();
+    const currentYear = now.getFullYear();
+
+    const candidateMovies = await prisma.movie.findMany({
+      where: {
+        id: { notIn: Array.from(excludedMovieIds) },
+        posterUrl: { not: null },
+        OR: [
+          { releaseDate: { gt: now } },
+          { releaseDate: null, year: { gt: currentYear } },
+        ],
+        ...(excludeRadarr ? { radarrSync: { is: null } } : {}),
+      },
+      include: {
+        genres: {
+          select: {
+            genreId: true,
+            genre: { select: { name: true } },
+          },
+        },
+        cast: {
+          include: { person: { select: { name: true } } },
+          orderBy: { castOrder: "asc" },
+          take: 3,
+        },
+        crew: {
+          where: { job: "Director" },
+          include: { person: { select: { name: true } } },
+          take: 2,
+        },
+        studios: {
+          include: { studio: { select: { name: true } } },
+          take: 2,
+        },
+        ratings: {
+          where: { userId: { in: profile.householdUserIds } },
+          select: {
+            userId: true,
+            rating: true,
+            notHeardOf: true,
+            hasSeen: true,
+          },
+        },
+        radarrSync: true,
+        plexAvailability: true,
+      },
+      orderBy: [
+        { releaseDate: "asc" },
+        { year: "asc" },
+        { popularity: "desc" },
+        { updatedAt: "desc" },
+      ],
+      take: Math.max(limit * 6, 80),
     });
 
-    const householdUserIds = householdMember
-      ? (
-          await prisma.householdMember.findMany({
-            where: { householdId: householdMember.householdId },
-            select: { userId: true },
-          })
-        ).map((m) => m.userId)
-      : [userId];
+    const candidateMovieIds = candidateMovies.map((movie) => movie.id);
+    const mfPredictions =
+      mfConfidence > 0
+        ? await getPredictedRatingsForUser(userId, candidateMovieIds)
+        : new Map<string, number>();
 
-    const results: UpcomingMovieResponse[] = [];
+    const scoredMovies = candidateMovies
+      .map((movie) => {
+        const validRatings = movie.ratings.filter(
+          (r) => !r.notHeardOf && r.rating !== null
+        );
+        const userRating = movie.ratings.find((r) => r.userId === userId);
 
-    for (const item of anticipated) {
-      const traktMovie = item.movie;
-      const imdbId = traktMovie.ids?.imdb;
-      const tmdbId = traktMovie.ids?.tmdb?.toString() || null;
-
-      if (!imdbId) continue;
-
-      // Check if movie exists in DB
-      let movie = await prisma.movie.findUnique({
-        where: { imdbId },
-        include: {
-          cast: {
-            include: { person: { select: { name: true } } },
-            orderBy: { castOrder: "asc" },
-            take: 3,
-          },
-          crew: {
-            where: { job: "Director" },
-            include: { person: { select: { name: true } } },
-            take: 2,
-          },
-          studios: {
-            include: { studio: { select: { name: true } } },
-            take: 2,
-          },
-          ratings: {
-            where: { userId: { in: householdUserIds } },
-            select: {
-              userId: true,
-              rating: true,
-              notHeardOf: true,
-            },
-          },
-          radarrSync: true,
-        },
-      });
-
-      // Fetch OMDB details for poster/metadata
-      const omdbDetails = await getOMDBMovie(imdbId);
-
-      // Create or update movie in DB
-      if (!movie) {
-        movie = await prisma.movie.create({
-          data: {
-            imdbId,
-            tmdbId,
-            traktSlug: traktMovie.ids?.slug || null,
-            title: traktMovie.title,
-            year: traktMovie.year || null,
-            posterUrl:
-              omdbDetails?.Poster && omdbDetails.Poster !== "N/A"
-                ? omdbDetails.Poster
-                : null,
-            overview: omdbDetails?.Plot || null,
-          },
-          include: {
-            cast: {
-              include: { person: { select: { name: true } } },
-              take: 3,
-            },
-            crew: {
-              where: { job: "Director" },
-              include: { person: { select: { name: true } } },
-              take: 2,
-            },
-            studios: {
-              include: { studio: { select: { name: true } } },
-              take: 2,
-            },
-            ratings: {
-              where: { userId: { in: householdUserIds } },
-              select: {
-                userId: true,
-                rating: true,
-                notHeardOf: true,
-              },
-            },
-            radarrSync: true,
-          },
-        });
-
-        // Sync metadata from OMDB
-        if (omdbDetails) {
-          await syncMovieMetadataFromOMDB(movie.id, omdbDetails);
+        if (
+          excludeRated &&
+          userRating &&
+          (userRating.rating !== null || userRating.notHeardOf)
+        ) {
+          return null;
         }
-      } else if (omdbDetails && !movie.posterUrl) {
-        // Update missing poster
-        await prisma.movie.update({
-          where: { id: movie.id },
-          data: {
-            posterUrl:
-              omdbDetails.Poster !== "N/A" ? omdbDetails.Poster : null,
-          },
+
+        const averageRating =
+          validRatings.length > 0
+            ? validRatings.reduce((sum, r) => sum + (r.rating || 0), 0) /
+              validRatings.length
+            : null;
+
+        const genreSignal = averageAffinityForIds(
+          movie.genres.map((genre) => genre.genreId),
+          profile.genreAffinity
+        );
+        const actorSignal = averageAffinityForIds(
+          movie.cast.map((castMember) => castMember.personId),
+          profile.actorAffinity
+        );
+        const directorSignal = averageAffinityForIds(
+          movie.crew.map((crewMember) => crewMember.personId),
+          profile.directorAffinity
+        );
+        const studioSignal = averageAffinityForIds(
+          movie.studios.map((studio) => studio.studioId),
+          profile.studioAffinity
+        );
+        const movieSignal = profile.movieAffinity.get(movie.id) ?? 0;
+
+        const explicitRatings = validRatings.map((rating) =>
+          normalizeRating(rating.rating as number)
+        );
+        const householdRatingSignal =
+          explicitRatings.length > 0
+            ? explicitRatings.reduce((sum, value) => sum + value, 0) /
+              explicitRatings.length
+            : 0;
+
+        const preferenceSignal = coldStartUser
+          ? genreSignal * 0.5 + householdRatingSignal * 0.5
+          : genreSignal * 0.3 +
+            actorSignal * 0.2 +
+            directorSignal * 0.15 +
+            studioSignal * 0.15 +
+            movieSignal * 0.15 +
+            householdRatingSignal * 0.05;
+
+        const actorFamiliarity =
+          movie.cast.length === 0
+            ? 0
+            : movie.cast.filter((castMember) =>
+                profile.userRatedActorIds.has(castMember.personId)
+              ).length / movie.cast.length;
+        const directorFamiliarity =
+          movie.crew.length === 0
+            ? 0
+            : movie.crew.filter((crewMember) =>
+                profile.userRatedDirectorIds.has(crewMember.personId)
+              ).length / movie.crew.length;
+        const studioFamiliarity =
+          movie.studios.length === 0
+            ? 0
+            : movie.studios.filter((studio) =>
+                profile.userRatedStudioIds.has(studio.studioId)
+              ).length / movie.studios.length;
+
+        const noveltySignal =
+          1 -
+          (actorFamiliarity * 0.5 +
+            directorFamiliarity * 0.2 +
+            studioFamiliarity * 0.3);
+
+        const qualityWeight = coldStartUser ? 0.85 : 0.6;
+        const popularityWeight = coldStartUser ? 0.15 : 0.4;
+        const qualitySignal =
+          clamp((movie.voteAverage ?? 0) / 10, 0, 1) * qualityWeight +
+          clamp((movie.popularity ?? 0) / 100, 0, 1) * popularityWeight;
+
+        const releaseDate = movie.releaseDate;
+        const daysUntilRelease = releaseDate
+          ? Math.max(0, (releaseDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
+          : 365;
+        const recencySoon = clamp(1 - daysUntilRelease / 365, 0, 1);
+
+        const imdbRating = movie.imdbRating ?? 0;
+        const tmdbRating = movie.voteAverage ?? 0;
+        const bestRating = Math.max(imdbRating, tmdbRating);
+        const voteCount = movie.voteCount ?? 0;
+        const mainstream = clamp((movie.popularity ?? 0) / 120, 0, 1);
+        const ratingQuality = clamp(bestRating / 10, 0, 1);
+        const voteConfidence = clamp(Math.log10(voteCount + 1) / 5, 0, 1);
+        const sourceSignal = computeSourceSignal(profile.discoverySourcePref, {
+          mainstream,
+          recentness: recencySoon,
+          ratingQuality,
+          voteConfidence,
         });
-        movie.posterUrl =
-          omdbDetails.Poster !== "N/A" ? omdbDetails.Poster : null;
-      }
 
-      // Calculate consensus
-      const validRatings = movie.ratings.filter(
-        (r) => !r.notHeardOf && r.rating !== null
-      );
-      const userRating = movie.ratings.find((r) => r.userId === userId);
-      const averageRating =
-        validRatings.length > 0
-          ? validRatings.reduce((sum, r) => sum + (r.rating || 0), 0) /
-            validRatings.length
-          : null;
+        const adjustedNoveltyInfluence = tuning.noveltyInfluence * 0.4;
+        const adjustedQualityInfluence = tuning.qualityInfluence * 1.3;
+        const discoveryWeightsTotal =
+          adjustedNoveltyInfluence + adjustedQualityInfluence + tuning.sourceInfluence;
+        const discoveryBase =
+          discoveryWeightsTotal > 0
+            ? (noveltySignal * adjustedNoveltyInfluence +
+                qualitySignal * adjustedQualityInfluence +
+                sourceSignal * tuning.sourceInfluence) /
+              discoveryWeightsTotal
+            : noveltySignal * 0.3 + qualitySignal * 0.7;
+        const discoverySignal = discoveryBase * 2 - 1;
 
-      // Skip if movie is in exclude list (already in queue)
-      if (excludeMovieIds.has(movie.id)) {
-        continue;
-      }
+        const effectiveExplorationFactor = coldStartUser
+          ? Math.max(0.7, profile.explorationFactor)
+          : Math.pow(profile.explorationFactor, 1.5);
 
-      // Skip if filtering out Radarr movies
-      if (excludeRadarr && movie.radarrSync) {
-        continue;
-      }
+        const strongDislikes = movie.ratings.filter(
+          (rating) => !rating.notHeardOf && rating.rating !== null && rating.rating <= 2
+        ).length;
+        const dislikePenalty =
+          strongDislikes > 0 ? strongDislikes * tuning.dislikePenalty : 0;
 
-      // Skip if filtering out user-rated movies
-      if (excludeRated && userRating?.rating !== null && userRating?.rating !== undefined) {
-        continue;
-      }
+        const availabilitySignal =
+          movie.radarrSync?.available || movie.plexAvailability?.available ? 1 : 0;
 
-      results.push({
-        id: movie.id,
-        imdbId: movie.imdbId,
-        tmdbId: movie.tmdbId,
-        title: movie.title,
-        year: movie.year,
-        posterUrl: movie.posterUrl,
-        overview: movie.overview,
-        releaseDate: movie.releaseDate?.toISOString() || null,
-        listCount: item.list_count,
-        actors: movie.cast.map((c) => c.person.name).filter(Boolean),
-        directors: movie.crew.map((c) => c.person.name).filter(Boolean),
-        studios: movie.studios.map((s) => s.studio.name).filter(Boolean),
-        consensus: {
-          ratingCount: validRatings.length,
-          averageRating,
-          userRating: userRating?.rating || null,
-        },
-        radarrStatus: movie.radarrSync
-          ? {
-              inRadarr: true,
-              available: movie.radarrSync.available,
-              monitored: movie.radarrSync.monitored,
-            }
-          : null,
-      });
+        const releaseSoonBoost = recencySoon * 0.35;
+        const yearConfidenceBoost = (movie.year ?? currentYear + 1) >= currentYear ? 0.08 : 0;
 
-      // Stop if we have enough results
-      if (results.length >= limit) {
-        break;
-      }
-    }
+        const mfPredictedRating = mfPredictions.get(movie.id);
+        const mfSignal =
+          mfPredictedRating !== undefined
+            ? clamp((mfPredictedRating - 3) / 2, -1, 1)
+            : 0;
 
-    return NextResponse.json(results);
+        const mfWeight = mfConfidence * 0.4;
+        const heuristicWeight = 1 - mfWeight;
+        const confidenceWeight = coldStartUser ? 0.5 : 1.0;
+
+        const heuristicScore =
+          preferenceSignal *
+            tuning.preferenceWeight *
+            (1 - effectiveExplorationFactor) +
+          discoverySignal *
+            tuning.discoveryWeight *
+            effectiveExplorationFactor +
+          releaseSoonBoost +
+          yearConfidenceBoost +
+          availabilitySignal * tuning.availabilityBonus +
+          dislikePenalty +
+          Math.random() * tuning.randomJitter;
+
+        const score =
+          (heuristicScore * heuristicWeight + mfSignal * mfWeight) * confidenceWeight;
+
+        return {
+          id: movie.id,
+          imdbId: movie.imdbId,
+          tmdbId: movie.tmdbId,
+          title: movie.title,
+          year: movie.year,
+          posterUrl: movie.posterUrl,
+          overview: movie.overview,
+          tmdbRating: movie.voteAverage,
+          imdbRating: movie.imdbRating,
+          rottenTomatoesAudience: movie.rottenTomatoesAudience,
+          releaseDate: movie.releaseDate?.toISOString() || null,
+          listCount: Math.max(0, Math.round(movie.popularity ?? 0)),
+          actors: mergeUnique(movie.cast.map((c) => c.person.name).filter(Boolean), [], 3),
+          directors: mergeUnique(movie.crew.map((c) => c.person.name).filter(Boolean), [], 2),
+          studios: mergeUnique(movie.studios.map((s) => s.studio.name).filter(Boolean), [], 2),
+          consensus: {
+            ratingCount: validRatings.length,
+            averageRating,
+            userRating: userRating?.rating || null,
+          },
+          radarrStatus: movie.radarrSync
+            ? {
+                inRadarr: true,
+                available: movie.radarrSync.available,
+                monitored: movie.radarrSync.monitored,
+              }
+            : null,
+          score,
+        };
+      })
+      .filter((movie): movie is NonNullable<typeof movie> => movie !== null)
+      .sort((a, b) => b.score - a.score);
+
+    const finalResults: UpcomingMovieResponse[] = scoredMovies.slice(0, limit).map((movie) => ({
+      id: movie.id,
+      imdbId: movie.imdbId,
+      tmdbId: movie.tmdbId,
+      title: movie.title,
+      year: movie.year,
+      posterUrl: movie.posterUrl,
+      overview: movie.overview,
+      tmdbRating: movie.tmdbRating,
+      imdbRating: movie.imdbRating,
+      rottenTomatoesAudience: movie.rottenTomatoesAudience,
+      releaseDate: movie.releaseDate,
+      listCount: movie.listCount,
+      actors: movie.actors,
+      directors: movie.directors,
+      studios: movie.studios,
+      consensus: movie.consensus,
+      radarrStatus: movie.radarrStatus,
+    }));
+
+    maybeExpandPoolForUser(userId);
+
+    return NextResponse.json(finalResults);
   } catch (error) {
     console.error("Error fetching upcoming movies:", error);
     return NextResponse.json(
@@ -248,14 +440,13 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// POST /api/movies/upcoming/sync-radarr - Sync consensus movies to Radarr
+// POST /api/movies/upcoming - Sync selected movies to Radarr
 export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Only admins can trigger Radarr sync
   const isAdmin = await isUserHouseholdAdmin(session.user.id);
   if (!isAdmin) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });

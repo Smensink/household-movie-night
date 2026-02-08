@@ -15,6 +15,9 @@ interface UpcomingMovie {
   year: number | null;
   posterUrl: string | null;
   overview: string | null;
+  tmdbRating: number | null;
+  imdbRating: number | null;
+  rottenTomatoesAudience: number | null;
   releaseDate: string | null;
   listCount: number;
   actors: string[];
@@ -38,10 +41,16 @@ interface UserRating {
   notHeardOf: boolean;
 }
 
+interface RatedMovieEntry {
+  movieId: string;
+  rating: number | null;
+  notHeardOf: boolean;
+}
+
 const CONSENSUS_THRESHOLD = 2;
 const MIN_RATING = 4;
-const BATCH_SIZE = 15;
-const PRELOAD_THRESHOLD = 5; // Fetch more when queue drops below this
+const PRELOAD_BATCH_SIZE = 15; // Preload this many movies at a time
+const PRELOAD_THRESHOLD = 10; // Fetch more when queue drops below this
 
 export default function UpcomingMoviesPage() {
   const { status } = useSession();
@@ -93,9 +102,9 @@ export default function UpcomingMoviesPage() {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
-  const fetchUpcomingBatch = useCallback(async (excludeIds: string[] = []) => {
+  const fetchUpcomingBatch = useCallback(async (limit: number, excludeIds: string[] = []) => {
     const params = new URLSearchParams({
-      limit: String(BATCH_SIZE),
+      limit: String(limit),
       excludeRadarr: "true",
       excludeRated: "true",
     });
@@ -127,7 +136,7 @@ export default function UpcomingMoviesPage() {
     preloadInProgressRef.current = true;
 
     try {
-      const batch = await fetchUpcomingBatch(getExcludeMovieIds());
+      const batch = await fetchUpcomingBatch(PRELOAD_BATCH_SIZE, getExcludeMovieIds());
       if (batch.length > 0) {
         const merged = dedupeAndFilterMovies(
           [...queueRef.current, ...batch],
@@ -148,24 +157,36 @@ export default function UpcomingMoviesPage() {
     initialLoadDoneRef.current = true;
     let cancelled = false;
 
-    fetchUpcomingBatch()
-      .then((movies) => {
+    Promise.all([
+      fetchUpcomingBatch(PRELOAD_BATCH_SIZE * 2, []),
+      fetch("/api/ratings").then((r) => r.json()),
+    ])
+      .then(([movies, userRatings]) => {
         if (cancelled) return;
 
-        // Filter out any movies user has already rated
-        const unratedMovies = movies.filter((m) => {
-          if (m.consensus.userRating !== null) {
-            ratedMovieIdsRef.current.add(m.id);
-            return false;
+        const ratingMap = new Map<string, UserRating>();
+        const ratedIds = new Set<string>();
+        if (Array.isArray(userRatings)) {
+          for (const rating of userRatings as RatedMovieEntry[]) {
+            ratingMap.set(rating.movieId, {
+              movieId: rating.movieId,
+              rating: rating.rating,
+              notHeardOf: rating.notHeardOf,
+            });
+            ratedIds.add(rating.movieId);
+            ratedMovieIdsRef.current.add(rating.movieId);
           }
-          return true;
-        });
+        }
+
+        const unratedMovies = dedupeAndFilterMovies(movies, ratedIds);
 
         if (unratedMovies.length > 0) {
           setCurrentMovie(unratedMovies[0]);
           setQueueAndRef(unratedMovies.slice(1));
         }
 
+        ratingsRef.current = ratingMap;
+        setRatings(ratingMap);
         setLoading(false);
       })
       .catch(() => {
@@ -175,7 +196,7 @@ export default function UpcomingMoviesPage() {
     return () => {
       cancelled = true;
     };
-  }, [status, fetchUpcomingBatch, setQueueAndRef]);
+  }, [status, fetchUpcomingBatch, dedupeAndFilterMovies, setQueueAndRef]);
 
   // Background preloading effect - use ref to avoid recreating interval
   const preloadMoviesRef = useRef(preloadMovies);
@@ -193,7 +214,7 @@ export default function UpcomingMoviesPage() {
         setQueueAndRef(cleanedQueue);
       }
       void preloadMoviesRef.current();
-    }, 3000); // Check every 3 seconds
+    }, 2000);
 
     return () => clearInterval(interval);
   }, [loading, setQueueAndRef]);
@@ -299,7 +320,7 @@ export default function UpcomingMoviesPage() {
 
   const loadMoreMovies = useCallback(async () => {
     setLoading(true);
-    const movies = await fetchUpcomingBatch();
+    const movies = await fetchUpcomingBatch(PRELOAD_BATCH_SIZE * 2);
 
     const unratedMovies = movies.filter(
       (m) => !ratedMovieIdsRef.current.has(m.id) && m.consensus.userRating === null
@@ -449,6 +470,9 @@ export default function UpcomingMoviesPage() {
               posterUrl: currentMovie.posterUrl,
               overview: currentMovie.overview,
               imdbId: currentMovie.imdbId,
+              tmdbRating: currentMovie.tmdbRating,
+              imdbRating: currentMovie.imdbRating,
+              rottenTomatoesAudience: currentMovie.rottenTomatoesAudience,
               directors: currentMovie.directors,
               actors: currentMovie.actors,
               studios: currentMovie.studios,
@@ -499,3 +523,4 @@ export default function UpcomingMoviesPage() {
     </div>
   );
 }
+
