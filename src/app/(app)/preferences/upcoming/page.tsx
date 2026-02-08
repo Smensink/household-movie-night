@@ -41,6 +41,7 @@ interface UserRating {
 const CONSENSUS_THRESHOLD = 2;
 const MIN_RATING = 4;
 const BATCH_SIZE = 15;
+const PRELOAD_THRESHOLD = 5; // Fetch more when queue drops below this
 
 export default function UpcomingMoviesPage() {
   const { status } = useSession();
@@ -60,6 +61,24 @@ export default function UpcomingMoviesPage() {
   const ratingsRef = useRef<Map<string, UserRating>>(new Map());
   const ratedMovieIdsRef = useRef<Set<string>>(new Set());
   const initialLoadDoneRef = useRef(false);
+  const preloadInProgressRef = useRef(false);
+
+  // Deduplicate and filter out rated movies
+  const dedupeAndFilterMovies = useCallback(
+    (movies: UpcomingMovie[], excludeIds: Set<string>): UpcomingMovie[] => {
+      const seen = new Set<string>();
+      const filtered: UpcomingMovie[] = [];
+      for (const movie of movies) {
+        if (seen.has(movie.id)) continue;
+        if (excludeIds.has(movie.id)) continue;
+        if (movie.consensus.userRating !== null) continue;
+        seen.add(movie.id);
+        filtered.push(movie);
+      }
+      return filtered;
+    },
+    []
+  );
 
   const setQueueAndRef = useCallback((nextQueue: UpcomingMovie[]) => {
     queueRef.current = nextQueue;
@@ -74,14 +93,52 @@ export default function UpcomingMoviesPage() {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
-  const fetchUpcomingBatch = useCallback(async () => {
-    const res = await fetch(
-      `/api/movies/upcoming?limit=${BATCH_SIZE}&excludeRadarr=true&excludeRated=true`
-    );
+  const fetchUpcomingBatch = useCallback(async (excludeIds: string[] = []) => {
+    const params = new URLSearchParams({
+      limit: String(BATCH_SIZE),
+      excludeRadarr: "true",
+      excludeRated: "true",
+    });
+    if (excludeIds.length > 0) {
+      params.set("excludeMovieIds", excludeIds.join(","));
+    }
+    const res = await fetch(`/api/movies/upcoming?${params.toString()}`);
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data) ? (data as UpcomingMovie[]) : [];
   }, []);
+
+  // Get IDs to exclude from next fetch
+  const getExcludeMovieIds = useCallback(() => {
+    return Array.from(
+      new Set([
+        ...(currentMovie ? [currentMovie.id] : []),
+        ...queueRef.current.map((movie) => movie.id),
+        ...Array.from(ratedMovieIdsRef.current),
+      ])
+    );
+  }, [currentMovie]);
+
+  // Preload movies in background
+  const preloadMovies = useCallback(async () => {
+    if (preloadInProgressRef.current) return;
+    if (queueRef.current.length >= PRELOAD_THRESHOLD) return;
+
+    preloadInProgressRef.current = true;
+
+    try {
+      const batch = await fetchUpcomingBatch(getExcludeMovieIds());
+      if (batch.length > 0) {
+        const merged = dedupeAndFilterMovies(
+          [...queueRef.current, ...batch],
+          ratedMovieIdsRef.current
+        );
+        setQueueAndRef(merged);
+      }
+    } finally {
+      preloadInProgressRef.current = false;
+    }
+  }, [fetchUpcomingBatch, getExcludeMovieIds, dedupeAndFilterMovies, setQueueAndRef]);
 
   // Initial load
   useEffect(() => {
@@ -120,6 +177,27 @@ export default function UpcomingMoviesPage() {
     };
   }, [status, fetchUpcomingBatch, setQueueAndRef]);
 
+  // Background preloading effect - use ref to avoid recreating interval
+  const preloadMoviesRef = useRef(preloadMovies);
+  preloadMoviesRef.current = preloadMovies;
+
+  useEffect(() => {
+    if (loading) return;
+
+    const interval = setInterval(() => {
+      // Clean queue of any rated movies that might have slipped through
+      const cleanedQueue = queueRef.current.filter(
+        (m) => !ratedMovieIdsRef.current.has(m.id)
+      );
+      if (cleanedQueue.length !== queueRef.current.length) {
+        setQueueAndRef(cleanedQueue);
+      }
+      void preloadMoviesRef.current();
+    }, 3000); // Check every 3 seconds
+
+    return () => clearInterval(interval);
+  }, [loading, setQueueAndRef]);
+
   const advanceToNextMovie = useCallback(() => {
     // Skip any movies that were already rated
     let queue = queueRef.current;
@@ -135,7 +213,10 @@ export default function UpcomingMoviesPage() {
       setCurrentMovie(null);
       setQueueAndRef([]);
     }
-  }, [setQueueAndRef]);
+
+    // Trigger preload check after a short delay
+    setTimeout(() => void preloadMovies(), 100);
+  }, [setQueueAndRef, preloadMovies]);
 
   const persistRating = useCallback(async (payload: UserRating) => {
     await fetch("/api/ratings", {

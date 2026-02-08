@@ -412,3 +412,9 @@ Core entities in `prisma/schema.prisma`:
     - Shows anticipation list count from Trakt.
     - "Sync to Radarr" button for movies meeting consensus.
     - Released movies automatically flow into regular movie rating queue (discover route filters by release date).
+  - **Upcoming movies background preloading**:
+    - Added PRELOAD_THRESHOLD (5) to trigger fetching more when queue runs low.
+    - Background interval every 3 seconds checks and preloads more movies.
+    - API accepts `excludeMovieIds` parameter to avoid duplicates.
+    - Automatic queue cleanup removes rated movies that slipped through.
+    - preloadMovies triggered after each rating for responsive queue.

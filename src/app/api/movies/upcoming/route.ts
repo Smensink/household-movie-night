@@ -54,6 +54,12 @@ export async function GET(req: NextRequest) {
   const excludeRadarr = req.nextUrl.searchParams.get("excludeRadarr") === "true";
   const excludeRated = req.nextUrl.searchParams.get("excludeRated") === "true";
 
+  // Parse excluded movie IDs (for deduplication on client preload)
+  const excludeMovieIdsParam = req.nextUrl.searchParams.get("excludeMovieIds");
+  const excludeMovieIds = new Set(
+    excludeMovieIdsParam ? excludeMovieIdsParam.split(",").filter(Boolean) : []
+  );
+
   try {
     // Fetch anticipated movies from Trakt
     const anticipated = await getAnticipatedMovies(limit * 3); // Fetch more to account for filtering
@@ -183,6 +189,11 @@ export async function GET(req: NextRequest) {
           ? validRatings.reduce((sum, r) => sum + (r.rating || 0), 0) /
             validRatings.length
           : null;
+
+      // Skip if movie is in exclude list (already in queue)
+      if (excludeMovieIds.has(movie.id)) {
+        continue;
+      }
 
       // Skip if filtering out Radarr movies
       if (excludeRadarr && movie.radarrSync) {
