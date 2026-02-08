@@ -14,6 +14,7 @@ interface AffinityItem {
 
 interface ProfileStats {
   user: {
+    id: string;
     name: string;
     explorationFactor: number;
     discoverySourcePref: string;
@@ -57,7 +58,11 @@ interface ProfileStats {
   } | null;
 }
 
-function AffinityBar({ affinity }: { affinity: number }) {
+interface HouseholdMemberOption {
+  id: string;
+  name: string;
+  ratingCount: number;
+}function AffinityBar({ affinity }: { affinity: number }) {
   // affinity is -1 to 1, we need to map it to 0-100%
   const percentage = ((affinity + 1) / 2) * 100;
   const isPositive = affinity >= 0;
@@ -182,33 +187,78 @@ function RatingDistribution({
 }
 
 export default function ProfilePage() {
-  const { status } = useSession();
+  const { data: session, status } = useSession();
   const router = useRouter();
+
   const [stats, setStats] = useState<ProfileStats | null>(null);
+  const [householdMembers, setHouseholdMembers] = useState<HouseholdMemberOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const selectedUserId =
+    (typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("userId")?.trim()
+      : null) ||
+    session?.user?.id ||
+    null;
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
   useEffect(() => {
-    if (status === "authenticated") {
-      fetch("/api/profile/stats")
-        .then((r) => {
-          if (!r.ok) throw new Error("Failed to load profile stats");
-          return r.json();
-        })
-        .then((data) => {
-          setStats(data);
-          setLoading(false);
-        })
-        .catch((err) => {
-          setError(err.message);
-          setLoading(false);
-        });
-    }
-  }, [status]);
+    if (status !== "authenticated" || !selectedUserId) return;
+
+    Promise.all([
+      fetch(`/api/profile/stats?userId=${encodeURIComponent(selectedUserId)}`),
+      fetch("/api/household").catch(() => null),
+    ])
+      .then(async ([statsResponse, householdResponse]) => {
+        if (!statsResponse.ok) {
+          throw new Error(
+            statsResponse.status === 403
+              ? "You can only view profiles for members of your household"
+              : "Failed to load profile stats"
+          );
+        }
+
+        const statsData = (await statsResponse.json()) as ProfileStats;
+        setStats(statsData);
+
+        if (householdResponse && householdResponse.ok) {
+          const households = await householdResponse.json();
+          const memberMap = new Map<string, HouseholdMemberOption>();
+
+          if (Array.isArray(households)) {
+            for (const household of households) {
+              if (!Array.isArray(household?.members)) continue;
+              for (const member of household.members) {
+                const user = member?.user;
+                if (!user?.id || !user?.name) continue;
+                if (!memberMap.has(user.id)) {
+                  memberMap.set(user.id, {
+                    id: user.id,
+                    name: user.name,
+                    ratingCount: user.ratingCount ?? 0,
+                  });
+                }
+              }
+            }
+          }
+
+          const members = Array.from(memberMap.values()).sort((a, b) =>
+            a.name.localeCompare(b.name)
+          );
+          setHouseholdMembers(members);
+        }
+
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err.message);
+        setLoading(false);
+      });
+  }, [selectedUserId, status]);
 
   if (status === "loading" || loading) {
     return (
@@ -240,22 +290,62 @@ export default function ProfilePage() {
     hidden_gems: "Hidden Gems",
   };
 
+  const isOwnProfile = stats.user.id === (session?.user?.id ?? "");
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold">Your Profile</h1>
+          <h1 className="text-2xl font-bold">
+            {isOwnProfile ? "Your Profile" : `${stats.user.name}'s Profile`}
+          </h1>
           <p className="text-sm text-muted mt-1">
-            What the algorithm has learned about you
+            What the algorithm has learned about {isOwnProfile ? "you" : stats.user.name}
           </p>
         </div>
-        <Link
-          href="/preferences"
-          className="text-sm text-accent hover:underline"
-        >
-          Edit Preferences
-        </Link>
+        {isOwnProfile ? (
+          <Link
+            href="/preferences"
+            className="text-sm text-accent hover:underline"
+          >
+            Edit Preferences
+          </Link>
+        ) : (
+          <Link
+            href="/profile"
+            className="text-sm text-accent hover:underline"
+          >
+            View Your Profile
+          </Link>
+        )}
       </div>
+
+      {householdMembers.length > 1 && (
+        <div className="bg-card border border-border rounded-xl p-4">
+          <div className="text-xs text-muted uppercase tracking-wide mb-3">
+            Household Profiles
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {householdMembers.map((member) => {
+              const active = member.id === stats.user.id;
+              return (
+                <Link
+                  key={member.id}
+                  href={`/profile?userId=${member.id}`}
+                  className={`px-3 py-2 rounded-lg border text-sm transition-colors ${
+                    active
+                      ? "border-accent bg-accent/10 text-accent"
+                      : "border-border text-foreground hover:bg-card-hover"
+                  }`}
+                >
+                  {member.name}
+                  <span className="ml-2 text-xs text-muted">{member.ratingCount}</span>
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ML Model Status */}
       <div className="bg-card border border-border rounded-xl p-4">
@@ -561,3 +651,23 @@ export default function ProfilePage() {
     </div>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -594,3 +594,13 @@ Core entities in `prisma/schema.prisma`:
   - Expanded Trakt anticipated ingestion in runtime ranking from single-page fetch to paginated fetch (`limit=100`, multiple pages), and cache keys now include page.
   - Upcoming candidate query now anchors to the larger anticipated ID universe (imdb/tmdb/slug match) and uses a larger local candidate window for ranking.
   - This keeps strict anticipated-list gating while substantially reducing false empty-state outcomes for heavy raters.
+- 2026-02-08 (Household profile viewing):
+  - Extended `GET /api/profile/stats` to accept optional `userId` query parameter.
+  - Added authorization guard: profile stats for another user are only returned when viewer shares a household with that user.
+  - Profile payload now includes `user.id` to support active-profile selection in UI.
+  - Updated `/profile` page to support viewing other household members via query (`/profile?userId=...`) and added a household profile switcher list with per-member rating counts.
+  - UX keeps quick navigation between member profiles while preserving self-profile shortcut.
+- 2026-02-08 (Upcoming empty-state resilience follow-up):
+  - Upcoming page now falls back to including Radarr items if strict upcoming fetch returns empty, reducing dead-end "No more upcoming movies" states.
+  - Removed manual "Check for More" action in upcoming empty state and clarified that background refetch continues automatically.
+  - Pool expansion now rotates through anticipated pages (instead of repeatedly hitting only page 1) to improve long-run replenishment diversity.

@@ -103,20 +103,42 @@ export default function UpcomingMoviesPage() {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
 
-  const fetchUpcomingBatch = useCallback(async (limit: number, excludeIds: string[] = []) => {
-    const params = new URLSearchParams({
-      limit: String(limit),
-      excludeRadarr: "true",
-      excludeRated: "true",
-    });
-    if (excludeIds.length > 0) {
-      params.set("excludeMovieIds", excludeIds.join(","));
-    }
-    const res = await fetch(`/api/movies/upcoming?${params.toString()}`);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data) ? (data as UpcomingMovie[]) : [];
-  }, []);
+  const fetchUpcomingBatch = useCallback(
+    async (
+      limit: number,
+      excludeIds: string[] = [],
+      options?: { includeRadarr?: boolean }
+    ) => {
+      const params = new URLSearchParams({
+        limit: String(limit),
+        excludeRadarr: options?.includeRadarr ? "false" : "true",
+        excludeRated: "true",
+      });
+      if (excludeIds.length > 0) {
+        params.set("excludeMovieIds", excludeIds.join(","));
+      }
+      const res = await fetch(`/api/movies/upcoming?${params.toString()}`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return Array.isArray(data) ? (data as UpcomingMovie[]) : [];
+    },
+    []
+  );
+
+  const fetchUpcomingBatchWithFallback = useCallback(
+    async (limit: number, excludeIds: string[] = []) => {
+      const primary = await fetchUpcomingBatch(limit, excludeIds, {
+        includeRadarr: false,
+      });
+      if (primary.length > 0) {
+        return primary;
+      }
+      return fetchUpcomingBatch(limit, excludeIds, {
+        includeRadarr: true,
+      });
+    },
+    [fetchUpcomingBatch]
+  );
 
   // Get IDs to exclude from next fetch
   const getExcludeMovieIds = useCallback(() => {
@@ -137,7 +159,7 @@ export default function UpcomingMoviesPage() {
     preloadInProgressRef.current = true;
 
     try {
-      const batch = await fetchUpcomingBatch(PRELOAD_BATCH_SIZE, getExcludeMovieIds());
+      const batch = await fetchUpcomingBatchWithFallback(PRELOAD_BATCH_SIZE, getExcludeMovieIds());
       if (batch.length > 0) {
         const merged = dedupeAndFilterMovies(
           [...queueRef.current, ...batch],
@@ -148,7 +170,7 @@ export default function UpcomingMoviesPage() {
     } finally {
       preloadInProgressRef.current = false;
     }
-  }, [fetchUpcomingBatch, getExcludeMovieIds, dedupeAndFilterMovies, setQueueAndRef]);
+  }, [fetchUpcomingBatchWithFallback, getExcludeMovieIds, dedupeAndFilterMovies, setQueueAndRef]);
 
   // Initial load
   useEffect(() => {
@@ -159,7 +181,7 @@ export default function UpcomingMoviesPage() {
     let cancelled = false;
 
     Promise.all([
-      fetchUpcomingBatch(PRELOAD_BATCH_SIZE * 2, []),
+      fetchUpcomingBatchWithFallback(PRELOAD_BATCH_SIZE * 2, []),
       fetch("/api/ratings").then((r) => r.json()),
     ])
       .then(([movies, userRatings]) => {
@@ -197,7 +219,7 @@ export default function UpcomingMoviesPage() {
     return () => {
       cancelled = true;
     };
-  }, [status, fetchUpcomingBatch, dedupeAndFilterMovies, setQueueAndRef]);
+  }, [status, fetchUpcomingBatchWithFallback, dedupeAndFilterMovies, setQueueAndRef]);
 
   // Background preloading effect - use ref to avoid recreating interval
   const preloadMoviesRef = useRef(preloadMovies);
@@ -337,25 +359,6 @@ export default function UpcomingMoviesPage() {
       setSyncing(false);
     }
   };
-
-  const loadMoreMovies = useCallback(async () => {
-    setLoading(true);
-    const movies = await fetchUpcomingBatch(PRELOAD_BATCH_SIZE * 2);
-
-    const unratedMovies = movies.filter(
-      (m) => !ratedMovieIdsRef.current.has(m.id) && m.consensus.userRating === null
-    );
-
-    if (unratedMovies.length > 0) {
-      setCurrentMovie(unratedMovies[0]);
-      setQueueAndRef(unratedMovies.slice(1));
-    } else {
-      setCurrentMovie(null);
-      setQueueAndRef([]);
-    }
-
-    setLoading(false);
-  }, [fetchUpcomingBatch, setQueueAndRef]);
 
   // Defensive check: if current movie is somehow already rated, skip it
   useEffect(() => {
@@ -534,17 +537,24 @@ export default function UpcomingMoviesPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
             </svg>
           </div>
-          <p className="text-sm text-muted mb-4">
-            No more upcoming movies to rate!
+          <p className="text-sm text-muted mb-1">
+            No more upcoming movies to rate right now.
           </p>
-          <Button onClick={loadMoreMovies} variant="secondary">
-            Check for More
-          </Button>
+          <p className="text-xs text-muted">
+            We keep fetching in the background and will show new matches automatically.
+          </p>
         </div>
       )}
     </div>
   );
 }
+
+
+
+
+
+
+
 
 
 

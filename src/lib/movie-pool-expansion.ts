@@ -11,9 +11,11 @@ import {
 const EXPANSION_THRESHOLD = 50; // Trigger expansion when user has fewer than this many unrated movies
 const EXPANSION_BATCH_SIZE = 30; // How many movies to add per expansion
 const EXPANSION_COOLDOWN_MS = 5 * 60_000; // Only expand every 5 minutes per user
+const ANTICIPATED_EXPANSION_PAGES = 8;
 
 // Track last expansion time per user
 const expansionCooldowns = new Map<string, number>();
+let anticipatedPageCursor = 1;
 
 function parseOptionalInt(value: string | undefined): number | null {
   if (!value) return null;
@@ -85,11 +87,16 @@ export async function expandMoviePool(): Promise<{
 }> {
   console.log("[Pool Expansion] Fetching more movies from Trakt...");
 
+  // Rotate anticipated pages so expansion can discover deeper upcoming titles over time.
+  const anticipatedPage = anticipatedPageCursor;
+  anticipatedPageCursor =
+    anticipatedPageCursor >= ANTICIPATED_EXPANSION_PAGES ? 1 : anticipatedPageCursor + 1;
+
   // Get movies from multiple sources
   const [trending, popular, anticipated] = await Promise.all([
     getTrendingMovies(EXPANSION_BATCH_SIZE),
     getPopularMovies(EXPANSION_BATCH_SIZE),
-    getAnticipatedMovies(EXPANSION_BATCH_SIZE),
+    getAnticipatedMovies(EXPANSION_BATCH_SIZE, anticipatedPage),
   ]);
 
   const allMovies = [
@@ -267,3 +274,7 @@ export async function getExpansionStatus(userId: string): Promise<{
     onCooldown,
   };
 }
+
+
+
+

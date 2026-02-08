@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getModelMetadata } from "@/lib/matrix-factorization";
@@ -84,12 +84,32 @@ function mergeAffinities(accumulators: Map<string, AffinityAccumulator>): Affini
   return result;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const userId = session.user.id;
+  const viewerUserId = session.user.id;
+  const requestedUserId = req.nextUrl.searchParams.get("userId")?.trim();
+  const userId = requestedUserId || viewerUserId;
+
+  if (userId !== viewerUserId) {
+    const sharedHousehold = await prisma.householdMember.findFirst({
+      where: {
+        userId: viewerUserId,
+        household: {
+          members: {
+            some: { userId },
+          },
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!sharedHousehold) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+  }
 
   // Fetch all user data in parallel
   const [
@@ -103,7 +123,7 @@ export async function GET() {
   ] = await Promise.all([
     prisma.user.findUnique({
       where: { id: userId },
-      select: { name: true },
+      select: { id: true, name: true },
     }),
     prisma.userSettings.findUnique({
       where: { userId },
@@ -361,3 +381,8 @@ export async function GET() {
 
   return NextResponse.json(stats);
 }
+
+
+
+
+
