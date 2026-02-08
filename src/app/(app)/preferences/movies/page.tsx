@@ -519,6 +519,38 @@ export default function RateMoviesPage() {
     }
   }, [currentMovie, advanceToNextMovie]);
 
+  const submitRecommendationFeedback = async (movie: Movie) => {
+    const response = window.prompt(
+      `What feedback do you have about recommending "${movie.title}"?`,
+      ""
+    );
+
+    if (response === null) return;
+
+    const message = response.trim();
+    if (!message) {
+      window.alert("Please add a short note so we can improve recommendations.");
+      return;
+    }
+
+    const res = await fetch("/api/feedback/recommendations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        context: "discover",
+        movieId: movie.id,
+        message,
+      }),
+    });
+
+    if (!res.ok) {
+      window.alert("Could not submit feedback right now.");
+      return;
+    }
+
+    window.alert("Thanks. Your feedback was saved.");
+  };
+
   if (status === "loading" || loading) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-4">
@@ -621,6 +653,7 @@ export default function RateMoviesPage() {
           }
           onSeenToggle={(seen) => toggleSeen(currentMovie.id, seen)}
           onNotHeardOf={() => rateMovie(currentMovie.id, null, false, true)}
+          onFeedback={() => void submitRecommendationFeedback(currentMovie)}
         />
       ) : (
         <div className="h-[calc(100vh-180px)] min-h-[500px] flex flex-col items-center justify-center text-center">

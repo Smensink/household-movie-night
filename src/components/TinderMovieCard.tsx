@@ -27,6 +27,7 @@ interface TinderMovieCardProps {
   onRate?: (rating: number) => void;
   onSeenToggle?: (seen: boolean) => void;
   onNotHeardOf?: () => void;
+  onFeedback?: () => void;
 }
 
 function TinderMovieCardInner({
@@ -36,6 +37,7 @@ function TinderMovieCardInner({
   onRate,
   onSeenToggle,
   onNotHeardOf,
+  onFeedback,
 }: TinderMovieCardProps) {
   const [showDetails, setShowDetails] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
@@ -254,6 +256,15 @@ function TinderMovieCardInner({
           </button>
         )}
 
+        {onFeedback && (
+          <button
+            onClick={onFeedback}
+            className="w-full py-2 rounded-xl bg-white/10 text-white/70 text-sm hover:bg-white/20 transition-all"
+          >
+            Send feedback about this recommendation
+          </button>
+        )}
+
         {/* Rating context hint */}
         {rating !== null && rating !== undefined && (
           <p className="text-[10px] text-white/60 text-center">
@@ -278,6 +289,4 @@ const TinderMovieCard = memo(TinderMovieCardInner, (prevProps, nextProps) => {
 });
 
 export default TinderMovieCard;
-
-
 

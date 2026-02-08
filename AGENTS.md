@@ -609,3 +609,9 @@ Core entities in `prisma/schema.prisma`:
   - Updated both `/preferences/movies` and `/preferences/upcoming` client prefetch calls to send only in-flight card/queue IDs as excludes.
   - Discover/upcoming APIs continue to filter already-rated content server-side, and client still has rated-ID safety filtering after response.
   - Learned behavior edge case: URL/query-size limits can silently collapse refill requests, creating empty-state regressions even when large eligible pools exist.
+- 2026-02-08 (Letterboxd import fidelity + recommendation feedback capture):
+  - Strengthened `importLetterboxdData()` matching so imports map to canonical catalog movies more reliably (case-insensitive title/year matching with nearby-year fallback) before creating new movie rows.
+  - Added OMDB-assisted enrichment during import when a movie cannot be matched locally, including IMDb-based upsert and metadata relation sync (`genres`, `cast`, `directors`, `studios`) so imported ratings better influence affinity signals and MF side features.
+  - Added post-import MF retrain trigger (`shouldRetrain` gate + `trainMatrixFactorization`) so newly imported Letterboxd ratings can affect ML predictions without waiting for manual retrain.
+  - Added recommendation feedback endpoint (`POST /api/feedback/recommendations`) and UI button on movie/upcoming rating cards; feedback is now stored in `ActivityLog` with movie linkage.
+  - Learned workflow preference: users want a lightweight in-flow feedback control directly on recommendation cards to improve relevance tuning.

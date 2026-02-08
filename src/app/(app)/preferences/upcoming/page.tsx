@@ -366,6 +366,38 @@ export default function UpcomingMoviesPage() {
     }
   }, [currentMovie, advanceToNextMovie]);
 
+  const submitRecommendationFeedback = async (movie: UpcomingMovie) => {
+    const response = window.prompt(
+      `What feedback do you have about recommending "${movie.title}"?`,
+      ""
+    );
+
+    if (response === null) return;
+
+    const message = response.trim();
+    if (!message) {
+      window.alert("Please add a short note so we can improve recommendations.");
+      return;
+    }
+
+    const res = await fetch("/api/feedback/recommendations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        context: "upcoming",
+        movieId: movie.id,
+        message,
+      }),
+    });
+
+    if (!res.ok) {
+      window.alert("Could not submit feedback right now.");
+      return;
+    }
+
+    window.alert("Thanks. Your feedback was saved.");
+  };
+
   if (status === "loading" || loading) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-4">
@@ -504,6 +536,7 @@ export default function UpcomingMoviesPage() {
             rating={currentRating?.rating ?? null}
             onRate={(value) => rateMovie(currentMovie.id, value)}
             onNotHeardOf={() => rateMovie(currentMovie.id, null, true)}
+            onFeedback={() => void submitRecommendationFeedback(currentMovie)}
           />
 
           {/* Household consensus info */}
