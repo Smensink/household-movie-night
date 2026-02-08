@@ -31,6 +31,17 @@ interface UserRating {
   notHeardOf: boolean;
 }
 
+interface RatedMovieEntry extends UserRating {
+  id: string;
+  updatedAt: string;
+  movie: {
+    id: string;
+    title: string;
+    year?: number | null;
+    posterUrl?: string | null;
+  };
+}
+
 interface UndoAction {
   movie: Movie;
   previousRating: UserRating | null;
@@ -40,7 +51,6 @@ interface UndoAction {
 
 const PRELOAD_BATCH_SIZE = 15; // Preload this many movies at a time
 const PRELOAD_THRESHOLD = 10; // Fetch more when queue drops below this
-const MIN_QUEUE_SIZE = 10; // Always try to maintain at least this many movies in queue
 
 function dedupeAndFilterMovies(movies: Movie[], excludeIds: Set<string>): Movie[] {
   const seen = new Set<string>();
@@ -69,6 +79,9 @@ export default function RateMoviesPage() {
   const [loading, setLoading] = useState(true);
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const [showSearch, setShowSearch] = useState(false);
+  const [showRatedMovies, setShowRatedMovies] = useState(false);
+  const [ratedMovies, setRatedMovies] = useState<RatedMovieEntry[]>([]);
+  const [updatingRatedMovieId, setUpdatingRatedMovieId] = useState<string | null>(null);
 
   const queueRef = useRef<Movie[]>([]);
   const ratingsRef = useRef<Map<string, UserRating>>(new Map());
@@ -154,6 +167,7 @@ export default function RateMoviesPage() {
         const ratingMap = new Map<string, UserRating>();
         const ratedIds = new Set<string>();
         if (Array.isArray(userRatings)) {
+          setRatedMovies(userRatings as RatedMovieEntry[]);
           for (const rating of userRatings) {
             ratingMap.set(rating.movieId, rating);
             ratedIds.add(rating.movieId);
@@ -189,6 +203,32 @@ export default function RateMoviesPage() {
   // Background preloading effect - use ref to avoid recreating interval
   const preloadMoviesRef = useRef(preloadMovies);
   preloadMoviesRef.current = preloadMovies;
+
+  const syncRatingsFromServer = useCallback(async () => {
+    const res = await fetch("/api/ratings");
+    if (!res.ok) return;
+
+    const data = await res.json();
+    if (!Array.isArray(data)) return;
+
+    const ratingMap = new Map<string, UserRating>();
+    const ratedIds = new Set<string>();
+
+    for (const rating of data as RatedMovieEntry[]) {
+      ratingMap.set(rating.movieId, {
+        movieId: rating.movieId,
+        rating: rating.rating,
+        hasSeen: rating.hasSeen,
+        notHeardOf: rating.notHeardOf,
+      });
+      ratedIds.add(rating.movieId);
+    }
+
+    ratingsRef.current = ratingMap;
+    ratedMovieIdsRef.current = ratedIds;
+    setRatings(ratingMap);
+    setRatedMovies(data as RatedMovieEntry[]);
+  }, []);
 
   useEffect(() => {
     if (mode !== "discover" || loading) return;
@@ -315,6 +355,7 @@ export default function RateMoviesPage() {
     }
 
     await persistRating(payload);
+    void syncRatingsFromServer();
     void preloadMovies();
   };
 
@@ -340,8 +381,9 @@ export default function RateMoviesPage() {
       if (!hasPersistedRating) return;
 
       await persistRating(payload);
+      void syncRatingsFromServer();
     },
-    [persistRating]
+    [persistRating, syncRatingsFromServer]
   );
 
   const undoLastRating = useCallback(async () => {
@@ -383,7 +425,36 @@ export default function RateMoviesPage() {
         method: "DELETE",
       });
     }
-  }, [currentMovie, persistRating, setQueueAndRef, undoAction]);
+    void syncRatingsFromServer();
+  }, [currentMovie, persistRating, setQueueAndRef, syncRatingsFromServer, undoAction]);
+
+  const updateRatedMovie = useCallback(
+    async (
+      entry: RatedMovieEntry,
+      updates: Partial<Pick<UserRating, "rating" | "hasSeen" | "notHeardOf">>
+    ) => {
+      const nextNotHeardOf = updates.notHeardOf ?? entry.notHeardOf;
+      const nextRating = nextNotHeardOf ? null : updates.rating ?? entry.rating;
+      const nextHasSeen = nextNotHeardOf
+        ? false
+        : updates.hasSeen ?? entry.hasSeen;
+
+      if (!nextNotHeardOf && (nextRating === null || nextRating < 1 || nextRating > 5)) {
+        return;
+      }
+
+      setUpdatingRatedMovieId(entry.movieId);
+      await persistRating({
+        movieId: entry.movieId,
+        rating: nextRating,
+        hasSeen: nextHasSeen,
+        notHeardOf: nextNotHeardOf,
+      });
+      await syncRatingsFromServer();
+      setUpdatingRatedMovieId(null);
+    },
+    [persistRating, syncRatingsFromServer]
+  );
 
   const loadDiscoverMovies = useCallback(async () => {
     setLoading(true);
@@ -529,6 +600,104 @@ export default function RateMoviesPage() {
           )}
         </div>
       )}
+
+      <div className="bg-card border border-border rounded-xl p-3 space-y-3">
+        <button
+          onClick={() => setShowRatedMovies((prev) => !prev)}
+          className="w-full flex items-center justify-between text-left"
+        >
+          <div>
+            <p className="text-sm font-semibold">Rated Movies</p>
+            <p className="text-[11px] text-muted">
+              Review and edit scores plus seen status.
+            </p>
+          </div>
+          <span className="text-xs text-muted">{ratedMovies.length} total</span>
+        </button>
+
+        {showRatedMovies && (
+          <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+            {ratedMovies.length === 0 ? (
+              <p className="text-xs text-muted py-2">No rated movies yet.</p>
+            ) : (
+              ratedMovies.map((entry) => (
+                <div
+                  key={entry.id}
+                  className="bg-card-hover border border-border rounded-lg p-2.5 space-y-2"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-medium leading-tight">
+                        {entry.movie.title}
+                      </p>
+                      {entry.movie.year ? (
+                        <p className="text-[11px] text-muted">{entry.movie.year}</p>
+                      ) : null}
+                    </div>
+                    {updatingRatedMovieId === entry.movieId ? (
+                      <span className="text-[10px] text-muted">Saving...</span>
+                    ) : null}
+                  </div>
+
+                  <div className="flex items-center gap-1">
+                    {[1, 2, 3, 4, 5].map((value) => (
+                      <button
+                        key={value}
+                        onClick={() =>
+                          void updateRatedMovie(entry, { rating: value, notHeardOf: false })
+                        }
+                        className={`w-7 h-7 rounded-md text-sm transition-all ${
+                          (entry.rating ?? 0) >= value && !entry.notHeardOf
+                            ? "bg-accent text-white"
+                            : "bg-card border border-border text-muted hover:text-foreground"
+                        }`}
+                        aria-label={`Rate ${value} stars`}
+                      >
+                        ★
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => void updateRatedMovie(entry, { notHeardOf: true })}
+                      className={`ml-1 text-[10px] px-2 py-1 rounded-md border transition-all ${
+                        entry.notHeardOf
+                          ? "bg-accent/10 text-accent border-accent/40"
+                          : "bg-card border-border text-muted hover:text-foreground"
+                      }`}
+                    >
+                      Not heard of
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => void updateRatedMovie(entry, { hasSeen: false })}
+                      disabled={entry.notHeardOf || entry.rating === null}
+                      className={`px-2.5 py-1 text-[10px] rounded-md border transition-all ${
+                        !entry.hasSeen && !entry.notHeardOf
+                          ? "bg-accent text-white border-accent"
+                          : "bg-card text-muted border-border"
+                      } disabled:opacity-40`}
+                    >
+                      Unseen
+                    </button>
+                    <button
+                      onClick={() => void updateRatedMovie(entry, { hasSeen: true })}
+                      disabled={entry.notHeardOf || entry.rating === null}
+                      className={`px-2.5 py-1 text-[10px] rounded-md border transition-all ${
+                        entry.hasSeen && !entry.notHeardOf
+                          ? "bg-accent text-white border-accent"
+                          : "bg-card text-muted border-border"
+                      } disabled:opacity-40`}
+                    >
+                      Seen
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

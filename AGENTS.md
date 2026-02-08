@@ -451,3 +451,19 @@ Core entities in `prisma/schema.prisma`:
   - Updated Settings backup download to use `/api/backup/v3` and save as `.v3.ndjson.gz`; kept settings import labeled as legacy JSON merge flow.
   - Learned architecture edge case: monolithic JSON + embedded assets causes browser and server OOM failure modes; streaming NDJSON with compression is substantially safer for household-scale and ML-augmented datasets.
   - Learned user workflow preference: backup/restore must prioritize reliability over single-file JSON convenience, with explicit format guidance in UI.
+- 2026-02-08 (Post-restore ML training):
+  - Added shared post-restore training hook in `src/lib/post-restore-training.ts`.
+  - Successful restore flows now automatically run matrix-factorization training when eligible:
+    - `POST /api/setup/restore-v3`
+    - `POST /api/setup/restore` (legacy)
+    - `POST /api/backup/restore` (admin merge restore)
+  - Restore responses now include a `training` object with status/message and training metrics when a run occurs.
+  - Learned behavior: users expect restore to leave recommendations immediately usable without manual model retraining steps.
+- 2026-02-08 (Rated movies review/edit UX):
+  - Added a new `Rated Movies` section on `/preferences/movies` below the Tinder-style discovery card.
+  - Users can now review previously rated movies and update:
+    - Star score (1-5).
+    - Seen/unseen status.
+    - `Not heard of` flag.
+  - Ratings list syncs from `/api/ratings` after edits so changes are immediately reflected.
+  - Learned user workflow preference: rating should be reversible/editable later from a centralized review list, not only during first-pass swipe/discover flow.

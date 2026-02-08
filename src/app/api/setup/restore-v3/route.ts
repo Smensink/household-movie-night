@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { restoreSetupFromV3Request, BACKUP_V3_VERSION } from "@/lib/backup-v3";
+import { runPostRestoreTraining } from "@/lib/post-restore-training";
 
 export async function GET() {
   const userCount = await prisma.user.count();
@@ -26,10 +27,12 @@ export async function POST(req: NextRequest) {
 
   try {
     const stats = await restoreSetupFromV3Request(req);
+    const training = await runPostRestoreTraining();
     return NextResponse.json({
       message: "Backup restored successfully",
       format: "v3-ndjson-gzip",
       stats,
+      training,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Restore failed";
