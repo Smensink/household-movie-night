@@ -38,6 +38,29 @@ function getRatingKey(personId: string, type: "actor" | "director") {
   return `${type}:${personId}`;
 }
 
+function normalizePersonName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function dedupePeopleList(people: Person[]): Person[] {
+  const seenIds = new Set<string>();
+  const seenNames = new Set<string>();
+  const deduped: Person[] = [];
+
+  for (const person of people) {
+    const id = person.id?.trim();
+    const nameKey = normalizePersonName(person.name || "");
+    if (!id || !nameKey) continue;
+    if (seenIds.has(id) || seenNames.has(nameKey)) continue;
+
+    seenIds.add(id);
+    seenNames.add(nameKey);
+    deduped.push(person);
+  }
+
+  return deduped;
+}
+
 export default function RatePeoplePage() {
   const { status } = useSession();
   const router = useRouter();
@@ -81,7 +104,7 @@ export default function RatePeoplePage() {
       if (!res.ok) return [];
 
       const data = await res.json();
-      return Array.isArray(data) ? (data as Person[]) : [];
+      return Array.isArray(data) ? dedupePeopleList(data as Person[]) : [];
     },
     []
   );
@@ -91,7 +114,7 @@ export default function RatePeoplePage() {
       setDiscoverLoading(true);
       setMode("discover");
       const discovered = await fetchDiscoverPeople(type, 16);
-      setPeopleAndRef(discovered);
+      setPeopleAndRef(dedupePeopleList(discovered));
       setDiscoverLoading(false);
     },
     [fetchDiscoverPeople, setPeopleAndRef]
@@ -172,7 +195,7 @@ export default function RatePeoplePage() {
       }
     }
 
-    setPeopleAndRef(uniquePeople);
+    setPeopleAndRef(dedupePeopleList(uniquePeople));
     setSearching(false);
   };
 
@@ -229,7 +252,7 @@ export default function RatePeoplePage() {
 
       const replacement = await fetchSingleReplacement(type, personId);
       if (replacement) {
-        setPeopleAndRef([...peopleRef.current, replacement]);
+        setPeopleAndRef(dedupePeopleList([...peopleRef.current, replacement]));
       }
     }
   };
@@ -439,3 +462,4 @@ export default function RatePeoplePage() {
     </div>
   );
 }
+

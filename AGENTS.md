@@ -544,3 +544,12 @@ Core entities in `prisma/schema.prisma`:
   - Added auto-promotion: when currentMovie is null and queue has items, the next queued movie is promoted automatically.
   - Added empty-refill trigger: when both current card and queue are empty, page proactively calls preloadMovies() in background.
   - Learned behavior edge case: queue prefetch alone was insufficient because fetched items could remain stranded in queue while UI stayed on No more upcoming movies to rate!.
+- 2026-02-08 (People rating duplicate prevention):
+  - Fixed duplicate actor/director suggestions in people discovery flows.
+  - Added server-side name dedupe in `GET /api/people/discover`:
+    - New normalized-name keying (`trim + lowercase + whitespace collapse`).
+    - Applies to both actor and director scored candidate lists before diversity selection.
+  - Added client-side safety dedupe in `/preferences/people`:
+    - New `dedupePeopleList()` guard used on discover responses, discover load, search results, and replacement append.
+    - Prevents duplicate identities (same ID or normalized name) from re-entering the queue.
+  - Learned behavior edge case: duplicate `Person` rows (or name variants) can still surface as repeated cards unless dedupe is applied by normalized display name, not only ID.

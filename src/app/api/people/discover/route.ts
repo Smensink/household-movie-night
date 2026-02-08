@@ -45,6 +45,23 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function normalizePersonName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function dedupePeopleByName<T extends { name: string }>(people: T[]): T[] {
+  const seen = new Set<string>();
+  const deduped: T[] = [];
+
+  for (const person of people) {
+    const key = normalizePersonName(person.name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(person);
+  }
+
+  return deduped;
+}
 export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -111,7 +128,7 @@ export async function GET(req: NextRequest) {
       take: 300,
     });
 
-    const scored = candidates
+    const actorScoredRaw = candidates
       .map((person) => {
         const explicitSignal = profile.actorAffinity.get(person.id) ?? 0;
 
@@ -197,6 +214,8 @@ export async function GET(req: NextRequest) {
         };
       })
       .sort((a, b) => b.score - a.score);
+
+    const scored = dedupePeopleByName(actorScoredRaw);
 
     // DIVERSITY INJECTION: Ensure variety in actor genres
     const diverseResults: typeof scored = [];
@@ -302,7 +321,7 @@ export async function GET(req: NextRequest) {
     take: 220,
   });
 
-  const directorScored = candidates
+  const directorScoredRaw = candidates
     .map((person) => {
       const explicitSignal = profile.directorAffinity.get(person.id) ?? 0;
 
@@ -387,6 +406,8 @@ export async function GET(req: NextRequest) {
     })
     .sort((a, b) => b.score - a.score);
 
+  const directorScored = dedupePeopleByName(directorScoredRaw);
+
   // DIVERSITY INJECTION for directors
   const directorDiverseResults: typeof directorScored = [];
   const directorUsedGenres = new Set<string>();
@@ -451,3 +472,4 @@ export async function GET(req: NextRequest) {
     }))
   );
 }
+
