@@ -379,3 +379,36 @@ Core entities in `prisma/schema.prisma`:
     - **TinVec (pure embedding approach)**: NOT IMPLEMENTED
       - Designed for binary swipe data, not 5-star ratings.
       - Household-scale use case doesn't benefit significantly.
+- 2026-02-08 (Session leaderboard, vote count filtering, and upcoming movies UX):
+  - **Session leaderboard step**:
+    - Added 4-step session flow: preferences → voting → reviewing (leaderboard) → decided.
+    - Users see ranked movies with all participant votes before finalizing.
+    - "Edit My Ratings" button allows going back to voting step.
+    - Consensus score displayed (60% average + 40% minimum rating).
+  - **ML model training bug fix**:
+    - Fixed `shouldRetrain()` returning false when no metadata existed.
+    - Now checks if there are enough ratings when model hasn't been trained yet.
+  - **Vote count filtering for movie recognition**:
+    - Added `voteCount` and `imdbVotes` fields to Movie schema.
+    - Created `/api/movies/backfill-votes` endpoint to fetch vote counts from TMDB and OMDB.
+    - Set minimum vote count threshold: 500 for standard movies, 100 for movies < 6 months old.
+    - Created `/api/movies/cleanup` endpoint to remove movies below threshold.
+    - Added vote count backfill and cleanup to Docker startup and 5-minute background loop.
+    - Movies with user ratings are preserved regardless of vote count.
+  - **Vote count as ML feature**:
+    - Added `vote_count_bin` feature type to Factorization Machine.
+    - Bins: unknown, obscure (<100), niche (<1000), known (<5000), popular (<20000), blockbuster (20000+).
+  - **Movie rating queue duplicate prevention**:
+    - Added defensive check in `advanceToNextMovie` to skip already-rated movies.
+    - Added useEffect to auto-advance if current movie is somehow rated.
+    - Added periodic queue cleanup every 2 seconds to remove rated movies.
+  - **Upcoming movies page rewrite**:
+    - Converted to Tinder-style card interface using TinderMovieCard component.
+    - Queue-based navigation with automatic advancement after rating.
+    - API now supports `excludeRadarr=true` and `excludeRated=true` filters.
+    - Movies already in Radarr are hidden from the rating queue.
+    - Shows release date with relative formatting ("In 3 weeks", "Tomorrow").
+    - Shows household consensus progress bar and interest level.
+    - Shows anticipation list count from Trakt.
+    - "Sync to Radarr" button for movies meeting consensus.
+    - Released movies automatically flow into regular movie rating queue (discover route filters by release date).

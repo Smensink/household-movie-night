@@ -24,27 +24,40 @@ export interface OMDBMovie {
   Actors?: string;
   Production?: string;
   imdbRating?: string;
+  imdbVotes?: string; // Format: "1,234,567"
   Rated?: string;
   Ratings?: OMDBRating[];
+  BoxOffice?: string; // Format: "$123,456,789"
 }
 
 export interface ExtractedRatings {
   imdbRating: number | null;
   rottenTomatoesAudience: number | null;
+  imdbVotes: number | null;
 }
 
 /**
- * Extract IMDB rating and Rotten Tomatoes audience score from OMDB data
+ * Extract IMDB rating, vote count, and Rotten Tomatoes audience score from OMDB data
  */
 export function extractRatingsFromOMDB(movie: OMDBMovie): ExtractedRatings {
   let imdbRating: number | null = null;
   let rottenTomatoesAudience: number | null = null;
+  let imdbVotes: number | null = null;
 
   // Extract IMDB rating
   if (movie.imdbRating && movie.imdbRating !== "N/A") {
     const parsed = parseFloat(movie.imdbRating);
     if (!isNaN(parsed)) {
       imdbRating = parsed;
+    }
+  }
+
+  // Extract IMDB vote count (format: "1,234,567")
+  if (movie.imdbVotes && movie.imdbVotes !== "N/A") {
+    const cleaned = movie.imdbVotes.replace(/,/g, "");
+    const parsed = parseInt(cleaned, 10);
+    if (!isNaN(parsed)) {
+      imdbVotes = parsed;
     }
   }
 
@@ -59,7 +72,7 @@ export function extractRatingsFromOMDB(movie: OMDBMovie): ExtractedRatings {
     }
   }
 
-  return { imdbRating, rottenTomatoesAudience };
+  return { imdbRating, rottenTomatoesAudience, imdbVotes };
 }
 
 interface CacheEntry<T> {

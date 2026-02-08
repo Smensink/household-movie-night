@@ -53,7 +53,9 @@ interface SessionData {
   }[];
 }
 
-type Step = "preferences" | "voting" | "decided";
+type Step = "preferences" | "voting" | "reviewing" | "decided";
+
+const VOTES_BEFORE_LEADERBOARD = 8; // Show leaderboard after rating all movies
 
 function calculateDecisionScore(votes: SessionMovie["votes"]): number {
   if (votes.length === 0) return 0;
@@ -92,6 +94,7 @@ export default function SessionPage() {
   } | null>(null);
   const [copied, setCopied] = useState(false);
   const [endingSession, setEndingSession] = useState(false);
+  const [editingRatings, setEditingRatings] = useState(false);
   const guestAuth = useMemo(() => {
     if (typeof window === "undefined") {
       return { ready: false, token: null as string | null, userId: null as string | null };
@@ -303,9 +306,39 @@ export default function SessionPage() {
     });
   };
 
+  const refreshMovies = async () => {
+    const headers: Record<string, string> = {};
+    if (guestToken) {
+      headers["x-guest-token"] = guestToken;
+    }
+
+    const res = await fetch(`/api/sessions/${sessionId}/movies`, {
+      headers,
+    });
+    if (res.ok) {
+      const movies = await res.json();
+      setSessionMovies(Array.isArray(movies) ? movies : []);
+    }
+  };
+
+  const goToReview = async () => {
+    await submitVotes();
+    await refreshMovies();
+    setStep("reviewing");
+  };
+
+  const goBackToVoting = () => {
+    setEditingRatings(true);
+    setStep("voting");
+  };
+
   const decideMovie = async () => {
     setDeciding(true);
-    await submitVotes();
+
+    // Only submit votes if we haven't already (coming from voting step)
+    if (step === "voting") {
+      await submitVotes();
+    }
 
     const headers: Record<string, string> = {};
     if (guestToken) {
@@ -445,27 +478,31 @@ export default function SessionPage() {
 
       {/* Steps indicator */}
       <div className="flex items-center gap-2">
-        {(["preferences", "voting", "decided"] as Step[]).map((s, i) => (
-          <div key={s} className="flex items-center gap-2 flex-1">
-            <div
-              className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
-                step === s
-                  ? "bg-accent text-white"
-                  : i < ["preferences", "voting", "decided"].indexOf(step)
-                  ? "bg-success text-white"
-                  : "bg-card-hover text-muted"
-              }`}
-            >
-              {i + 1}
+        {(["preferences", "voting", "reviewing", "decided"] as Step[]).map((s, i) => {
+          const stepLabels = { preferences: "Preferences", voting: "Rate", reviewing: "Leaderboard", decided: "Watch" };
+          const allSteps = ["preferences", "voting", "reviewing", "decided"];
+          return (
+            <div key={s} className="flex items-center gap-2 flex-1">
+              <div
+                className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                  step === s
+                    ? "bg-accent text-white"
+                    : allSteps.indexOf(s) < allSteps.indexOf(step)
+                    ? "bg-success text-white"
+                    : "bg-card-hover text-muted"
+                }`}
+              >
+                {i + 1}
+              </div>
+              <span className="text-[11px] text-muted hidden sm:block">
+                {stepLabels[s]}
+              </span>
+              {i < 3 && (
+                <div className="flex-1 h-px bg-border" />
+              )}
             </div>
-            <span className="text-[11px] text-muted capitalize hidden sm:block">
-              {s}
-            </span>
-            {i < 2 && (
-              <div className="flex-1 h-px bg-border" />
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Step: Preferences */}
@@ -709,12 +746,192 @@ export default function SessionPage() {
           <Button
             size="lg"
             className="w-full"
-            onClick={decideMovie}
-            loading={deciding}
-            disabled={votes.size === 0}
+            onClick={goToReview}
+            disabled={votes.size < sessionMovies.length}
           >
-            Lock In Votes & Decide
+            {votes.size < sessionMovies.length
+              ? `Rate all ${sessionMovies.length} movies to continue`
+              : "View Leaderboard"
+            }
           </Button>
+          {editingRatings && (
+            <Button
+              variant="secondary"
+              size="lg"
+              className="w-full"
+              onClick={goToReview}
+            >
+              Done Editing
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* Step: Reviewing (Leaderboard) */}
+      {step === "reviewing" && (
+        <div className="space-y-6 animate-slide-up">
+          <div>
+            <h3 className="text-lg font-semibold">Leaderboard</h3>
+            <p className="text-xs text-muted">
+              See how everyone voted. You can edit your ratings before the final decision.
+            </p>
+          </div>
+
+          {/* Participant legend */}
+          <div className="flex flex-wrap gap-2">
+            {sessionData.participants.map((p) => (
+              <div
+                key={p.userId}
+                className="flex items-center gap-1.5 text-xs bg-card border border-border rounded-full px-2.5 py-1"
+              >
+                <span className="w-2 h-2 rounded-full bg-accent" />
+                <span>{p.user.name}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Leaderboard */}
+          <div className="space-y-3">
+            {sessionMovies
+              .map((sm) => ({
+                ...sm,
+                score: calculateDecisionScore(sm.votes),
+                avgRating: sm.votes.length > 0
+                  ? sm.votes.reduce((sum, v) => sum + v.rating, 0) / sm.votes.length
+                  : 0,
+                minRating: sm.votes.length > 0
+                  ? Math.min(...sm.votes.map((v) => v.rating))
+                  : 0,
+              }))
+              .sort((a, b) => b.score - a.score)
+              .map((sm, rank) => {
+                const available =
+                  sm.movie.plexAvailability?.available ||
+                  sm.movie.radarrSync?.available ||
+                  false;
+                const activeUserId = session?.user?.id || guestUserId;
+                const userVote = sm.votes.find((v) => v.userId === activeUserId);
+
+                return (
+                  <div
+                    key={sm.id}
+                    className={`bg-card border rounded-xl p-4 ${
+                      rank === 0 ? "border-accent ring-1 ring-accent/30" : "border-border"
+                    }`}
+                  >
+                    <div className="flex gap-4">
+                      {/* Rank badge */}
+                      <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold ${
+                        rank === 0 ? "bg-accent text-white" :
+                        rank === 1 ? "bg-card-hover text-foreground" :
+                        rank === 2 ? "bg-card-hover text-muted" :
+                        "bg-card-hover text-muted"
+                      }`}>
+                        {rank === 0 ? "🏆" : `#${rank + 1}`}
+                      </div>
+
+                      {/* Poster */}
+                      <div className="flex-shrink-0 w-16 h-24 rounded-lg overflow-hidden bg-card-hover">
+                        {sm.movie.posterUrl ? (
+                          <img
+                            src={sm.movie.posterUrl}
+                            alt={sm.movie.title}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-muted text-xs">
+                            No poster
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <h4 className="font-semibold text-sm truncate">
+                              {sm.movie.title}
+                              {sm.movie.year && (
+                                <span className="text-muted font-normal ml-1">
+                                  ({sm.movie.year})
+                                </span>
+                              )}
+                            </h4>
+                            <div className="flex items-center gap-2 mt-1">
+                              {available && (
+                                <span className="text-[10px] bg-success/15 text-success px-1.5 py-0.5 rounded-full">
+                                  Available
+                                </span>
+                              )}
+                              <span className="text-xs text-muted">
+                                Score: <span className="font-semibold text-accent">{sm.score.toFixed(1)}</span>
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Participant votes */}
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {sessionData.participants.map((p) => {
+                            const vote = sm.votes.find((v) => v.userId === p.userId);
+                            return (
+                              <div
+                                key={p.userId}
+                                className="flex items-center gap-1 text-xs bg-card-hover rounded-full px-2 py-1"
+                              >
+                                <span className="text-muted">{p.user.name}:</span>
+                                {vote ? (
+                                  <span className="font-semibold">
+                                    {"★".repeat(vote.rating)}
+                                    <span className="text-muted">{"★".repeat(5 - vote.rating)}</span>
+                                  </span>
+                                ) : (
+                                  <span className="text-muted italic">pending</span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Your vote highlight */}
+                        {userVote && (
+                          <div className="mt-2 text-xs text-muted">
+                            Your vote: <span className="text-accent font-semibold">{userVote.rating}/5</span>
+                            {userVote.willingToRewatch && (
+                              <span className="ml-2 text-success">✓ Would rewatch</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex gap-3">
+            <Button
+              variant="secondary"
+              size="lg"
+              className="flex-1"
+              onClick={goBackToVoting}
+            >
+              Edit My Ratings
+            </Button>
+            <Button
+              size="lg"
+              className="flex-1"
+              onClick={decideMovie}
+              loading={deciding}
+            >
+              Finalize Decision
+            </Button>
+          </div>
+
+          <p className="text-[11px] text-muted text-center">
+            The movie with the highest consensus score (60% average + 40% minimum rating) will be selected.
+          </p>
         </div>
       )}
 

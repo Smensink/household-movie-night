@@ -63,11 +63,21 @@ CMD ["sh", "-c", "\
   curl -s -X POST http://localhost:3000/api/studios/backfill 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] Running people backfill...' && \
   curl -s -X POST http://localhost:3000/api/people/backfill 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Importing Radarr library...' && \
+  curl -s -X POST http://localhost:3000/api/radarr/import 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Backfilling vote counts from TMDB/OMDB...' && \
+  curl -s -X POST http://localhost:3000/api/movies/backfill-votes 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Cleaning up obscure movies...' && \
+  curl -s -X POST http://localhost:3000/api/movies/cleanup 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] Checking/training recommendation model...' && \
   curl -s -X PATCH http://localhost:3000/api/mf/train 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] All startup tasks complete.' && \
   while true; do \
     sleep 300; \
+    echo '[Background] Backfilling vote counts...' && \
+    curl -s -X POST http://localhost:3000/api/movies/backfill-votes 2>&1 | head -c 200 && echo '' && \
+    echo '[Background] Cleaning up obscure movies...' && \
+    curl -s -X POST http://localhost:3000/api/movies/cleanup 2>&1 | head -c 200 && echo '' && \
     echo '[Background] Checking if model retraining needed...' && \
     curl -s -X PATCH http://localhost:3000/api/mf/train 2>&1 | head -c 200 && echo ''; \
   done & \

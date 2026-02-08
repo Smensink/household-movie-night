@@ -72,7 +72,9 @@ model Movie {
   certification String?
   popularity    Float?    @default(0)
   voteAverage   Float?    @default(0)
+  voteCount     Int?      @default(0)  // Number of ratings on TMDB - indicates how well-known a movie is
   imdbRating    Float?
+  imdbVotes     Int?      // Number of votes on IMDB
   rottenTomatoesAudience Int?
   letterboxdRating Float?
   era           String?

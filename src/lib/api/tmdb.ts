@@ -22,6 +22,8 @@ export interface TMDBMovie {
   release_date?: string;
   runtime?: number;
   vote_average?: number;
+  vote_count?: number;
+  popularity?: number;
   genres?: { id: number; name: string }[];
   production_companies?: { id: number; name: string; logo_path?: string }[];
   credits?: {

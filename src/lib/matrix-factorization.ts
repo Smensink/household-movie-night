@@ -36,6 +36,7 @@ type FeatureType =
   | "popularity_bin"
   | "runtime_bin"
   | "vote_avg_bin"
+  | "vote_count_bin"
   | "user_exploration"
   | "user_rating_pattern"
   | "household_consensus";
@@ -58,6 +59,7 @@ interface MovieFeatures {
   popularityBin: string;
   runtimeBin: string;
   voteAvgBin: string;
+  voteCountBin: string;
 }
 
 interface UserFeatures {
@@ -125,6 +127,15 @@ function binVoteAverage(voteAvg: number | null): string {
   if (voteAvg < 6.5) return "mixed";
   if (voteAvg < 7.5) return "good";
   return "excellent";
+}
+
+function binVoteCount(voteCount: number | null): string {
+  if (voteCount === null || voteCount === 0) return "unknown";
+  if (voteCount < 100) return "obscure";       // Very few have seen it
+  if (voteCount < 1000) return "niche";        // Cult following or indie
+  if (voteCount < 5000) return "known";        // Reasonably well-known
+  if (voteCount < 20000) return "popular";     // Mainstream
+  return "blockbuster";                         // Everyone knows it
 }
 
 function binExploration(factor: number): string {
@@ -215,6 +226,7 @@ function predictRating(
     { type: "popularity_bin" as FeatureType, id: movieFeatures.popularityBin, weight: 0.1 },
     { type: "runtime_bin" as FeatureType, id: movieFeatures.runtimeBin, weight: 0.05 },
     { type: "vote_avg_bin" as FeatureType, id: movieFeatures.voteAvgBin, weight: 0.15 },
+    { type: "vote_count_bin" as FeatureType, id: movieFeatures.voteCountBin, weight: 0.2 }, // How mainstream/known the movie is
   ];
 
   for (const { type, id, weight } of binFeatures) {
@@ -480,6 +492,7 @@ export async function trainMatrixFactorization(
             popularity: true,
             runtime: true,
             voteAverage: true,
+            voteCount: true,
             genres: { select: { genreId: true } },
             studios: { select: { studioId: true }, take: 3 },
             cast: { select: { personId: true }, take: 5, orderBy: { castOrder: "asc" } },
@@ -573,6 +586,7 @@ export async function trainMatrixFactorization(
         popularityBin: binPopularity(r.movie.popularity),
         runtimeBin: binRuntime(r.movie.runtime),
         voteAvgBin: binVoteAverage(r.movie.voteAverage),
+        voteCountBin: binVoteCount(r.movie.voteCount),
       };
 
       const userFeatures = userFeatureCache.get(r.userId)!;
@@ -637,6 +651,7 @@ export async function trainMatrixFactorization(
       allFeatures.add(getFeatureKey("popularity_bin", r.movieFeatures.popularityBin));
       allFeatures.add(getFeatureKey("runtime_bin", r.movieFeatures.runtimeBin));
       allFeatures.add(getFeatureKey("vote_avg_bin", r.movieFeatures.voteAvgBin));
+      allFeatures.add(getFeatureKey("vote_count_bin", r.movieFeatures.voteCountBin));
       allFeatures.add(getFeatureKey("user_exploration", binExploration(r.userFeatures.explorationFactor)));
       allFeatures.add(getFeatureKey("user_rating_pattern", binRatingPattern(r.userFeatures.ratingMean, r.userFeatures.ratingStdDev)));
       if (r.householdFeatures.consensusScore > 0) {
@@ -739,6 +754,7 @@ export async function trainMatrixFactorization(
         featuresToUpdate.push(getFeatureKey("popularity_bin", rating.movieFeatures.popularityBin));
         featuresToUpdate.push(getFeatureKey("runtime_bin", rating.movieFeatures.runtimeBin));
         featuresToUpdate.push(getFeatureKey("vote_avg_bin", rating.movieFeatures.voteAvgBin));
+        featuresToUpdate.push(getFeatureKey("vote_count_bin", rating.movieFeatures.voteCountBin));
         featuresToUpdate.push(getFeatureKey("user_exploration", binExploration(rating.userFeatures.explorationFactor)));
         featuresToUpdate.push(getFeatureKey("user_rating_pattern", binRatingPattern(rating.userFeatures.ratingMean, rating.userFeatures.ratingStdDev)));
 
@@ -922,6 +938,7 @@ function predictColdStartRating(
     { type: "popularity_bin" as FeatureType, id: movieFeatures.popularityBin, weight: 0.15 },
     { type: "runtime_bin" as FeatureType, id: movieFeatures.runtimeBin, weight: 0.08 },
     { type: "vote_avg_bin" as FeatureType, id: movieFeatures.voteAvgBin, weight: 0.25 },
+    { type: "vote_count_bin" as FeatureType, id: movieFeatures.voteCountBin, weight: 0.25 }, // Mainstream indicator
   ];
 
   for (const { type, id, weight } of binFeatures) {
@@ -1008,6 +1025,7 @@ export async function getPredictedRatingsForUser(
         popularity: true,
         runtime: true,
         voteAverage: true,
+        voteCount: true,
         genres: { select: { genreId: true } },
         studios: { select: { studioId: true }, take: 3 },
         cast: { select: { personId: true }, take: 5, orderBy: { castOrder: "asc" } },
@@ -1073,6 +1091,7 @@ export async function getPredictedRatingsForUser(
       popularityBin: binPopularity(movie.popularity),
       runtimeBin: binRuntime(movie.runtime),
       voteAvgBin: binVoteAverage(movie.voteAverage),
+      voteCountBin: binVoteCount(movie.voteCount),
     };
 
     const movieVec = movieVectorMap.get(movie.id);
@@ -1117,6 +1136,9 @@ export async function getPredictedRatingsForUser(
 
       const voteEmb = featureEmbeddingMap.get(getFeatureKey("vote_avg_bin", movieFeatures.voteAvgBin));
       if (voteEmb) prediction += voteEmb.bias * 0.3;
+
+      const voteCountEmb = featureEmbeddingMap.get(getFeatureKey("vote_count_bin", movieFeatures.voteCountBin));
+      if (voteCountEmb) prediction += voteCountEmb.bias * 0.25;
 
       const popEmb = featureEmbeddingMap.get(getFeatureKey("popularity_bin", movieFeatures.popularityBin));
       if (popEmb) prediction += popEmb.bias * 0.15;
@@ -1189,11 +1211,13 @@ export async function getModelMetadata(): Promise<{
 export async function shouldRetrain(): Promise<boolean> {
   const metadata = await prisma.mFModelMetadata.findFirst();
 
-  if (!metadata || metadata.isTraining) {
+  // If currently training, don't start another training
+  if (metadata?.isTraining) {
     return false;
   }
 
-  if (!metadata.lastTrainedAt) {
+  // If no model exists yet, check if we have enough ratings for initial training
+  if (!metadata || !metadata.lastTrainedAt) {
     const ratingCount = await prisma.movieRating.count({
       where: { rating: { not: null }, notHeardOf: false },
     });

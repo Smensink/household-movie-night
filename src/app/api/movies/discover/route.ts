@@ -12,11 +12,17 @@ import {
   getPredictedRatingsForUser,
   getModelMetadata,
 } from "@/lib/matrix-factorization";
+import { maybeExpandPoolForUser } from "@/lib/movie-pool-expansion";
 
 const DEFAULT_LIMIT = 15;
 const MAX_LIMIT = 30;
 const COLD_START_THRESHOLD = 10; // Minimum ratings before personalized recommendations
 const DIVERSITY_INJECTION_RATE = 0.15; // 15% of recommendations from diverse sources
+
+// Recognition thresholds - movies need enough ratings to be "known"
+const MIN_VOTE_COUNT = 500; // Minimum votes on TMDB to be considered recognizable
+const MIN_VOTE_COUNT_RECENT = 100; // Lower threshold for movies from last 2 years
+const HIGH_IMDB_THRESHOLD = 7.0; // Well-rated mainstream movies
 
 function parseLimit(value: string | null): number {
   if (!value) return DEFAULT_LIMIT;
@@ -97,6 +103,25 @@ export async function GET(req: NextRequest) {
       OR: [
         { releaseDate: { lte: currentDate } },
         { releaseDate: null, year: { lte: currentYear } },
+      ],
+      // RECOGNITION FILTER: Movies must have enough ratings to be "known"
+      // This filters out obscure films that typical movie watchers wouldn't recognize
+      AND: [
+        {
+          OR: [
+            // Well-known movies: 1000+ votes on TMDB
+            { voteCount: { gte: MIN_VOTE_COUNT } },
+            // Recent releases (last 2 years): lower threshold since they're still building audience
+            {
+              AND: [
+                { year: { gte: currentYear - 1 } },
+                { voteCount: { gte: MIN_VOTE_COUNT_RECENT } },
+              ],
+            },
+            // Fallback: high IMDB rating suggests mainstream recognition
+            { imdbRating: { gte: 7.0 } },
+          ],
+        },
       ],
     },
     include: {
@@ -230,19 +255,45 @@ export async function GET(req: NextRequest) {
       const userRating = movie.ratings.find((rating) => rating.userId === userId);
       const unseenBonus = userRating?.hasSeen ? -0.35 : 0.15;
 
+      // MAINSTREAM BONUS: Boost popular, well-known movies that people would recognize
+      // This ensures balanced profiles show mostly familiar movies
+      const imdbRating = movie.imdbRating ?? 0;
+      const tmdbRating = movie.voteAverage ?? 0;
+      const bestRating = Math.max(imdbRating, tmdbRating);
+
+      // Movies with high ratings from major sources are more likely to be recognized
+      // IMDB ratings especially indicate mainstream awareness
+      let mainstreamBonus = 0;
+      if (imdbRating >= 8.0) {
+        mainstreamBonus = 0.7; // Exceptional films everyone talks about (8+ on IMDB)
+      } else if (imdbRating >= 7.5) {
+        mainstreamBonus = 0.5; // Well-known quality films
+      } else if (imdbRating >= HIGH_IMDB_THRESHOLD) {
+        mainstreamBonus = 0.35; // Good mainstream movies
+      } else if (bestRating >= 6.5) {
+        mainstreamBonus = 0.15; // Decent movies with some recognition
+      }
+
       // COLD START: Use higher exploration factor for new users
+      // For regular users, shift the exploration curve so 0.5 still favors familiar movies
+      // At 0.5 input, effective factor becomes ~0.25 (mostly familiar)
+      // At 1.0 input, effective factor becomes 1.0 (full exploration)
       const effectiveExplorationFactor = coldStartUser
         ? Math.max(0.7, profile.explorationFactor) // At least 70% exploration for cold start
-        : profile.explorationFactor;
+        : Math.pow(profile.explorationFactor, 1.5); // Curve: 0.5 -> 0.35, 0.7 -> 0.59, 1.0 -> 1.0
 
+      // Reduce novelty influence - quality (popularity + rating) matters more for discovery
+      // This makes "discovery" find good movies, not just obscure ones
+      const adjustedNoveltyInfluence = tuning.noveltyInfluence * 0.4; // Reduce novelty weight by 60%
+      const adjustedQualityInfluence = tuning.qualityInfluence * 1.3; // Boost quality weight
       const discoveryWeightsTotal =
-        tuning.noveltyInfluence + tuning.qualityInfluence + tuning.sourceInfluence;
+        adjustedNoveltyInfluence + adjustedQualityInfluence + tuning.sourceInfluence;
       const discoveryBase =
         discoveryWeightsTotal > 0
-          ? (noveltySignal * tuning.noveltyInfluence +
-              qualitySignal * tuning.qualityInfluence) /
+          ? (noveltySignal * adjustedNoveltyInfluence +
+              qualitySignal * adjustedQualityInfluence) /
             discoveryWeightsTotal
-          : (noveltySignal + qualitySignal) / 2;
+          : (noveltySignal * 0.3 + qualitySignal * 0.7); // Default: quality-focused
       const discoverySignal = discoveryBase * 2 - 1 + unseenBonus;
 
       const strongDislikes = movie.ratings.filter(
@@ -278,6 +329,11 @@ export async function GET(req: NextRequest) {
       const mfWeight = mfConfidence * 0.4; // 0% to 40% based on confidence
       const heuristicWeight = 1 - mfWeight;
 
+      // Scale mainstream bonus inversely with exploration factor
+      // At 0 exploration: full mainstream bonus (want familiar movies)
+      // At 1 exploration: no mainstream bonus (want new discoveries)
+      const scaledMainstreamBonus = mainstreamBonus * (1 - effectiveExplorationFactor);
+
       const heuristicScore =
         preferenceSignal *
           tuning.preferenceWeight *
@@ -285,9 +341,10 @@ export async function GET(req: NextRequest) {
         discoverySignal *
           tuning.discoveryWeight *
           effectiveExplorationFactor +
+        scaledMainstreamBonus + // Boost well-known movies
         availabilitySignal * tuning.availabilityBonus +
         dislikePenalty +
-        genreExplorationBonus +
+        genreExplorationBonus * effectiveExplorationFactor + // Only explore genres when exploring
         Math.random() * tuning.randomJitter;
 
       const score =
@@ -380,6 +437,10 @@ export async function GET(req: NextRequest) {
       directors: movie.directors,
       studios: movie.studios,
     }));
+
+  // Auto-expand movie pool if user is running low on unrated movies
+  // This runs in the background and doesn't block the response
+  maybeExpandPoolForUser(userId);
 
   return NextResponse.json(finalResults);
 }

@@ -51,10 +51,12 @@ export async function GET(req: NextRequest) {
 
   const userId = session.user.id;
   const limit = parseLimit(req.nextUrl.searchParams.get("limit"));
+  const excludeRadarr = req.nextUrl.searchParams.get("excludeRadarr") === "true";
+  const excludeRated = req.nextUrl.searchParams.get("excludeRated") === "true";
 
   try {
     // Fetch anticipated movies from Trakt
-    const anticipated = await getAnticipatedMovies(limit * 2);
+    const anticipated = await getAnticipatedMovies(limit * 3); // Fetch more to account for filtering
 
     // Get user's household
     const householdMember = await prisma.householdMember.findFirst({
@@ -73,7 +75,7 @@ export async function GET(req: NextRequest) {
 
     const results: UpcomingMovieResponse[] = [];
 
-    for (const item of anticipated.slice(0, limit)) {
+    for (const item of anticipated) {
       const traktMovie = item.movie;
       const imdbId = traktMovie.ids?.imdb;
       const tmdbId = traktMovie.ids?.tmdb?.toString() || null;
@@ -182,6 +184,16 @@ export async function GET(req: NextRequest) {
             validRatings.length
           : null;
 
+      // Skip if filtering out Radarr movies
+      if (excludeRadarr && movie.radarrSync) {
+        continue;
+      }
+
+      // Skip if filtering out user-rated movies
+      if (excludeRated && userRating?.rating !== null && userRating?.rating !== undefined) {
+        continue;
+      }
+
       results.push({
         id: movie.id,
         imdbId: movie.imdbId,
@@ -208,6 +220,11 @@ export async function GET(req: NextRequest) {
             }
           : null,
       });
+
+      // Stop if we have enough results
+      if (results.length >= limit) {
+        break;
+      }
     }
 
     return NextResponse.json(results);

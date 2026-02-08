@@ -21,8 +21,14 @@ interface RadarrMovie {
   id: number;
   title: string;
   tmdbId: number;
+  imdbId?: string;
+  year?: number;
+  overview?: string;
+  runtime?: number;
   hasFile: boolean;
   monitored: boolean;
+  images?: { coverType: string; remoteUrl?: string }[];
+  genres?: string[];
 }
 
 async function getRadarrConfig(): Promise<RadarrConfig | null> {
@@ -149,6 +155,149 @@ export async function syncRadarrAvailability(): Promise<{
   }
 
   return { updated, added, total: radarrMovies.length };
+}
+
+/**
+ * Import all movies from Radarr library into our database
+ * This creates movie records for movies we don't have yet
+ */
+export async function importRadarrLibrary(): Promise<{
+  imported: number;
+  skipped: number;
+  total: number;
+}> {
+  console.log("[Radarr Import] Starting Radarr library import...");
+
+  const radarrMovies = await getRadarrMovies();
+  if (radarrMovies.length === 0) {
+    console.log("[Radarr Import] No movies found in Radarr or Radarr not configured");
+    return { imported: 0, skipped: 0, total: 0 };
+  }
+
+  let imported = 0;
+  let skipped = 0;
+
+  for (const radarrMovie of radarrMovies) {
+    const tmdbId = radarrMovie.tmdbId?.toString();
+    if (!tmdbId) {
+      skipped++;
+      continue;
+    }
+
+    // Check if movie already exists in our database
+    const existing = await prisma.movie.findFirst({
+      where: {
+        OR: [
+          { tmdbId },
+          ...(radarrMovie.imdbId ? [{ imdbId: radarrMovie.imdbId }] : []),
+        ],
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      // Update RadarrSync for existing movie
+      await prisma.radarrSync.upsert({
+        where: { movieId: existing.id },
+        create: {
+          movieId: existing.id,
+          radarrId: radarrMovie.id,
+          monitored: radarrMovie.monitored,
+          available: radarrMovie.hasFile,
+        },
+        update: {
+          radarrId: radarrMovie.id,
+          monitored: radarrMovie.monitored,
+          available: radarrMovie.hasFile,
+        },
+      });
+      skipped++;
+      continue;
+    }
+
+    // Extract poster URL from Radarr images
+    let posterUrl: string | null = null;
+    if (radarrMovie.images) {
+      const posterImage = radarrMovie.images.find((img) => img.coverType === "poster");
+      posterUrl = posterImage?.remoteUrl || null;
+    }
+
+    // Get era from year
+    let era: string | null = null;
+    if (radarrMovie.year) {
+      const currentYear = new Date().getFullYear();
+      if (radarrMovie.year >= currentYear - 1) era = "new_release";
+      else if (radarrMovie.year >= 2000) era = "modern_classic";
+      else era = "classic";
+    }
+
+    try {
+      // Create the movie
+      const movie = await prisma.movie.create({
+        data: {
+          tmdbId,
+          imdbId: radarrMovie.imdbId || null,
+          title: radarrMovie.title,
+          year: radarrMovie.year || null,
+          posterUrl,
+          overview: radarrMovie.overview || null,
+          runtime: radarrMovie.runtime || null,
+          era,
+        },
+        select: { id: true },
+      });
+
+      // Create RadarrSync record
+      await prisma.radarrSync.create({
+        data: {
+          movieId: movie.id,
+          radarrId: radarrMovie.id,
+          monitored: radarrMovie.monitored,
+          available: radarrMovie.hasFile,
+        },
+      });
+
+      // Link genres if available
+      if (radarrMovie.genres && radarrMovie.genres.length > 0) {
+        for (const genreName of radarrMovie.genres) {
+          const slug = genreName.toLowerCase().replace(/\s+/g, "-");
+          try {
+            await prisma.genre.upsert({
+              where: { slug },
+              create: { name: genreName, slug },
+              update: {},
+            });
+
+            const genre = await prisma.genre.findUnique({
+              where: { slug },
+              select: { id: true },
+            });
+
+            if (genre) {
+              await prisma.movieGenre.upsert({
+                where: {
+                  movieId_genreId: { movieId: movie.id, genreId: genre.id },
+                },
+                create: { movieId: movie.id, genreId: genre.id },
+                update: {},
+              });
+            }
+          } catch {
+            // Ignore genre linking errors
+          }
+        }
+      }
+
+      imported++;
+    } catch {
+      // Skip on error (e.g., duplicate)
+      skipped++;
+    }
+  }
+
+  console.log(`[Radarr Import] Complete: ${imported} imported, ${skipped} skipped, ${radarrMovies.length} total in Radarr`);
+
+  return { imported, skipped, total: radarrMovies.length };
 }
 
 export interface AddToRadarrResult {

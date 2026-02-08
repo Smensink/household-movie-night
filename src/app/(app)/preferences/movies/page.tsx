@@ -194,11 +194,18 @@ export default function RateMoviesPage() {
     if (mode !== "discover" || loading) return;
 
     const interval = setInterval(() => {
+      // Clean queue of any rated movies that might have slipped through
+      const cleanedQueue = queueRef.current.filter(
+        (m) => !ratedMovieIdsRef.current.has(m.id)
+      );
+      if (cleanedQueue.length !== queueRef.current.length) {
+        setQueueAndRef(cleanedQueue);
+      }
       void preloadMoviesRef.current();
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [mode, loading]);
+  }, [mode, loading, setQueueAndRef]);
 
   const searchMovies = useCallback(async () => {
     if (!searchQuery.trim()) return;
@@ -224,14 +231,21 @@ export default function RateMoviesPage() {
   }, [searchQuery, setQueueAndRef]);
 
   const advanceToNextMovie = useCallback(() => {
-    if (queueRef.current.length > 0) {
-      const [next, ...rest] = queueRef.current;
+    // Skip any movies that were already rated (defensive check for race conditions)
+    let queue = queueRef.current;
+    while (queue.length > 0 && ratedMovieIdsRef.current.has(queue[0].id)) {
+      queue = queue.slice(1);
+    }
+
+    if (queue.length > 0) {
+      const [next, ...rest] = queue;
       setCurrentMovie(next);
       setQueueAndRef(rest);
     } else {
       setCurrentMovie(null);
+      setQueueAndRef([]);
     }
-    
+
     // Trigger preload check
     setTimeout(() => void preloadMovies(), 100);
   }, [preloadMovies, setQueueAndRef]);
@@ -391,6 +405,14 @@ export default function RateMoviesPage() {
     setUndoAction(null);
     setLoading(false);
   }, [fetchDiscoverBatch, setQueueAndRef]);
+
+  // Defensive check: if current movie is somehow already rated, skip it
+  useEffect(() => {
+    if (currentMovie && ratedMovieIdsRef.current.has(currentMovie.id)) {
+      console.warn(`[Movies] Skipping already-rated movie: ${currentMovie.title}`);
+      advanceToNextMovie();
+    }
+  }, [currentMovie, advanceToNextMovie]);
 
   if (status === "loading" || loading) {
     return (
