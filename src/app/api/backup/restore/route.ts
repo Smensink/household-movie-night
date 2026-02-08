@@ -116,6 +116,43 @@ interface BackupData {
     apiKey: string | null;
     enabled: boolean;
   }[];
+  // ML Model data
+  latentVectors?: {
+    entityType: string;
+    entityId: string;
+    vector: string;
+    bias: number;
+  }[];
+  featureEmbeddings?: {
+    featureType: string;
+    featureId: string;
+    vector: string;
+    bias: number;
+  }[];
+  mfModelMetadata?: {
+    version: number;
+    latentDimensions: number;
+    featureDimensions: number;
+    learningRate: number;
+    regularization: number;
+    trainedEpochs: number;
+    lastTrainedAt: string | null;
+    rmse: number | null;
+    validationRmse: number | null;
+    totalRatings: number;
+    isTraining: boolean;
+    globalMean: number;
+    featureWeights: string | null;
+  } | null;
+  userFeatureCaches?: {
+    userId: string;
+    explorationFactor: number;
+    genreVector: string | null;
+    ratingMean: number | null;
+    ratingStdDev: number | null;
+    ratingCount: number;
+    topGenreIds: string | null;
+  }[];
 }
 
 export async function POST(req: NextRequest) {
@@ -154,6 +191,10 @@ export async function POST(req: NextRequest) {
     studioRatings: 0,
     userSettings: 0,
     integrationConfigs: 0,
+    latentVectors: 0,
+    featureEmbeddings: 0,
+    mfModelMetadata: 0,
+    userFeatureCaches: 0,
     skipped: 0,
   };
 
@@ -477,6 +518,109 @@ export async function POST(req: NextRequest) {
       stats.integrationConfigs++;
     } catch {
       stats.skipped++;
+    }
+  }
+
+  // Import ML model data - latent vectors
+  // First clear existing ML data to avoid conflicts
+  if (backup.latentVectors && backup.latentVectors.length > 0) {
+    await prisma.latentVector.deleteMany({});
+    for (const lv of backup.latentVectors) {
+      try {
+        await prisma.latentVector.create({
+          data: {
+            entityType: lv.entityType,
+            entityId: lv.entityId,
+            vector: lv.vector,
+            bias: lv.bias,
+          },
+        });
+        stats.latentVectors++;
+      } catch {
+        stats.skipped++;
+      }
+    }
+  }
+
+  // Import feature embeddings
+  if (backup.featureEmbeddings && backup.featureEmbeddings.length > 0) {
+    await prisma.featureEmbedding.deleteMany({});
+    for (const fe of backup.featureEmbeddings) {
+      try {
+        await prisma.featureEmbedding.create({
+          data: {
+            featureType: fe.featureType,
+            featureId: fe.featureId,
+            vector: fe.vector,
+            bias: fe.bias,
+          },
+        });
+        stats.featureEmbeddings++;
+      } catch {
+        stats.skipped++;
+      }
+    }
+  }
+
+  // Import MF model metadata
+  if (backup.mfModelMetadata) {
+    try {
+      await prisma.mFModelMetadata.deleteMany({});
+      await prisma.mFModelMetadata.create({
+        data: {
+          version: backup.mfModelMetadata.version,
+          latentDimensions: backup.mfModelMetadata.latentDimensions,
+          featureDimensions: backup.mfModelMetadata.featureDimensions,
+          learningRate: backup.mfModelMetadata.learningRate,
+          regularization: backup.mfModelMetadata.regularization,
+          trainedEpochs: backup.mfModelMetadata.trainedEpochs,
+          lastTrainedAt: backup.mfModelMetadata.lastTrainedAt
+            ? new Date(backup.mfModelMetadata.lastTrainedAt)
+            : null,
+          rmse: backup.mfModelMetadata.rmse,
+          validationRmse: backup.mfModelMetadata.validationRmse,
+          totalRatings: backup.mfModelMetadata.totalRatings,
+          isTraining: false, // Reset training state
+          globalMean: backup.mfModelMetadata.globalMean,
+          featureWeights: backup.mfModelMetadata.featureWeights,
+        },
+      });
+      stats.mfModelMetadata++;
+    } catch {
+      stats.skipped++;
+    }
+  }
+
+  // Import user feature caches
+  if (backup.userFeatureCaches && backup.userFeatureCaches.length > 0) {
+    for (const ufc of backup.userFeatureCaches) {
+      const mappedUserId = userIdMap.get(ufc.userId);
+      if (!mappedUserId) continue;
+      try {
+        await prisma.userFeatureCache.upsert({
+          where: { userId: mappedUserId },
+          create: {
+            userId: mappedUserId,
+            explorationFactor: ufc.explorationFactor,
+            genreVector: ufc.genreVector,
+            ratingMean: ufc.ratingMean,
+            ratingStdDev: ufc.ratingStdDev,
+            ratingCount: ufc.ratingCount,
+            topGenreIds: ufc.topGenreIds,
+          },
+          update: {
+            explorationFactor: ufc.explorationFactor,
+            genreVector: ufc.genreVector,
+            ratingMean: ufc.ratingMean,
+            ratingStdDev: ufc.ratingStdDev,
+            ratingCount: ufc.ratingCount,
+            topGenreIds: ufc.topGenreIds,
+          },
+        });
+        stats.userFeatureCaches++;
+      } catch {
+        stats.skipped++;
+      }
     }
   }
 

@@ -116,6 +116,43 @@ interface BackupData {
     apiKey: string | null;
     enabled: boolean;
   }[];
+  // ML Model data
+  latentVectors: {
+    entityType: string;
+    entityId: string;
+    vector: string;
+    bias: number;
+  }[];
+  featureEmbeddings: {
+    featureType: string;
+    featureId: string;
+    vector: string;
+    bias: number;
+  }[];
+  mfModelMetadata: {
+    version: number;
+    latentDimensions: number;
+    featureDimensions: number;
+    learningRate: number;
+    regularization: number;
+    trainedEpochs: number;
+    lastTrainedAt: string | null;
+    rmse: number | null;
+    validationRmse: number | null;
+    totalRatings: number;
+    isTraining: boolean;
+    globalMean: number;
+    featureWeights: string | null;
+  } | null;
+  userFeatureCaches: {
+    userId: string;
+    explorationFactor: number;
+    genreVector: string | null;
+    ratingMean: number | null;
+    ratingStdDev: number | null;
+    ratingCount: number;
+    topGenreIds: string | null;
+  }[];
 }
 
 export async function GET() {
@@ -144,6 +181,10 @@ export async function GET() {
     studioRatings,
     userSettings,
     integrationConfigs,
+    latentVectors,
+    featureEmbeddings,
+    mfModelMetadata,
+    userFeatureCaches,
   ] = await Promise.all([
     prisma.user.findMany({
       select: {
@@ -225,6 +266,41 @@ export async function GET() {
     prisma.integrationConfig.findMany({
       select: { service: true, baseUrl: true, apiKey: true, enabled: true },
     }),
+    // ML Model data
+    prisma.latentVector.findMany({
+      select: { entityType: true, entityId: true, vector: true, bias: true },
+    }),
+    prisma.featureEmbedding.findMany({
+      select: { featureType: true, featureId: true, vector: true, bias: true },
+    }),
+    prisma.mFModelMetadata.findFirst({
+      select: {
+        version: true,
+        latentDimensions: true,
+        featureDimensions: true,
+        learningRate: true,
+        regularization: true,
+        trainedEpochs: true,
+        lastTrainedAt: true,
+        rmse: true,
+        validationRmse: true,
+        totalRatings: true,
+        isTraining: true,
+        globalMean: true,
+        featureWeights: true,
+      },
+    }),
+    prisma.userFeatureCache.findMany({
+      select: {
+        userId: true,
+        explorationFactor: true,
+        genreVector: true,
+        ratingMean: true,
+        ratingStdDev: true,
+        ratingCount: true,
+        topGenreIds: true,
+      },
+    }),
   ]);
 
   const backup: BackupData = {
@@ -248,6 +324,15 @@ export async function GET() {
     studioRatings,
     userSettings,
     integrationConfigs,
+    latentVectors,
+    featureEmbeddings,
+    mfModelMetadata: mfModelMetadata
+      ? {
+          ...mfModelMetadata,
+          lastTrainedAt: mfModelMetadata.lastTrainedAt?.toISOString() || null,
+        }
+      : null,
+    userFeatureCaches,
   };
 
   return new NextResponse(JSON.stringify(backup, null, 2), {
