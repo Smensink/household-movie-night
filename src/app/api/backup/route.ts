@@ -2,7 +2,44 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
-const BACKUP_VERSION = 1;
+const BACKUP_VERSION = 2;
+
+// Fetch image and convert to base64
+async function fetchImageAsBase64(url: string): Promise<string | null> {
+  try {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(10000),
+      headers: { 'User-Agent': 'MovieNightApp/1.0' }
+    });
+    if (!response.ok) return null;
+    const buffer = await response.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
+    return `data:${contentType};base64,${base64}`;
+  } catch {
+    return null;
+  }
+}
+
+// Batch fetch images with concurrency limit
+async function fetchImagesInBatches<T extends { url: string | null }>(
+  items: T[],
+  concurrency: number = 20
+): Promise<Map<string, string>> {
+  const results = new Map<string, string>();
+  const urls = items.filter(i => i.url).map(i => i.url as string);
+
+  for (let i = 0; i < urls.length; i += concurrency) {
+    const batch = urls.slice(i, i + concurrency);
+    const promises = batch.map(async (url) => {
+      const data = await fetchImageAsBase64(url);
+      if (data) results.set(url, data);
+    });
+    await Promise.all(promises);
+  }
+
+  return results;
+}
 
 interface BackupData {
   version: number;
@@ -40,6 +77,7 @@ interface BackupData {
     tmdbId: string | null;
     name: string;
     photoUrl: string | null;
+    photoData: string | null; // base64 encoded image
     knownFor: string | null;
   }[];
   movies: {
@@ -50,7 +88,9 @@ interface BackupData {
     title: string;
     year: number | null;
     posterUrl: string | null;
+    posterData: string | null; // base64 encoded image
     backdropUrl: string | null;
+    backdropData: string | null; // base64 encoded image
     overview: string | null;
     runtime: number | null;
     releaseDate: string | null;
@@ -368,6 +408,23 @@ export async function GET() {
     }),
   ]);
 
+  // Fetch all images in parallel batches
+  console.log(`Fetching ${movies.length} movie posters and ${people.length} person photos...`);
+
+  // Collect all URLs to fetch
+  const posterUrls = movies.filter(m => m.posterUrl).map(m => ({ url: m.posterUrl }));
+  const backdropUrls = movies.filter(m => m.backdropUrl).map(m => ({ url: m.backdropUrl }));
+  const photoUrls = people.filter(p => p.photoUrl).map(p => ({ url: p.photoUrl }));
+
+  // Fetch all images with concurrency limit
+  const [posterData, backdropData, photoData] = await Promise.all([
+    fetchImagesInBatches(posterUrls, 30),
+    fetchImagesInBatches(backdropUrls, 30),
+    fetchImagesInBatches(photoUrls, 30),
+  ]);
+
+  console.log(`Fetched ${posterData.size} posters, ${backdropData.size} backdrops, ${photoData.size} photos`);
+
   const backup: BackupData = {
     version: BACKUP_VERSION,
     createdAt: new Date().toISOString(),
@@ -376,10 +433,15 @@ export async function GET() {
     householdMembers,
     genres,
     studios,
-    people,
+    people: people.map((p) => ({
+      ...p,
+      photoData: p.photoUrl ? photoData.get(p.photoUrl) || null : null,
+    })),
     movies: movies.map((m) => ({
       ...m,
       releaseDate: m.releaseDate?.toISOString() || null,
+      posterData: m.posterUrl ? posterData.get(m.posterUrl) || null : null,
+      backdropData: m.backdropUrl ? backdropData.get(m.backdropUrl) || null : null,
     })),
     movieGenres,
     movieStudios,

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
-const SUPPORTED_VERSIONS = [1];
+const SUPPORTED_VERSIONS = [1, 2];
 
 interface BackupData {
   version: number;
@@ -40,6 +40,7 @@ interface BackupData {
     tmdbId: string | null;
     name: string;
     photoUrl: string | null;
+    photoData?: string | null; // base64 encoded image (v2)
     knownFor: string | null;
   }[];
   movies: {
@@ -50,7 +51,9 @@ interface BackupData {
     title: string;
     year: number | null;
     posterUrl: string | null;
+    posterData?: string | null; // base64 encoded image (v2)
     backdropUrl: string | null;
+    backdropData?: string | null; // base64 encoded image (v2)
     overview: string | null;
     runtime: number | null;
     releaseDate: string | null;

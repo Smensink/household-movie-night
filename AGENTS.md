@@ -418,10 +418,13 @@ Core entities in `prisma/schema.prisma`:
     - API accepts `excludeMovieIds` parameter to avoid duplicates.
     - Automatic queue cleanup removes rated movies that slipped through.
     - preloadMovies triggered after each rating for responsive queue.
-  - **Comprehensive backup/restore**:
+  - **Comprehensive backup/restore (v2)**:
     - **ML model data**: LatentVector, FeatureEmbedding, MFModelMetadata, UserFeatureCache.
     - **Availability data**: RadarrSync (radarrId, monitored, available), PlexAvailability (plexKey, available).
     - **Activity logs**: Full ActivityLog table for ML training history.
     - **Complete movie fields**: backdropUrl, releaseDate, certification, popularity, voteAverage, voteCount, imdbVotes, letterboxdRating, era.
-    - Restored app is fully identical to backed-up state including all metadata and model weights.
+    - **Embedded images**: All movie posters, backdrops, and person photos stored as base64 data URIs.
+    - Image fetching runs in parallel batches (30 concurrent) for efficiency.
+    - Backup size increased from ~3MB to ~200-400MB due to embedded images.
+    - Restored app is fully identical to backed-up state including all metadata, model weights, and images.
     - Training state reset to false on restore to allow retraining if needed.
