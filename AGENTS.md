@@ -604,3 +604,8 @@ Core entities in `prisma/schema.prisma`:
   - Upcoming page now falls back to including Radarr items if strict upcoming fetch returns empty, reducing dead-end "No more upcoming movies" states.
   - Removed manual "Check for More" action in upcoming empty state and clarified that background refetch continues automatically.
   - Pool expansion now rotates through anticipated pages (instead of repeatedly hitting only page 1) to improve long-run replenishment diversity.
+- 2026-02-08 (Large exclude payload bug fix for prefetch):
+  - Root cause for false "No more upcoming movies" on heavy raters was oversized `excludeMovieIds` query strings when client included all previously rated IDs.
+  - Updated both `/preferences/movies` and `/preferences/upcoming` client prefetch calls to send only in-flight card/queue IDs as excludes.
+  - Discover/upcoming APIs continue to filter already-rated content server-side, and client still has rated-ID safety filtering after response.
+  - Learned behavior edge case: URL/query-size limits can silently collapse refill requests, creating empty-state regressions even when large eligible pools exist.

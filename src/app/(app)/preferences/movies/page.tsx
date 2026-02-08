@@ -154,7 +154,6 @@ export default function RateMoviesPage() {
       new Set([
         ...(currentMovie ? [currentMovie.id] : []),
         ...queueRef.current.map((movie) => movie.id),
-        ...Array.from(ratedMovieIdsRef.current),
       ])
     );
   }, [currentMovie]);
@@ -494,8 +493,7 @@ export default function RateMoviesPage() {
 
   const loadDiscoverMovies = useCallback(async () => {
     setLoading(true);
-    const excludeIds = Array.from(ratedMovieIdsRef.current);
-    const discoverMovies = await fetchDiscoverBatch(PRELOAD_BATCH_SIZE * 2, excludeIds);
+    const discoverMovies = await fetchDiscoverBatch(PRELOAD_BATCH_SIZE * 2, []);
 
     // Filter out any rated movies that slipped through
     const unratedMovies = dedupeAndFilterMovies(discoverMovies, ratedMovieIdsRef.current);
@@ -753,3 +751,4 @@ export default function RateMoviesPage() {
     </div>
   );
 }
+

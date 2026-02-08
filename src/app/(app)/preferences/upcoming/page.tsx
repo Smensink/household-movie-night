@@ -146,7 +146,6 @@ export default function UpcomingMoviesPage() {
       new Set([
         ...(currentMovie ? [currentMovie.id] : []),
         ...queueRef.current.map((movie) => movie.id),
-        ...Array.from(ratedMovieIdsRef.current),
       ])
     );
   }, [currentMovie]);
@@ -548,13 +547,4 @@ export default function UpcomingMoviesPage() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
 
