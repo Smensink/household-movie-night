@@ -158,6 +158,13 @@ export default function SettingsPage() {
     message: string;
     success: boolean;
   } | null>(null);
+  const [backupProgress, setBackupProgress] = useState<{
+    inProgress: boolean;
+    phase: string;
+    current: number;
+    total: number;
+  } | null>(null);
+  const [backupDownloading, setBackupDownloading] = useState(false);
 
   const [forms, setForms] = useState<
     Record<string, { baseUrl: string; apiKey: string }>
@@ -297,21 +304,75 @@ export default function SettingsPage() {
   };
 
   const handleBackupDownload = async () => {
-    const res = await fetch("/api/backup");
-    if (!res.ok) {
-      alert("Failed to create backup. Make sure you are an admin.");
-      return;
-    }
+    setBackupDownloading(true);
+    setBackupProgress({ inProgress: true, phase: "Starting backup...", current: 0, total: 0 });
 
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `movie-night-backup-${new Date().toISOString().split("T")[0]}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // Start polling for progress
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes = await fetch("/api/backup?status=true");
+        if (statusRes.ok) {
+          const progress = await statusRes.json();
+          setBackupProgress(progress);
+          if (!progress.inProgress && progress.phase === "Complete") {
+            clearInterval(pollInterval);
+          }
+        }
+      } catch {
+        // Ignore polling errors
+      }
+    }, 500);
+
+    try {
+      const res = await fetch("/api/backup");
+      clearInterval(pollInterval);
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        if (res.status === 409) {
+          setBackupProgress({ inProgress: true, phase: "Backup already in progress...", current: 0, total: 0 });
+          // Keep polling until complete
+          const waitInterval = setInterval(async () => {
+            const statusRes = await fetch("/api/backup?status=true");
+            if (statusRes.ok) {
+              const progress = await statusRes.json();
+              setBackupProgress(progress);
+              if (!progress.inProgress) {
+                clearInterval(waitInterval);
+                setBackupDownloading(false);
+                if (progress.phase === "Complete") {
+                  // Retry the download
+                  handleBackupDownload();
+                }
+              }
+            }
+          }, 1000);
+          return;
+        }
+        setBackupProgress(null);
+        setBackupDownloading(false);
+        alert("Failed to create backup: " + (errorData.error || "Unknown error"));
+        return;
+      }
+
+      setBackupProgress({ inProgress: false, phase: "Downloading...", current: 0, total: 0 });
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `movie-night-backup-${new Date().toISOString().split("T")[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setBackupProgress(null);
+    } catch (error) {
+      clearInterval(pollInterval);
+      setBackupProgress(null);
+      alert("Failed to create backup: " + (error instanceof Error ? error.message : "Unknown error"));
+    } finally {
+      setBackupDownloading(false);
+    }
   };
 
   const handleBackupRestore = async () => {
@@ -1005,12 +1066,32 @@ export default function SettingsPage() {
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-2">
             <p className="text-xs font-medium">Export Backup</p>
-            <Button size="sm" onClick={handleBackupDownload}>
-              Download Backup
+            <Button size="sm" onClick={handleBackupDownload} disabled={backupDownloading}>
+              {backupDownloading ? "Creating Backup..." : "Download Backup"}
             </Button>
-            <p className="text-[10px] text-muted">
-              Downloads movies, ratings, preferences, accounts, and API keys.
-            </p>
+            {backupProgress && backupProgress.inProgress && (
+              <div className="space-y-1">
+                <p className="text-[10px] text-accent">{backupProgress.phase}</p>
+                {backupProgress.total > 0 && (
+                  <>
+                    <div className="w-full h-1.5 bg-border rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-accent transition-all duration-300"
+                        style={{ width: `${(backupProgress.current / backupProgress.total) * 100}%` }}
+                      />
+                    </div>
+                    <p className="text-[10px] text-muted">
+                      {backupProgress.current} / {backupProgress.total}
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+            {!backupProgress && (
+              <p className="text-[10px] text-muted">
+                Downloads movies, ratings, preferences, accounts, images, and ML model.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">
