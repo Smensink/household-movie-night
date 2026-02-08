@@ -17,6 +17,7 @@ interface TinderMovieCardProps {
     rottenTomatoesAudience?: number | null;
     tmdbRating?: number | null;
     genres?: string[];
+    anticipatedListCount?: number | null;
     directors?: string[];
     actors?: string[];
     studios?: string[];
@@ -38,13 +39,6 @@ function TinderMovieCardInner({
 }: TinderMovieCardProps) {
   const [showDetails, setShowDetails] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
-
-  const eraLabels: Record<string, string> = {
-    new_release: "New Release",
-    modern_classic: "Modern Classic",
-    classic: "Classic",
-  };
-
   return (
     <div className="relative w-full h-[calc(100vh-180px)] min-h-[500px] max-h-[900px] sm:max-h-[800px] rounded-3xl overflow-hidden shadow-2xl">
       {/* Full-size poster background */}
@@ -97,6 +91,11 @@ function TinderMovieCardInner({
             {movie.year}
           </span>
         )}
+        {movie.anticipatedListCount !== null && movie.anticipatedListCount !== undefined ? (
+          <span className="bg-accent/70 backdrop-blur-sm text-white text-xs font-semibold px-2.5 py-1 rounded-full">
+            {movie.anticipatedListCount} lists
+          </span>
+        ) : null}
         {movie.genres && movie.genres.length > 0 && movie.genres.slice(0, 2).map((genre) => (
           <span
             key={genre}
@@ -279,3 +278,6 @@ const TinderMovieCard = memo(TinderMovieCardInner, (prevProps, nextProps) => {
 });
 
 export default TinderMovieCard;
+
+
+

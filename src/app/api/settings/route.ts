@@ -45,6 +45,14 @@ export async function POST(req: NextRequest) {
     typeof body?.explorationFactor === "number"
       ? body.explorationFactor
       : undefined;
+  const minVoteCount =
+    typeof body?.minVoteCount === "number"
+      ? body.minVoteCount
+      : undefined;
+  const minUpcomingListCount =
+    typeof body?.minUpcomingListCount === "number"
+      ? body.minUpcomingListCount
+      : undefined;
   const discoverySourcePref =
     typeof body?.discoverySourcePref === "string"
       ? body.discoverySourcePref
@@ -63,6 +71,27 @@ export async function POST(req: NextRequest) {
   }
 
   if (
+    minVoteCount !== undefined &&
+    (!Number.isInteger(minVoteCount) || minVoteCount < 0 || minVoteCount > 5000)
+  ) {
+    return NextResponse.json(
+      { error: "minVoteCount must be an integer between 0 and 5000" },
+      { status: 400 }
+    );
+  }
+
+  if (
+    minUpcomingListCount !== undefined &&
+    (!Number.isInteger(minUpcomingListCount) ||
+      minUpcomingListCount < 0 ||
+      minUpcomingListCount > 5000)
+  ) {
+    return NextResponse.json(
+      { error: "minUpcomingListCount must be an integer between 0 and 5000" },
+      { status: 400 }
+    );
+  }
+  if (
     discoverySourcePref !== undefined &&
     !ALLOWED_DISCOVERY_SOURCE_PREFS.has(discoverySourcePref)
   ) {
@@ -78,12 +107,19 @@ export async function POST(req: NextRequest) {
       userId: session.user.id,
       explorationFactor: explorationFactor ?? 0.5,
       discoverySourcePref: discoverySourcePref ?? "balanced",
+      minVoteCount: minVoteCount ?? 500,
+      minUpcomingListCount: minUpcomingListCount ?? 250,
     },
     update: {
       ...(explorationFactor !== undefined && { explorationFactor }),
       ...(discoverySourcePref !== undefined && { discoverySourcePref }),
+      ...(minVoteCount !== undefined && { minVoteCount }),
+      ...(minUpcomingListCount !== undefined && { minUpcomingListCount }),
     },
   });
 
   return NextResponse.json(settings);
 }
+
+
+

@@ -1,7 +1,12 @@
 import { prisma } from "./prisma";
 import { getTrendingMovies, getPopularMovies, getAnticipatedMovies } from "./api/trakt";
 import { getOMDBMovie, getHighResPosterUrl, extractRatingsFromOMDB } from "./api/omdb";
-import { getTMDBMovieByImdbId, extractTMDBRating } from "./api/tmdb";
+import {
+  getTMDBMovie,
+  getTMDBMovieByImdbId,
+  getTMDBPosterUrl,
+  extractTMDBRating,
+} from "./api/tmdb";
 
 const EXPANSION_THRESHOLD = 50; // Trigger expansion when user has fewer than this many unrated movies
 const EXPANSION_BATCH_SIZE = 30; // How many movies to add per expansion
@@ -24,6 +29,12 @@ function getEra(year: number | null): string | null {
   if (year >= currentYear - 1) return "new_release";
   if (year >= 2000) return "modern_classic";
   return "classic";
+}
+
+function parseDateOrNull(value: string | undefined): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 /**
@@ -87,13 +98,23 @@ export async function expandMoviePool(): Promise<{
     ...anticipated.map((a) => a.movie),
   ];
 
-  // Dedupe by IMDB ID
-  const seenImdbIds = new Set<string>();
+  // Dedupe by available external IDs so upcoming movies without IMDB IDs are still considered.
+  const seenExternalIds = new Set<string>();
   const uniqueMovies: typeof allMovies = [];
   for (const movie of allMovies) {
-    const imdbId = movie.ids?.imdb;
-    if (!imdbId || seenImdbIds.has(imdbId)) continue;
-    seenImdbIds.add(imdbId);
+    const imdbId = movie.ids?.imdb?.trim();
+    const tmdbId = movie.ids?.tmdb ? String(movie.ids.tmdb) : null;
+    const traktSlug = movie.ids?.slug?.trim() || null;
+    const dedupeKey = imdbId
+      ? `imdb:${imdbId}`
+      : tmdbId
+      ? `tmdb:${tmdbId}`
+      : traktSlug
+      ? `slug:${traktSlug}`
+      : null;
+
+    if (!dedupeKey || seenExternalIds.has(dedupeKey)) continue;
+    seenExternalIds.add(dedupeKey);
     uniqueMovies.push(movie);
   }
 
@@ -101,51 +122,71 @@ export async function expandMoviePool(): Promise<{
   let skipped = 0;
 
   for (const movie of uniqueMovies.slice(0, EXPANSION_BATCH_SIZE)) {
-    const imdbId = movie.ids?.imdb;
-    if (!imdbId) {
-      skipped++;
-      continue;
-    }
+    const imdbId = movie.ids?.imdb?.trim() || null;
+    const tmdbId = movie.ids?.tmdb ? String(movie.ids.tmdb) : null;
+    const traktSlug = movie.ids?.slug?.trim() || null;
 
     // Check if already exists
-    const existing = await prisma.movie.findFirst({
-      where: {
-        OR: [
-          { imdbId },
-          { tmdbId: movie.ids?.tmdb?.toString() },
-        ],
-      },
-      select: { id: true },
-    });
+    const existingIdClauses = [
+      ...(imdbId ? [{ imdbId }] : []),
+      ...(tmdbId ? [{ tmdbId }] : []),
+      ...(traktSlug ? [{ traktSlug }] : []),
+    ];
+
+    const existing =
+      existingIdClauses.length > 0
+        ? await prisma.movie.findFirst({
+            where: { OR: existingIdClauses },
+            select: { id: true },
+          })
+        : null;
 
     if (existing) {
       skipped++;
       continue;
     }
 
-    // Fetch OMDB details for metadata
-    const details = await getOMDBMovie(imdbId);
-    if (!details) {
+    const details = imdbId ? await getOMDBMovie(imdbId) : null;
+    const tmdbMovie = tmdbId
+      ? await getTMDBMovie(tmdbId)
+      : imdbId
+      ? await getTMDBMovieByImdbId(imdbId)
+      : null;
+
+    if (!details && !tmdbMovie) {
       skipped++;
       continue;
     }
 
-    const year = movie.year || parseOptionalInt(details.Year) || null;
-    const runtime = parseOptionalInt(details.Runtime) || null;
+    const tmdbReleaseYear = tmdbMovie?.release_date
+      ? Number.parseInt(tmdbMovie.release_date.slice(0, 4), 10)
+      : null;
+    const year =
+      movie.year ||
+      parseOptionalInt(details?.Year) ||
+      (tmdbReleaseYear && !Number.isNaN(tmdbReleaseYear) ? tmdbReleaseYear : null);
+    const runtime = parseOptionalInt(details?.Runtime) || tmdbMovie?.runtime || null;
     const era = getEra(year);
-    const posterUrl = getHighResPosterUrl(details.Poster);
+    const releaseDate = parseDateOrNull(tmdbMovie?.release_date);
+    const omdbPoster = getHighResPosterUrl(details?.Poster);
+    const tmdbPoster = tmdbMovie?.poster_path
+      ? getTMDBPosterUrl(tmdbMovie.poster_path, "w780")
+      : null;
+    const posterUrl = omdbPoster || tmdbPoster || null;
+    const overview = details?.Plot || tmdbMovie?.overview || null;
 
     // Get ratings with fallback sources
     let imdbRating: number | null = null;
     let rottenTomatoesAudience: number | null = null;
 
-    const omdbRatings = extractRatingsFromOMDB(details);
-    imdbRating = omdbRatings.imdbRating;
-    rottenTomatoesAudience = omdbRatings.rottenTomatoesAudience;
+    if (details) {
+      const omdbRatings = extractRatingsFromOMDB(details);
+      imdbRating = omdbRatings.imdbRating;
+      rottenTomatoesAudience = omdbRatings.rottenTomatoesAudience;
+    }
 
     // Fallback to TMDB for rating if needed
     if (!imdbRating) {
-      const tmdbMovie = await getTMDBMovieByImdbId(imdbId);
       const tmdbRating = extractTMDBRating(tmdbMovie);
       if (tmdbRating) {
         imdbRating = tmdbRating;
@@ -156,13 +197,17 @@ export async function expandMoviePool(): Promise<{
       await prisma.movie.create({
         data: {
           imdbId,
-          tmdbId: movie.ids?.tmdb?.toString() || null,
-          traktSlug: movie.ids?.slug || null,
+          tmdbId,
+          traktSlug,
           title: movie.title,
           year,
           posterUrl,
-          overview: details.Plot || null,
+          overview,
           runtime,
+          releaseDate,
+          voteAverage: tmdbMovie?.vote_average ?? null,
+          voteCount: tmdbMovie?.vote_count ?? null,
+          popularity: tmdbMovie?.popularity ?? null,
           era,
           imdbRating,
           rottenTomatoesAudience,

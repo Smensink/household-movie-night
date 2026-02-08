@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { syncMoviesToRadarr } from "@/lib/api/radarr";
+import { getAnticipatedMovies } from "@/lib/api/trakt";
 import { isUserHouseholdAdmin } from "@/lib/household-admin";
-import { maybeExpandPoolForUser } from "@/lib/movie-pool-expansion";
+import { expandMoviePool, maybeExpandPoolForUser } from "@/lib/movie-pool-expansion";
 import {
   averageAffinityForIds,
   buildDiscoveryPreferenceProfile,
@@ -17,6 +18,8 @@ import {
 const DEFAULT_LIMIT = 15;
 const MAX_LIMIT = 30;
 const COLD_START_THRESHOLD = 10;
+const MIN_ANTICIPATED_LISTS = 250;
+const ANTICIPATED_FETCH_LIMIT = 300;
 
 interface UpcomingMovieResponse {
   id: string;
@@ -31,6 +34,7 @@ interface UpcomingMovieResponse {
   rottenTomatoesAudience: number | null;
   releaseDate: string | null;
   listCount: number;
+  genres: string[];
   actors: string[];
   directors: string[];
   studios: string[];
@@ -80,6 +84,25 @@ function mergeUnique(values: string[], extras: string[], limit: number): string[
   return Array.from(new Set([...values, ...extras])).slice(0, limit);
 }
 
+function getAnticipatedListCount(
+  movie: { imdbId: string | null; tmdbId: string | null; traktSlug: string | null },
+  maps: {
+    imdb: Map<string, number>;
+    tmdb: Map<string, number>;
+    slug: Map<string, number>;
+  }
+): number {
+  if (movie.imdbId && maps.imdb.has(movie.imdbId)) {
+    return maps.imdb.get(movie.imdbId) ?? 0;
+  }
+  if (movie.tmdbId && maps.tmdb.has(movie.tmdbId)) {
+    return maps.tmdb.get(movie.tmdbId) ?? 0;
+  }
+  if (movie.traktSlug && maps.slug.has(movie.traktSlug)) {
+    return maps.slug.get(movie.traktSlug) ?? 0;
+  }
+  return 0;
+}
 function computeSourceSignal(
   sourcePref: string,
   metrics: {
@@ -137,14 +160,19 @@ export async function GET(req: NextRequest) {
   );
 
   try {
-    const [profile, algorithmSettings, mfMetadata] = await Promise.all([
+    const [profile, algorithmSettings, mfMetadata, userSettings] = await Promise.all([
       buildDiscoveryPreferenceProfile(userId),
       getAlgorithmSettings(),
       getModelMetadata(),
+      prisma.userSettings.findUnique({
+        where: { userId },
+        select: { minUpcomingListCount: true },
+      }),
     ]);
 
     const tuning = algorithmSettings.movieDiscovery;
     const mfConfidence = mfMetadata?.confidence ?? 0;
+    const minUpcomingListCount = userSettings?.minUpcomingListCount ?? MIN_ANTICIPATED_LISTS;
     const coldStartUser = isColdStartUser(
       profile.userRatedMovieIds.size,
       profile.genreAffinity.size
@@ -153,57 +181,92 @@ export async function GET(req: NextRequest) {
     const now = new Date();
     const currentYear = now.getFullYear();
 
-    const candidateMovies = await prisma.movie.findMany({
-      where: {
-        id: { notIn: Array.from(excludedMovieIds) },
-        posterUrl: { not: null },
-        OR: [
-          { releaseDate: { gt: now } },
-          { releaseDate: null, year: { gt: currentYear } },
+    const anticipated = await getAnticipatedMovies(ANTICIPATED_FETCH_LIMIT);
+    const anticipatedMaps = {
+      imdb: new Map<string, number>(),
+      tmdb: new Map<string, number>(),
+      slug: new Map<string, number>(),
+    };
+
+    for (const item of anticipated) {
+      const listCount = item?.list_count ?? 0;
+      const ids = item?.movie?.ids;
+
+      if (typeof ids?.imdb === "string" && ids.imdb) {
+        anticipatedMaps.imdb.set(ids.imdb, listCount);
+      }
+      if (typeof ids?.tmdb === "number") {
+        anticipatedMaps.tmdb.set(String(ids.tmdb), listCount);
+      }
+      if (typeof ids?.slug === "string" && ids.slug) {
+        anticipatedMaps.slug.set(ids.slug, listCount);
+      }
+    }
+
+    const fetchCandidateMovies = () =>
+      prisma.movie.findMany({
+        where: {
+          id: { notIn: Array.from(excludedMovieIds) },
+          posterUrl: { not: null },
+          OR: [
+            { releaseDate: { gt: now } },
+            { releaseDate: null, year: { gte: currentYear } },
+          ],
+          ...(excludeRadarr ? { radarrSync: { is: null } } : {}),
+        },
+        include: {
+          genres: {
+            select: {
+              genreId: true,
+              genre: { select: { name: true } },
+            },
+          },
+          cast: {
+            include: { person: { select: { name: true } } },
+            orderBy: { castOrder: "asc" },
+            take: 3,
+          },
+          crew: {
+            where: { job: "Director" },
+            include: { person: { select: { name: true } } },
+            take: 2,
+          },
+          studios: {
+            include: { studio: { select: { name: true } } },
+            take: 2,
+          },
+          ratings: {
+            where: { userId: { in: profile.householdUserIds } },
+            select: {
+              userId: true,
+              rating: true,
+              notHeardOf: true,
+              hasSeen: true,
+            },
+          },
+          radarrSync: true,
+          plexAvailability: true,
+        },
+        orderBy: [
+          { releaseDate: "asc" },
+          { year: "asc" },
+          { popularity: "desc" },
+          { updatedAt: "desc" },
         ],
-        ...(excludeRadarr ? { radarrSync: { is: null } } : {}),
-      },
-      include: {
-        genres: {
-          select: {
-            genreId: true,
-            genre: { select: { name: true } },
-          },
-        },
-        cast: {
-          include: { person: { select: { name: true } } },
-          orderBy: { castOrder: "asc" },
-          take: 3,
-        },
-        crew: {
-          where: { job: "Director" },
-          include: { person: { select: { name: true } } },
-          take: 2,
-        },
-        studios: {
-          include: { studio: { select: { name: true } } },
-          take: 2,
-        },
-        ratings: {
-          where: { userId: { in: profile.householdUserIds } },
-          select: {
-            userId: true,
-            rating: true,
-            notHeardOf: true,
-            hasSeen: true,
-          },
-        },
-        radarrSync: true,
-        plexAvailability: true,
-      },
-      orderBy: [
-        { releaseDate: "asc" },
-        { year: "asc" },
-        { popularity: "desc" },
-        { updatedAt: "desc" },
-      ],
-      take: Math.max(limit * 6, 80),
-    });
+        take: Math.max(limit * 6, 80),
+      });
+
+    let candidateMovies = await fetchCandidateMovies();
+
+    // If the local upcoming pool is sparse, synchronously expand once so this request can recover.
+    if (candidateMovies.length < Math.min(limit, 5)) {
+      try {
+        await expandMoviePool();
+      } catch (error) {
+        console.error("[Upcoming] Synchronous pool expansion failed:", error);
+      }
+      candidateMovies = await fetchCandidateMovies();
+    }
 
     const candidateMovieIds = candidateMovies.map((movie) => movie.id);
     const mfPredictions =
@@ -223,6 +286,12 @@ export async function GET(req: NextRequest) {
           userRating &&
           (userRating.rating !== null || userRating.notHeardOf)
         ) {
+          return null;
+        }
+
+        const anticipatedListCount = getAnticipatedListCount(movie, anticipatedMaps);
+
+        if (anticipatedListCount <= minUpcomingListCount) {
           return null;
         }
 
@@ -386,7 +455,8 @@ export async function GET(req: NextRequest) {
           imdbRating: movie.imdbRating,
           rottenTomatoesAudience: movie.rottenTomatoesAudience,
           releaseDate: movie.releaseDate?.toISOString() || null,
-          listCount: Math.max(0, Math.round(movie.popularity ?? 0)),
+          listCount: anticipatedListCount,
+          genres: movie.genres.map((g) => g.genre.name).filter(Boolean).slice(0, 3),
           actors: mergeUnique(movie.cast.map((c) => c.person.name).filter(Boolean), [], 3),
           directors: mergeUnique(movie.crew.map((c) => c.person.name).filter(Boolean), [], 2),
           studios: mergeUnique(movie.studios.map((s) => s.studio.name).filter(Boolean), [], 2),
@@ -421,6 +491,7 @@ export async function GET(req: NextRequest) {
       rottenTomatoesAudience: movie.rottenTomatoesAudience,
       releaseDate: movie.releaseDate,
       listCount: movie.listCount,
+      genres: movie.genres,
       actors: movie.actors,
       directors: movie.directors,
       studios: movie.studios,
@@ -429,6 +500,11 @@ export async function GET(req: NextRequest) {
     }));
 
     maybeExpandPoolForUser(userId);
+    if (finalResults.length < limit) {
+      expandMoviePool().catch((error) => {
+        console.error("[Upcoming] Background pool expansion failed:", error);
+      });
+    }
 
     return NextResponse.json(finalResults);
   } catch (error) {
@@ -476,3 +552,15 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+

@@ -20,8 +20,8 @@ const COLD_START_THRESHOLD = 10; // Minimum ratings before personalized recommen
 const DIVERSITY_INJECTION_RATE = 0.15; // 15% of recommendations from diverse sources
 
 // Recognition thresholds - movies need enough ratings to be "known"
-const MIN_VOTE_COUNT = 500; // Minimum votes on TMDB to be considered recognizable
-const MIN_VOTE_COUNT_RECENT = 100; // Lower threshold for movies from last 2 years
+const DEFAULT_MIN_VOTE_COUNT = 500; // Minimum votes on TMDB to be considered recognizable
+const MIN_VOTE_COUNT_RECENT_FLOOR = 100; // Lower bound for recent releases
 const HIGH_IMDB_THRESHOLD = 7.0; // Well-rated mainstream movies
 
 function parseLimit(value: string | null): number {
@@ -115,10 +115,21 @@ export async function GET(req: NextRequest) {
   const userId = session.user.id;
 
   const limit = parseLimit(req.nextUrl.searchParams.get("limit"));
-  const profile = await buildDiscoveryPreferenceProfile(userId);
-  const algorithmSettings = await getAlgorithmSettings();
+  const [profile, algorithmSettings, userSettings] = await Promise.all([
+    buildDiscoveryPreferenceProfile(userId),
+    getAlgorithmSettings(),
+    prisma.userSettings.findUnique({
+      where: { userId },
+      select: { minVoteCount: true },
+    }),
+  ]);
   const tuning = algorithmSettings.movieDiscovery;
   const indieDarlingsMode = profile.discoverySourcePref === "indie_darlings";
+  const minVoteCount = userSettings?.minVoteCount ?? DEFAULT_MIN_VOTE_COUNT;
+  const minVoteCountRecent = Math.max(
+    MIN_VOTE_COUNT_RECENT_FLOOR,
+    Math.floor(minVoteCount * 0.2)
+  );
 
   // Detect cold start users for special handling
   const userRatingCount = profile.userRatedMovieIds.size;
@@ -159,12 +170,12 @@ export async function GET(req: NextRequest) {
         {
           OR: [
             // Well-known movies: 1000+ votes on TMDB
-            { voteCount: { gte: MIN_VOTE_COUNT } },
+            { voteCount: { gte: minVoteCount } },
             // Recent releases (last 2 years): lower threshold since they're still building audience
             {
               AND: [
                 { year: { gte: currentYear - 1 } },
-                { voteCount: { gte: MIN_VOTE_COUNT_RECENT } },
+                { voteCount: { gte: minVoteCountRecent } },
               ],
             },
             // Fallback: high IMDB rating suggests mainstream recognition
@@ -535,3 +546,4 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(finalResults);
 }
+

@@ -20,6 +20,7 @@ interface UpcomingMovie {
   rottenTomatoesAudience: number | null;
   releaseDate: string | null;
   listCount: number;
+  genres: string[];
   actors: string[];
   directors: string[];
   studios: string[];
@@ -492,6 +493,8 @@ export default function UpcomingMoviesPage() {
               tmdbRating: currentMovie.tmdbRating,
               imdbRating: currentMovie.imdbRating,
               rottenTomatoesAudience: currentMovie.rottenTomatoesAudience,
+              genres: currentMovie.genres,
+              anticipatedListCount: currentMovie.listCount,
               directors: currentMovie.directors,
               actors: currentMovie.actors,
               studios: currentMovie.studios,
@@ -542,5 +545,6 @@ export default function UpcomingMoviesPage() {
     </div>
   );
 }
+
 
 

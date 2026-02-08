@@ -553,3 +553,33 @@ Core entities in `prisma/schema.prisma`:
     - New `dedupePeopleList()` guard used on discover responses, discover load, search results, and replacement append.
     - Prevents duplicate identities (same ID or normalized name) from re-entering the queue.
   - Learned behavior edge case: duplicate `Person` rows (or name variants) can still surface as repeated cards unless dedupe is applied by normalized display name, not only ID.
+- 2026-02-08 (Upcoming empty-state data expansion fix):
+  - Relaxed upcoming candidate fallback filter in `/api/movies/upcoming`: when `releaseDate` is missing, movies with `year >= currentYear` are now treated as valid upcoming candidates (previously required `year > currentYear`).
+  - Added dedicated background expansion trigger for upcoming when returned results are below requested limit:
+    - Route now calls `expandMoviePool()` asynchronously (non-blocking) in addition to the existing `maybeExpandPoolForUser()` call.
+    - This avoids starvation when released-movie pool is healthy (so `maybeExpandPoolForUser` would not expand), but upcoming pool is empty.
+  - Learned architecture edge case: tying upcoming replenishment strictly to released-movie pool thresholds can leave upcoming permanently empty despite active usage.
+- 2026-02-08 (Upcoming high-list threshold filter):
+  - Updated `/api/movies/upcoming` to hard-filter candidates to only those with `listCount > 250` before scoring/ranking.
+  - Upcoming route continues to use discovery-style ML + algorithm ranking (preference profile, algorithm tuning, and matrix-factorization prediction blend) on the filtered pool.
+  - Implementation note: current `listCount` in this local-first upcoming route is derived from local popularity (`Math.round(popularity)`) as a proxy for anticipated-list scale.
+  - Learned product preference: upcoming feed should prioritize broadly anticipated titles first, then personalize with the recommendation model.
+- 2026-02-08 (User-configurable vote/list thresholds + Trakt anticipated gating):
+  - Added per-user Settings controls for filtering strictness:
+    - `minVoteCount` (slider) for recognition filtering in movie discovery.
+    - `minUpcomingListCount` (slider) for upcoming-feed anticipated-list threshold.
+  - Extended `UserSettings` model with:
+    - `minVoteCount Int @default(500)`
+    - `minUpcomingListCount Int @default(250)`
+  - Updated `/api/settings` GET/POST flow to persist and validate these fields.
+  - Updated Settings UI (`/settings`) with sliders and save payload wiring for both thresholds.
+  - Updated movie discovery API (`/api/movies/discover`) to use user-level `minVoteCount` (and a derived recent-release threshold floor) instead of fixed constants.
+  - Updated upcoming API (`/api/movies/upcoming`) to use real Trakt anticipated `list_count` matching by IMDB/TMDB/slug IDs, then hard-filter by user `minUpcomingListCount` before ML+algorithm ranking.
+  - Learned product preference: users want direct control over strictness of catalog quality/popularity gates rather than only global admin tuning.
+- 2026-02-08 (Upcoming thresholds + pool resilience):
+  - Added user-configurable discovery thresholds in `UserSettings`: `minVoteCount` and `minUpcomingListCount` with API validation and Settings UI sliders.
+  - `/api/movies/discover` now uses per-user `minVoteCount` (with a recent-release floor) instead of a hardcoded threshold.
+  - `/api/movies/upcoming` now enforces per-user minimum Trakt anticipated list count (`list_count`) and keeps ML + heuristic ranking active after filtering.
+  - Upcoming route now attempts a synchronous one-shot pool expansion when local upcoming candidates are sparse, reducing empty-state responses.
+  - Strengthened `expandMoviePool()` to ingest anticipated movies even when OMDB is unavailable by falling back to TMDB (including poster/release/rating/popularity fields), and to dedupe/check existence across imdb/tmdb/trakt IDs.
+  - User workflow preference reaffirmed: upcoming feed should stay non-empty and refresh in the background like the movie-rating queue, while still honoring local fast-path behavior and strict anticipated-list quality gates.

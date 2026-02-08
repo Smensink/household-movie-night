@@ -17,6 +17,8 @@ interface Integration {
 interface UserSettingsData {
   explorationFactor: number;
   discoverySourcePref: string;
+  minVoteCount: number;
+  minUpcomingListCount: number;
   isAdmin: boolean;
 }
 
@@ -144,6 +146,8 @@ export default function SettingsPage() {
   const [userSettings, setUserSettings] = useState<UserSettingsData>({
     explorationFactor: 0.5,
     discoverySourcePref: "balanced",
+    minVoteCount: 500,
+    minUpcomingListCount: 250,
     isAdmin: false,
   });
   const [settingsSaved, setSettingsSaved] = useState(false);
@@ -243,6 +247,8 @@ export default function SettingsPage() {
       body: JSON.stringify({
         explorationFactor: userSettings.explorationFactor,
         discoverySourcePref: userSettings.discoverySourcePref,
+        minVoteCount: userSettings.minVoteCount,
+        minUpcomingListCount: userSettings.minUpcomingListCount,
       }),
     });
     setSettingsSaved(true);
@@ -539,6 +545,57 @@ export default function SettingsPage() {
                 {option.label}
               </button>
             ))}
+          </div>
+        </div>
+
+
+        <div className="space-y-4">
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-muted">Minimum movie votes</span>
+              <span className="text-xs font-medium text-accent">{userSettings.minVoteCount}</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="5000"
+              step="25"
+              value={userSettings.minVoteCount}
+              onChange={(e) =>
+                setUserSettings((prev) => ({
+                  ...prev,
+                  minVoteCount: parseInt(e.target.value, 10),
+                }))
+              }
+              className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
+            />
+            <p className="text-[11px] text-muted mt-1">
+              Filters very low-recognition movies out of discovery and recommendation feeds.
+            </p>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-muted">Minimum anticipated lists</span>
+              <span className="text-xs font-medium text-accent">{userSettings.minUpcomingListCount}</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="5000"
+              step="25"
+              value={userSettings.minUpcomingListCount}
+              onChange={(e) =>
+                setUserSettings((prev) => ({
+                  ...prev,
+                  minUpcomingListCount: parseInt(e.target.value, 10),
+                }))
+              }
+              className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
+            />
+            <p className="text-[11px] text-muted mt-1">
+              Upcoming feed requires movies to appear on more than this many Trakt anticipated lists.
+            </p>
           </div>
         </div>
 
@@ -1145,3 +1202,5 @@ export default function SettingsPage() {
     </div>
   );
 }
+
+

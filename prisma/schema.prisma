@@ -370,6 +370,8 @@ model UserSettings {
   userId               String @unique
   explorationFactor    Float  @default(0.5) // 0 = deep dive into known preferences, 1 = max exploration of new content
   discoverySourcePref  String @default("balanced") // "trending" | "popular" | "top_rated" | "new_releases" | "balanced"
+  minVoteCount         Int    @default(500)
+  minUpcomingListCount Int    @default(250)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
@@ -442,3 +444,6 @@ model ActivityLog {
 
   @@index([createdAt])
 }
+
+
+
