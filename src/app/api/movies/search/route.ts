@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { searchOMDB, getOMDBMovie } from "@/lib/api/omdb";
+import { searchOMDB, getOMDBMovie, extractRatingsFromOMDB } from "@/lib/api/omdb";
 import { searchTraktMovies } from "@/lib/api/trakt";
 import { prisma } from "@/lib/prisma";
 import {
@@ -101,6 +101,14 @@ export async function GET(req: NextRequest) {
     const persisted = await prisma.movie.upsert({
       where: { imdbId: movie.imdbId },
       create: {
+        ...(() => {
+          const ratings = movie.details ? extractRatingsFromOMDB(movie.details) : null;
+          return {
+            imdbRating: ratings?.imdbRating ?? null,
+            rottenTomatoesAudience: ratings?.rottenTomatoesAudience ?? null,
+            imdbVotes: ratings?.imdbVotes ?? null,
+          };
+        })(),
         imdbId: movie.imdbId,
         tmdbId: movie.tmdbId ?? null,
         traktSlug: movie.traktSlug ?? null,
@@ -111,6 +119,21 @@ export async function GET(req: NextRequest) {
         runtime: movie.runtime,
       },
       update: {
+        ...(() => {
+          const ratings = movie.details ? extractRatingsFromOMDB(movie.details) : null;
+          return {
+            ...(ratings?.imdbRating !== null && ratings?.imdbRating !== undefined
+              ? { imdbRating: ratings.imdbRating }
+              : {}),
+            ...(ratings?.rottenTomatoesAudience !== null &&
+            ratings?.rottenTomatoesAudience !== undefined
+              ? { rottenTomatoesAudience: ratings.rottenTomatoesAudience }
+              : {}),
+            ...(ratings?.imdbVotes !== null && ratings?.imdbVotes !== undefined
+              ? { imdbVotes: ratings.imdbVotes }
+              : {}),
+          };
+        })(),
         title: movie.title,
         ...(movie.tmdbId !== undefined && { tmdbId: movie.tmdbId }),
         ...(movie.traktSlug !== undefined && { traktSlug: movie.traktSlug }),
@@ -168,6 +191,9 @@ export async function GET(req: NextRequest) {
       posterUrl: persisted.posterUrl,
       overview: persisted.overview,
       era: persisted.era,
+      tmdbRating: persisted.voteAverage,
+      imdbRating: persisted.imdbRating,
+      rottenTomatoesAudience: persisted.rottenTomatoesAudience,
       directors: metadata.directors,
       actors: metadata.actors,
       studios: metadata.studios,

@@ -31,6 +31,8 @@ interface RadarrMovie {
   genres?: string[];
 }
 
+const MIN_RADARR_AVG_RATING = 3.5;
+
 async function getRadarrConfig(): Promise<RadarrConfig | null> {
   const config = await prisma.integrationConfig.findUnique({
     where: { service: "radarr" },
@@ -411,7 +413,36 @@ export async function getTopRatedMoviesForRadarr(limit = 10): Promise<{
   tmdbId: string;
   avgRating: number;
   ratingCount: number;
+  householdId: string;
+  householdSize: number;
 }[]> {
+  const [memberships, households] = await Promise.all([
+    prisma.householdMember.findMany({
+      select: {
+        userId: true,
+        householdId: true,
+      },
+    }),
+    prisma.household.findMany({
+      select: {
+        id: true,
+        _count: { select: { members: true } },
+      },
+    }),
+  ]);
+
+  const userHouseholds = new Map<string, string[]>();
+  for (const membership of memberships) {
+    const existing = userHouseholds.get(membership.userId) ?? [];
+    existing.push(membership.householdId);
+    userHouseholds.set(membership.userId, existing);
+  }
+
+  const householdSizeById = new Map<string, number>();
+  for (const household of households) {
+    householdSizeById.set(household.id, household._count.members);
+  }
+
   // Get all movies with ratings, not yet in Radarr
   const movies = await prisma.movie.findMany({
     where: {
@@ -424,28 +455,66 @@ export async function getTopRatedMoviesForRadarr(limit = 10): Promise<{
           rating: { not: null },
           hasSeen: false, // Only want-to-watch ratings
         },
-        select: { rating: true },
+        select: { userId: true, rating: true },
       },
     },
   });
 
-  // Calculate average rating for each movie
+  // Calculate average rating for each movie, but only for households where
+  // more than half the members have voted on the movie.
   const moviesWithAvg = movies
     .map((movie) => {
-      const ratings = movie.ratings
-        .filter((r) => r.rating !== null)
-        .map((r) => r.rating as number);
+      const voteSummaryByHousehold = new Map<string, { sum: number; count: number }>();
 
-      if (ratings.length === 0) return null;
+      for (const rating of movie.ratings) {
+        if (rating.rating === null) continue;
+        const householdIds = userHouseholds.get(rating.userId) ?? [];
+        for (const householdId of householdIds) {
+          const summary = voteSummaryByHousehold.get(householdId) ?? { sum: 0, count: 0 };
+          summary.sum += rating.rating;
+          summary.count += 1;
+          voteSummaryByHousehold.set(householdId, summary);
+        }
+      }
 
-      const avgRating = ratings.reduce((sum, r) => sum + r, 0) / ratings.length;
+      let best: {
+        householdId: string;
+        householdSize: number;
+        ratingCount: number;
+        avgRating: number;
+      } | null = null;
+
+      for (const [householdId, summary] of voteSummaryByHousehold.entries()) {
+        const householdSize = householdSizeById.get(householdId) ?? 0;
+        if (householdSize <= 0) continue;
+        if (summary.count <= householdSize / 2) continue;
+
+        const avgRating = summary.sum / summary.count;
+        if (
+          !best ||
+          avgRating > best.avgRating ||
+          (avgRating === best.avgRating && summary.count > best.ratingCount)
+        ) {
+          best = {
+            householdId,
+            householdSize,
+            ratingCount: summary.count,
+            avgRating,
+          };
+        }
+      }
+
+      if (!best) return null;
+      if (best.avgRating < MIN_RADARR_AVG_RATING) return null;
 
       return {
         id: movie.id,
         title: movie.title,
         tmdbId: movie.tmdbId as string,
-        avgRating,
-        ratingCount: ratings.length,
+        avgRating: best.avgRating,
+        ratingCount: best.ratingCount,
+        householdId: best.householdId,
+        householdSize: best.householdSize,
       };
     })
     .filter((m): m is NonNullable<typeof m> => m !== null)

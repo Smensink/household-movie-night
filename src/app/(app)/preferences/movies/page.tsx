@@ -16,6 +16,7 @@ interface Movie {
   overview?: string | null;
   era?: string | null;
   imdbId?: string | null;
+  tmdbRating?: number | null;
   imdbRating?: number | null;
   rottenTomatoesAudience?: number | null;
   genres?: string[];
@@ -111,6 +112,7 @@ export default function RateMoviesPage() {
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const [showSearch, setShowSearch] = useState(false);
   const [showRatedMovies, setShowRatedMovies] = useState(false);
+  const [ratedMoviesSearch, setRatedMoviesSearch] = useState("");
   const [ratedMovies, setRatedMovies] = useState<RatedMovieEntry[]>([]);
   const [updatingRatedMovieId, setUpdatingRatedMovieId] = useState<string | null>(null);
 
@@ -529,6 +531,13 @@ export default function RateMoviesPage() {
   }
 
   const currentRating = currentMovie ? ratings.get(currentMovie.id) : null;
+  const ratedMoviesSearchTerm = ratedMoviesSearch.trim().toLowerCase();
+  const filteredRatedMovies = ratedMovies.filter((entry) => {
+    if (!ratedMoviesSearchTerm) return true;
+    const title = entry.movie.title.toLowerCase();
+    const year = entry.movie.year ? String(entry.movie.year) : "";
+    return title.includes(ratedMoviesSearchTerm) || year.includes(ratedMoviesSearchTerm);
+  });
 
   return (
     <div className="space-y-3">
@@ -650,11 +659,19 @@ export default function RateMoviesPage() {
         </button>
 
         {showRatedMovies && (
-          <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+          <div className="space-y-2">
+            <Input
+              placeholder="Search rated movies by title or year..."
+              value={ratedMoviesSearch}
+              onChange={(e) => setRatedMoviesSearch(e.target.value)}
+            />
+            <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
             {ratedMovies.length === 0 ? (
               <p className="text-xs text-muted py-2">No rated movies yet.</p>
+            ) : filteredRatedMovies.length === 0 ? (
+              <p className="text-xs text-muted py-2">No rated movies match your search.</p>
             ) : (
-              ratedMovies.map((entry) => (
+              filteredRatedMovies.map((entry) => (
                 <div
                   key={entry.id}
                   className="bg-card-hover border border-border rounded-lg p-2.5 space-y-2"
@@ -729,6 +746,7 @@ export default function RateMoviesPage() {
                 </div>
               ))
             )}
+            </div>
           </div>
         )}
       </div>

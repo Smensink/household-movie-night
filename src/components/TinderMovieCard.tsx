@@ -15,6 +15,7 @@ interface TinderMovieCardProps {
     imdbId?: string | null;
     imdbRating?: number | null;
     rottenTomatoesAudience?: number | null;
+    tmdbRating?: number | null;
     genres?: string[];
     directors?: string[];
     actors?: string[];
@@ -136,24 +137,34 @@ function TinderMovieCardInner({
       </div>
 
       {/* Ratings badges - below top buttons */}
-      {(movie.imdbRating || movie.rottenTomatoesAudience) && (
+      {(movie.imdbRating !== null && movie.imdbRating !== undefined) ||
+      (movie.rottenTomatoesAudience !== null &&
+        movie.rottenTomatoesAudience !== undefined) ||
+      (movie.tmdbRating !== null && movie.tmdbRating !== undefined) ? (
         <div className="absolute top-16 right-4 flex flex-col gap-1.5">
-          {movie.imdbRating && (
+          {movie.imdbRating !== null && movie.imdbRating !== undefined ? (
             <div className="bg-[#f5c518]/90 backdrop-blur-sm text-black text-xs font-bold px-2 py-1 rounded-lg flex items-center gap-1">
               <span>⭐</span>
               <span>{movie.imdbRating.toFixed(1)}</span>
             </div>
-          )}
-          {movie.rottenTomatoesAudience && (
+          ) : null}
+          {movie.rottenTomatoesAudience !== null &&
+          movie.rottenTomatoesAudience !== undefined ? (
             <div className={`backdrop-blur-sm text-white text-xs font-bold px-2 py-1 rounded-lg flex items-center gap-1 ${
               movie.rottenTomatoesAudience >= 60 ? "bg-red-500/90" : "bg-green-600/90"
             }`}>
               <span>{movie.rottenTomatoesAudience >= 60 ? "🍅" : "🥬"}</span>
               <span>{movie.rottenTomatoesAudience}%</span>
             </div>
-          )}
+          ) : null}
+          {movie.tmdbRating !== null && movie.tmdbRating !== undefined ? (
+            <div className="bg-sky-500/90 backdrop-blur-sm text-white text-xs font-bold px-2 py-1 rounded-lg flex items-center gap-1">
+              <span>TMDB</span>
+              <span>{movie.tmdbRating.toFixed(1)}</span>
+            </div>
+          ) : null}
         </div>
-      )}
+      ) : null}
 
       {/* Main content at bottom */}
       <div className="absolute bottom-0 left-0 right-0 p-5 space-y-4">
