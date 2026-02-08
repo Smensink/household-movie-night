@@ -538,3 +538,9 @@ Core entities in `prisma/schema.prisma`:
   - Added release-proximity scoring (`releaseSoonBoost`) so near-term releases are prioritized within the ML + heuristic ranking.
   - Preserved local-access performance constraint: request path remains DB-only for upcoming candidates; external catalog expansion continues as non-blocking background behavior.
   - Learned user workflow preference: upcoming should not only load as fast as movie ratings, it should also honor personalized ranking quality from the same algorithm/ML system.
+
+- 2026-02-08 (Upcoming empty-queue auto-refill):
+  - Fixed /preferences/upcoming empty-state behavior so background prefetch can recover without manual button presses.
+  - Added auto-promotion: when currentMovie is null and queue has items, the next queued movie is promoted automatically.
+  - Added empty-refill trigger: when both current card and queue are empty, page proactively calls preloadMovies() in background.
+  - Learned behavior edge case: queue prefetch alone was insufficient because fetched items could remain stranded in queue while UI stayed on No more upcoming movies to rate!.

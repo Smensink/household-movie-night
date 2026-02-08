@@ -202,6 +202,25 @@ export default function UpcomingMoviesPage() {
   const preloadMoviesRef = useRef(preloadMovies);
   preloadMoviesRef.current = preloadMovies;
 
+  // If queue has items but no current card, promote next queued movie.
+  useEffect(() => {
+    if (loading) return;
+    if (currentMovie) return;
+    if (queueRef.current.length === 0) return;
+
+    const [next, ...rest] = queueRef.current;
+    setCurrentMovie(next);
+    setQueueAndRef(rest);
+  }, [currentMovie, loading, setQueueAndRef]);
+
+  // When user runs out, keep trying to refill in background.
+  useEffect(() => {
+    if (loading) return;
+    if (currentMovie) return;
+    if (queueRef.current.length > 0) return;
+
+    void preloadMovies();
+  }, [currentMovie, loading, preloadMovies]);
   useEffect(() => {
     if (loading) return;
 
@@ -523,4 +542,5 @@ export default function UpcomingMoviesPage() {
     </div>
   );
 }
+
 
