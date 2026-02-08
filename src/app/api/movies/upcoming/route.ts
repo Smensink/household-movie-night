@@ -19,7 +19,8 @@ const DEFAULT_LIMIT = 15;
 const MAX_LIMIT = 30;
 const COLD_START_THRESHOLD = 10;
 const MIN_ANTICIPATED_LISTS = 250;
-const ANTICIPATED_FETCH_LIMIT = 300;
+const ANTICIPATED_PAGE_SIZE = 100;
+const ANTICIPATED_FETCH_PAGES = 8;
 
 interface UpcomingMovieResponse {
   id: string;
@@ -181,7 +182,13 @@ export async function GET(req: NextRequest) {
     const now = new Date();
     const currentYear = now.getFullYear();
 
-    const anticipated = await getAnticipatedMovies(ANTICIPATED_FETCH_LIMIT);
+    const anticipatedPages = await Promise.all(
+      Array.from({ length: ANTICIPATED_FETCH_PAGES }, (_, index) =>
+        getAnticipatedMovies(ANTICIPATED_PAGE_SIZE, index + 1)
+      )
+    );
+    const anticipated = anticipatedPages.flat();
+
     const anticipatedMaps = {
       imdb: new Map<string, number>(),
       tmdb: new Map<string, number>(),
@@ -193,25 +200,47 @@ export async function GET(req: NextRequest) {
       const ids = item?.movie?.ids;
 
       if (typeof ids?.imdb === "string" && ids.imdb) {
-        anticipatedMaps.imdb.set(ids.imdb, listCount);
+        anticipatedMaps.imdb.set(
+          ids.imdb,
+          Math.max(listCount, anticipatedMaps.imdb.get(ids.imdb) ?? 0)
+        );
       }
       if (typeof ids?.tmdb === "number") {
-        anticipatedMaps.tmdb.set(String(ids.tmdb), listCount);
+        const tmdbId = String(ids.tmdb);
+        anticipatedMaps.tmdb.set(
+          tmdbId,
+          Math.max(listCount, anticipatedMaps.tmdb.get(tmdbId) ?? 0)
+        );
       }
       if (typeof ids?.slug === "string" && ids.slug) {
-        anticipatedMaps.slug.set(ids.slug, listCount);
+        anticipatedMaps.slug.set(
+          ids.slug,
+          Math.max(listCount, anticipatedMaps.slug.get(ids.slug) ?? 0)
+        );
       }
     }
+
+    const anticipatedImdbIds = Array.from(anticipatedMaps.imdb.keys());
+    const anticipatedTmdbIds = Array.from(anticipatedMaps.tmdb.keys());
+    const anticipatedSlugs = Array.from(anticipatedMaps.slug.keys());
+
+    const anticipatedIdFilter = {
+      OR: [
+        ...(anticipatedImdbIds.length > 0 ? [{ imdbId: { in: anticipatedImdbIds } }] : []),
+        ...(anticipatedTmdbIds.length > 0 ? [{ tmdbId: { in: anticipatedTmdbIds } }] : []),
+        ...(anticipatedSlugs.length > 0 ? [{ traktSlug: { in: anticipatedSlugs } }] : []),
+      ],
+    };
 
     const fetchCandidateMovies = () =>
       prisma.movie.findMany({
         where: {
           id: { notIn: Array.from(excludedMovieIds) },
-          posterUrl: { not: null },
           OR: [
             { releaseDate: { gt: now } },
             { releaseDate: null, year: { gte: currentYear } },
           ],
+          ...(anticipatedIdFilter.OR.length > 0 ? anticipatedIdFilter : {}),
           ...(excludeRadarr ? { radarrSync: { is: null } } : {}),
         },
         include: {
@@ -253,7 +282,7 @@ export async function GET(req: NextRequest) {
           { popularity: "desc" },
           { updatedAt: "desc" },
         ],
-        take: Math.max(limit * 6, 80),
+        take: Math.max(limit * 20, 400),
       });
 
     let candidateMovies = await fetchCandidateMovies();
@@ -552,6 +581,10 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+
+
+
 
 
 

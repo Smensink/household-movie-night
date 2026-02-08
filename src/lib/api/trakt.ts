@@ -184,9 +184,11 @@ export async function searchTraktMovies(
 }
 
 export async function getAnticipatedMovies(
-  limit = 20
+  limit = 20,
+  page = 1
 ): Promise<{ list_count: number; movie: TraktMovie }[]> {
-  const cacheKey = String(limit);
+  const normalizedPage = Math.max(1, page);
+  const cacheKey = `${limit}:${normalizedPage}`;
   const cached = getCached(anticipatedCache, cacheKey);
   if (cached) return cached;
 
@@ -194,7 +196,7 @@ export async function getAnticipatedMovies(
   if (!apiKey) return [];
 
   const res = await fetch(
-    `${TRAKT_BASE}/movies/anticipated?limit=${limit}`,
+    `${TRAKT_BASE}/movies/anticipated?limit=${limit}&page=${normalizedPage}`,
     { headers: getHeaders(apiKey), cache: "no-store" }
   );
   if (!res.ok) return [];
@@ -244,3 +246,4 @@ export async function getTraktMovieRatings(
     return null;
   }
 }
+

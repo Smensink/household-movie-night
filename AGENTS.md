@@ -589,3 +589,8 @@ Core entities in `prisma/schema.prisma`:
   - Added asynchronous poster prefetching for top-ranked missing-poster candidates (50 ahead, batched with concurrency 5) using TMDB poster persistence.
   - Discover responses now prioritize poster-ready movies first, while still allowing posterless fallback items to avoid empty queues.
   - User workflow preference captured: maximize queue continuity and local-first recommendation quality, while deferring media asset fetches until movies are near-display candidates.
+- 2026-02-08 (Upcoming replenishment robustness):
+  - Root-caused empty upcoming queue: active user had already rated most local future titles meeting the >250 anticipated-list threshold.
+  - Expanded Trakt anticipated ingestion in runtime ranking from single-page fetch to paginated fetch (`limit=100`, multiple pages), and cache keys now include page.
+  - Upcoming candidate query now anchors to the larger anticipated ID universe (imdb/tmdb/slug match) and uses a larger local candidate window for ranking.
+  - This keeps strict anticipated-list gating while substantially reducing false empty-state outcomes for heavy raters.
