@@ -467,3 +467,25 @@ Core entities in `prisma/schema.prisma`:
     - `Not heard of` flag.
   - Ratings list syncs from `/api/ratings` after edits so changes are immediately reflected.
   - Learned user workflow preference: rating should be reversible/editable later from a centralized review list, not only during first-pass swipe/discover flow.
+- 2026-02-08 (Household rating count visibility):
+  - Added per-user movie rating counts to household payloads returned by `GET /api/household`.
+  - Dashboard household cards now display each member's movie rating count (e.g., `Name: 42 ratings`) for quick participation visibility.
+  - Learned user workflow preference: household collaboration screens should expose contribution progress (how many ratings each person has made), not just presence/member list.
+- 2026-02-08 (Discovery source: Indie Darlings):
+  - Added new discovery source preference value: `indie_darlings`.
+  - Settings UI now offers `Indie Darlings` in preferred discovery source options.
+  - Settings API validation (`/api/settings`) now accepts `indie_darlings`.
+  - Movie discovery scoring (`/api/movies/discover`) now applies an explicit source-signal model per source preference:
+    - `trending`, `popular`, `top_rated`, `new_releases`, `indie_darlings`, `balanced`.
+    - `indie_darlings` boosts high-quality lower-mainstream titles using rating quality + anti-mainstream weighting + vote confidence.
+  - Profile page label mapping includes `indie_darlings` for clear user-facing display.
+  - Learned behavior gap: source preference weight existed but source-specific signal was incomplete; adding explicit source signal makes the preference materially affect ranking.
+- 2026-02-08 (Indie Darlings hard filtering):
+  - Tightened movie discover candidate selection for `indie_darlings` in `/api/movies/discover` so it is not only a score preference.
+  - Added hard gating to exclude highly mainstream and very recent blockbuster-style candidates:
+    - Requires lower mainstream signals (`popularity <= 45` when available).
+    - Caps broad-audience volume (`voteCount <= 25,000` when available).
+    - Keeps quality floor (`imdbRating >= 6.8` or `voteAverage >= 6.8`).
+    - Excludes very recent releases (must be at least ~9 months old, or prior-year when only `year` exists).
+  - Indie mode query ordering now prefers higher-rated, lower-popularity candidates (`voteAverage desc`, `popularity asc`).
+  - Learned product preference: when a user picks `indie_darlings`, mainstream family tentpoles should be actively filtered out, not just down-ranked.

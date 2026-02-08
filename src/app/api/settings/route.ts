@@ -8,6 +8,7 @@ const ALLOWED_DISCOVERY_SOURCE_PREFS = new Set([
   "popular",
   "top_rated",
   "new_releases",
+  "indie_darlings",
   "balanced",
 ]);
 

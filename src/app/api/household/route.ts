@@ -14,7 +14,16 @@ export async function GET() {
       household: {
         include: {
           members: {
-            include: { user: { select: { id: true, name: true, avatarUrl: true } } },
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  avatarUrl: true,
+                  _count: { select: { movieRatings: true } },
+                },
+              },
+            },
           },
         },
       },
@@ -23,6 +32,15 @@ export async function GET() {
 
   return NextResponse.json(memberships.map((m) => ({
     ...m.household,
+    members: m.household.members.map((member) => ({
+      ...member,
+      user: {
+        id: member.user.id,
+        name: member.user.name,
+        avatarUrl: member.user.avatarUrl,
+        ratingCount: member.user._count.movieRatings,
+      },
+    })),
     role: m.role,
   })));
 }

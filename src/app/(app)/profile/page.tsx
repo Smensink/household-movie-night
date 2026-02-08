@@ -233,6 +233,9 @@ export default function ProfilePage() {
   const discoveryLabels: Record<string, string> = {
     popular: "Popular Movies",
     trending: "Trending Movies",
+    top_rated: "Top Rated Movies",
+    new_releases: "New Releases",
+    indie_darlings: "Indie Darlings",
     balanced: "Balanced Mix",
     hidden_gems: "Hidden Gems",
   };

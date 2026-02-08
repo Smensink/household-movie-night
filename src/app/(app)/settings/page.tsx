@@ -520,6 +520,7 @@ export default function SettingsPage() {
               { value: "popular", label: "Popular" },
               { value: "top_rated", label: "Top Rated" },
               { value: "new_releases", label: "New Releases" },
+              { value: "indie_darlings", label: "Indie Darlings" },
             ].map((option) => (
               <button
                 key={option.value}

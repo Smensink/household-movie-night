@@ -12,7 +12,14 @@ interface Household {
   name: string;
   inviteCode: string;
   role: string;
-  members: { user: { id: string; name: string; avatarUrl: string | null } }[];
+  members: {
+    user: {
+      id: string;
+      name: string;
+      avatarUrl: string | null;
+      ratingCount: number;
+    };
+  }[];
 }
 
 interface Session {
@@ -314,6 +321,17 @@ export default function DashboardPage() {
                   <span className="text-xs text-muted ml-1">
                     {h.members.length} member{h.members.length !== 1 ? "s" : ""}
                   </span>
+                </div>
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {h.members.map((m) => (
+                    <span
+                      key={`${h.id}-${m.user.id}-ratings`}
+                      className="text-[10px] bg-background px-2 py-0.5 rounded-full text-muted"
+                    >
+                      {m.user.name}: {m.user.ratingCount} rating
+                      {m.user.ratingCount !== 1 ? "s" : ""}
+                    </span>
+                  ))}
                 </div>
                 <div className="flex items-center gap-2">
                   <code className="text-[11px] bg-background px-2 py-1 rounded-lg text-muted font-mono flex-1 truncate">

@@ -61,6 +61,52 @@ function mergeUnique(values: string[], extras: string[], limit: number): string[
   return Array.from(new Set([...values, ...extras])).slice(0, limit);
 }
 
+function getReleaseYear(movie: { releaseDate: Date | null; year: number | null }, fallbackYear: number): number {
+  if (movie.releaseDate) return movie.releaseDate.getFullYear();
+  if (movie.year) return movie.year;
+  return fallbackYear;
+}
+
+function computeSourceSignal(
+  sourcePref: string,
+  metrics: {
+    mainstream: number;
+    recentness: number;
+    ratingQuality: number;
+    voteConfidence: number;
+  }
+): number {
+  const { mainstream, recentness, ratingQuality, voteConfidence } = metrics;
+  let score01 = 0.5;
+
+  switch (sourcePref) {
+    case "trending":
+      score01 = mainstream * 0.55 + recentness * 0.3 + ratingQuality * 0.15;
+      break;
+    case "popular":
+      score01 = mainstream * 0.7 + voteConfidence * 0.2 + ratingQuality * 0.1;
+      break;
+    case "top_rated":
+      score01 = ratingQuality * 0.7 + voteConfidence * 0.3;
+      break;
+    case "new_releases":
+      score01 = recentness * 0.75 + mainstream * 0.15 + ratingQuality * 0.1;
+      break;
+    case "indie_darlings":
+      score01 =
+        ratingQuality * 0.5 +
+        (1 - mainstream) * 0.4 +
+        voteConfidence * 0.1;
+      break;
+    case "balanced":
+    default:
+      score01 = 0.5;
+      break;
+  }
+
+  return score01 * 2 - 1; // normalize to -1..1
+}
+
 export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -72,6 +118,7 @@ export async function GET(req: NextRequest) {
   const profile = await buildDiscoveryPreferenceProfile(userId);
   const algorithmSettings = await getAlgorithmSettings();
   const tuning = algorithmSettings.movieDiscovery;
+  const indieDarlingsMode = profile.discoverySourcePref === "indie_darlings";
 
   // Detect cold start users for special handling
   const userRatingCount = profile.userRatedMovieIds.size;
@@ -94,6 +141,8 @@ export async function GET(req: NextRequest) {
   // Get movies the user hasn't rated, with posters, that have been released
   const currentDate = new Date();
   const currentYear = currentDate.getFullYear();
+  const indieRecencyCutoff = new Date(currentDate);
+  indieRecencyCutoff.setMonth(indieRecencyCutoff.getMonth() - 9);
 
   const candidateMovies = await prisma.movie.findMany({
     where: {
@@ -122,6 +171,30 @@ export async function GET(req: NextRequest) {
             { imdbRating: { gte: 7.0 } },
           ],
         },
+        ...(indieDarlingsMode
+          ? [
+              // Indie darlings should avoid highly mainstream and very recent studio blockbusters.
+              {
+                AND: [
+                  {
+                    OR: [{ popularity: { lte: 45 } }, { popularity: null }],
+                  },
+                  {
+                    OR: [{ voteCount: { lte: 25000 } }, { voteCount: null }],
+                  },
+                  {
+                    OR: [{ imdbRating: { gte: 6.8 } }, { voteAverage: { gte: 6.8 } }],
+                  },
+                  {
+                    OR: [
+                      { releaseDate: { lte: indieRecencyCutoff } },
+                      { releaseDate: null, year: { lte: currentYear - 1 } },
+                    ],
+                  },
+                ],
+              },
+            ]
+          : []),
       ],
     },
     include: {
@@ -168,11 +241,9 @@ export async function GET(req: NextRequest) {
       plexAvailability: true,
       radarrSync: true,
     },
-    orderBy: [
-      { popularity: "desc" },
-      { voteAverage: "desc" },
-      { updatedAt: "desc" },
-    ],
+    orderBy: indieDarlingsMode
+      ? [{ voteAverage: "desc" }, { popularity: "asc" }, { updatedAt: "desc" }]
+      : [{ popularity: "desc" }, { voteAverage: "desc" }, { updatedAt: "desc" }],
     take: Math.max(limit * 4, 60), // Get more than needed for scoring
   });
 
@@ -260,6 +331,19 @@ export async function GET(req: NextRequest) {
       const imdbRating = movie.imdbRating ?? 0;
       const tmdbRating = movie.voteAverage ?? 0;
       const bestRating = Math.max(imdbRating, tmdbRating);
+      const voteCount = movie.voteCount ?? 0;
+      const releaseYear = getReleaseYear(movie, currentYear - 10);
+      const recentness = clamp((releaseYear - (currentYear - 20)) / 20, 0, 1);
+      const mainstream = clamp((movie.popularity ?? 0) / 120, 0, 1);
+      const ratingQuality = clamp(bestRating / 10, 0, 1);
+      const voteConfidence = clamp(Math.log10(voteCount + 1) / 5, 0, 1);
+      const sourceSignal = computeSourceSignal(profile.discoverySourcePref, {
+        mainstream,
+        recentness,
+        ratingQuality,
+        voteConfidence,
+      });
+      const isIndieDarlings = profile.discoverySourcePref === "indie_darlings";
 
       // Movies with high ratings from major sources are more likely to be recognized
       // IMDB ratings especially indicate mainstream awareness
@@ -291,7 +375,8 @@ export async function GET(req: NextRequest) {
       const discoveryBase =
         discoveryWeightsTotal > 0
           ? (noveltySignal * adjustedNoveltyInfluence +
-              qualitySignal * adjustedQualityInfluence) /
+              qualitySignal * adjustedQualityInfluence +
+              sourceSignal * tuning.sourceInfluence) /
             discoveryWeightsTotal
           : (noveltySignal * 0.3 + qualitySignal * 0.7); // Default: quality-focused
       const discoverySignal = discoveryBase * 2 - 1 + unseenBonus;
@@ -333,6 +418,9 @@ export async function GET(req: NextRequest) {
       // At 0 exploration: full mainstream bonus (want familiar movies)
       // At 1 exploration: no mainstream bonus (want new discoveries)
       const scaledMainstreamBonus = mainstreamBonus * (1 - effectiveExplorationFactor);
+      const indieMainstreamPenalty = isIndieDarlings
+        ? mainstream * 0.9 + recentness * 0.2
+        : 0;
 
       const heuristicScore =
         preferenceSignal *
@@ -341,8 +429,9 @@ export async function GET(req: NextRequest) {
         discoverySignal *
           tuning.discoveryWeight *
           effectiveExplorationFactor +
-        scaledMainstreamBonus + // Boost well-known movies
+        (isIndieDarlings ? 0 : scaledMainstreamBonus) + // Never boost mainstream titles for indie mode
         availabilitySignal * tuning.availabilityBonus +
+        -indieMainstreamPenalty + // Strong penalty against blockbusters/new mainstream in indie mode
         dislikePenalty +
         genreExplorationBonus * effectiveExplorationFactor + // Only explore genres when exploring
         Math.random() * tuning.randomJitter;

@@ -66,6 +66,37 @@ function dedupeAndFilterMovies(movies: Movie[], excludeIds: Set<string>): Movie[
   return filtered;
 }
 
+function mergeRatedMoviesPreserveOrder(
+  existing: RatedMovieEntry[],
+  incoming: RatedMovieEntry[]
+): RatedMovieEntry[] {
+  if (existing.length === 0) return incoming;
+
+  const incomingByMovieId = new Map<string, RatedMovieEntry>();
+  for (const item of incoming) {
+    incomingByMovieId.set(item.movieId, item);
+  }
+
+  const merged: RatedMovieEntry[] = [];
+  for (const item of existing) {
+    const updated = incomingByMovieId.get(item.movieId);
+    if (updated) {
+      merged.push(updated);
+      incomingByMovieId.delete(item.movieId);
+    }
+  }
+
+  // New items not in current list get appended to avoid scroll jumps.
+  for (const item of incoming) {
+    if (incomingByMovieId.has(item.movieId)) {
+      merged.push(item);
+      incomingByMovieId.delete(item.movieId);
+    }
+  }
+
+  return merged;
+}
+
 export default function RateMoviesPage() {
   const { status } = useSession();
   const router = useRouter();
@@ -227,7 +258,10 @@ export default function RateMoviesPage() {
     ratingsRef.current = ratingMap;
     ratedMovieIdsRef.current = ratedIds;
     setRatings(ratingMap);
-    setRatedMovies(data as RatedMovieEntry[]);
+    const nextRatedMovies = data as RatedMovieEntry[];
+    setRatedMovies((prev) =>
+      mergeRatedMoviesPreserveOrder(prev, nextRatedMovies)
+    );
   }, []);
 
   useEffect(() => {
