@@ -583,3 +583,9 @@ Core entities in `prisma/schema.prisma`:
   - Upcoming route now attempts a synchronous one-shot pool expansion when local upcoming candidates are sparse, reducing empty-state responses.
   - Strengthened `expandMoviePool()` to ingest anticipated movies even when OMDB is unavailable by falling back to TMDB (including poster/release/rating/popularity fields), and to dedupe/check existence across imdb/tmdb/trakt IDs.
   - User workflow preference reaffirmed: upcoming feed should stay non-empty and refresh in the background like the movie-rating queue, while still honoring local fast-path behavior and strict anticipated-list quality gates.
+- 2026-02-08 (Discover queue scalability + poster strategy):
+  - Updated `/api/movies/discover` to rank from a larger local candidate pool (`max(limit*10, 250)`) so MF + heuristic scoring has broader coverage.
+  - Kept preference-based ranking unchanged (user + household affinities and MF blend), but removed hard dependency on posters at candidate selection time.
+  - Added asynchronous poster prefetching for top-ranked missing-poster candidates (50 ahead, batched with concurrency 5) using TMDB poster persistence.
+  - Discover responses now prioritize poster-ready movies first, while still allowing posterless fallback items to avoid empty queues.
+  - User workflow preference captured: maximize queue continuity and local-first recommendation quality, while deferring media asset fetches until movies are near-display candidates.

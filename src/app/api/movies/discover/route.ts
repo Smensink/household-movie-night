@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { getHighResPosterUrl } from "@/lib/api/omdb";
+import { fetchAndPersistMoviePoster } from "@/lib/api/tmdb";
 import { prisma } from "@/lib/prisma";
 import { extractMovieMetadataFromRelations } from "@/lib/movie-metadata";
 import {
@@ -23,6 +24,10 @@ const DIVERSITY_INJECTION_RATE = 0.15; // 15% of recommendations from diverse so
 const DEFAULT_MIN_VOTE_COUNT = 500; // Minimum votes on TMDB to be considered recognizable
 const MIN_VOTE_COUNT_RECENT_FLOOR = 100; // Lower bound for recent releases
 const HIGH_IMDB_THRESHOLD = 7.0; // Well-rated mainstream movies
+const MIN_CANDIDATE_POOL = 250;
+const CANDIDATE_POOL_MULTIPLIER = 10;
+const POSTER_PREFETCH_AHEAD = 50;
+const POSTER_PREFETCH_CONCURRENCY = 5;
 
 function parseLimit(value: string | null): number {
   if (!value) return DEFAULT_LIMIT;
@@ -107,6 +112,40 @@ function computeSourceSignal(
   return score01 * 2 - 1; // normalize to -1..1
 }
 
+function prefetchPostersInBackground(
+  movies: Array<{ id: string; imdbId: string | null; title: string; year: number | null; posterUrl: string | null }>
+): void {
+  const missingPosterMovies = movies
+    .filter((movie) => !movie.posterUrl)
+    .slice(0, POSTER_PREFETCH_AHEAD);
+
+  if (missingPosterMovies.length === 0) {
+    return;
+  }
+
+  (async () => {
+    for (let i = 0; i < missingPosterMovies.length; i += POSTER_PREFETCH_CONCURRENCY) {
+      const batch = missingPosterMovies.slice(i, i + POSTER_PREFETCH_CONCURRENCY);
+      await Promise.all(
+        batch.map(async (movie) => {
+          try {
+            await fetchAndPersistMoviePoster(
+              movie.id,
+              movie.imdbId,
+              movie.title,
+              movie.year
+            );
+          } catch {
+            // Ignore poster fetch failures; keep queue generation non-blocking.
+          }
+        })
+      );
+    }
+  })().catch(() => {
+    // Ignore background poster prefetch errors.
+  });
+}
+
 export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -149,7 +188,7 @@ export async function GET(req: NextRequest) {
   }
 
   // FAST PATH: Query local database directly
-  // Get movies the user hasn't rated, with posters, that have been released
+  // Get movies the user hasn't rated from local catalog metadata (poster optional)
   const currentDate = new Date();
   const currentYear = currentDate.getFullYear();
   const indieRecencyCutoff = new Date(currentDate);
@@ -158,7 +197,6 @@ export async function GET(req: NextRequest) {
   const candidateMovies = await prisma.movie.findMany({
     where: {
       id: { notIn: Array.from(excludedMovieIds) },
-      posterUrl: { not: null },
       // Only show released movies
       OR: [
         { releaseDate: { lte: currentDate } },
@@ -255,7 +293,7 @@ export async function GET(req: NextRequest) {
     orderBy: indieDarlingsMode
       ? [{ voteAverage: "desc" }, { popularity: "asc" }, { updatedAt: "desc" }]
       : [{ popularity: "desc" }, { voteAverage: "desc" }, { updatedAt: "desc" }],
-    take: Math.max(limit * 4, 60), // Get more than needed for scoring
+    take: Math.max(limit * CANDIDATE_POOL_MULTIPLIER, MIN_CANDIDATE_POOL), // Larger local pool for better MF + heuristic ranking
   });
 
   // Get MF predicted ratings for candidate movies (batch)
@@ -521,7 +559,15 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const finalResults = diverseResults
+  const prioritizedResults = [
+    ...diverseResults.filter((movie) => Boolean(movie.posterUrl)),
+    ...diverseResults.filter((movie) => !movie.posterUrl),
+  ];
+
+  // Pre-fetch posters for top-ranked missing-poster candidates so future queue items are ready.
+  prefetchPostersInBackground(prioritizedResults);
+
+  const finalResults = prioritizedResults
     .slice(0, limit)
     .map((movie) => ({
       id: movie.id,
@@ -546,4 +592,11 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(finalResults);
 }
+
+
+
+
+
+
+
 
