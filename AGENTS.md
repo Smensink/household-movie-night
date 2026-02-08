@@ -428,3 +428,8 @@ Core entities in `prisma/schema.prisma`:
     - Backup size increased from ~3MB to ~200-400MB due to embedded images.
     - Restored app is fully identical to backed-up state including all metadata, model weights, and images.
     - Training state reset to false on restore to allow retraining if needed.
+- 2026-02-08 (Restore entry-point clarity):
+  - Added a direct `Restore from Backup` action on the intro page (`/`) so fresh-install users can reach setup restore without guessing the route.
+  - Added a secondary `Restore from backup` link on the login page for faster recovery workflows.
+  - Learned behavior: restore flow exists at `/setup/restore`, but discoverability depended on users knowing the route manually.
+  - Learned user workflow preference: setup/restore actions should be visible from first-touch entry screens (intro/login), not hidden behind implicit routing knowledge.
