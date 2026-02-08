@@ -50,11 +50,19 @@ interface BackupData {
     title: string;
     year: number | null;
     posterUrl: string | null;
+    backdropUrl: string | null;
     overview: string | null;
     runtime: number | null;
-    era: string | null;
+    releaseDate: string | null;
+    certification: string | null;
+    popularity: number | null;
+    voteAverage: number | null;
+    voteCount: number | null;
     imdbRating: number | null;
+    imdbVotes: number | null;
     rottenTomatoesAudience: number | null;
+    letterboxdRating: number | null;
+    era: string | null;
   }[];
   movieGenres: {
     movieId: string;
@@ -153,6 +161,26 @@ interface BackupData {
     ratingCount: number;
     topGenreIds: string | null;
   }[];
+  // Availability data
+  radarrSyncs?: {
+    movieId: string;
+    radarrId: number | null;
+    monitored: boolean;
+    available: boolean;
+  }[];
+  plexAvailabilities?: {
+    movieId: string;
+    plexKey: string | null;
+    available: boolean;
+  }[];
+  // Activity log
+  activityLogs?: {
+    userId: string | null;
+    action: string;
+    entityType: string | null;
+    entityId: string | null;
+    createdAt: string;
+  }[];
 }
 
 export async function POST(req: NextRequest) {
@@ -195,6 +223,9 @@ export async function POST(req: NextRequest) {
     featureEmbeddings: 0,
     mfModelMetadata: 0,
     userFeatureCaches: 0,
+    radarrSyncs: 0,
+    plexAvailabilities: 0,
+    activityLogs: 0,
     skipped: 0,
   };
 
@@ -254,35 +285,31 @@ export async function POST(req: NextRequest) {
   // Import movies
   for (const movie of backup.movies || []) {
     try {
+      const movieData = {
+        imdbId: movie.imdbId,
+        tmdbId: movie.tmdbId,
+        traktSlug: movie.traktSlug,
+        title: movie.title,
+        year: movie.year,
+        posterUrl: movie.posterUrl,
+        backdropUrl: movie.backdropUrl,
+        overview: movie.overview,
+        runtime: movie.runtime,
+        releaseDate: movie.releaseDate ? new Date(movie.releaseDate) : null,
+        certification: movie.certification,
+        popularity: movie.popularity,
+        voteAverage: movie.voteAverage,
+        voteCount: movie.voteCount,
+        imdbRating: movie.imdbRating,
+        imdbVotes: movie.imdbVotes,
+        rottenTomatoesAudience: movie.rottenTomatoesAudience,
+        letterboxdRating: movie.letterboxdRating,
+        era: movie.era,
+      };
       await prisma.movie.upsert({
         where: { id: movie.id },
-        create: {
-          id: movie.id,
-          imdbId: movie.imdbId,
-          tmdbId: movie.tmdbId,
-          traktSlug: movie.traktSlug,
-          title: movie.title,
-          year: movie.year,
-          posterUrl: movie.posterUrl,
-          overview: movie.overview,
-          runtime: movie.runtime,
-          era: movie.era,
-          imdbRating: movie.imdbRating,
-          rottenTomatoesAudience: movie.rottenTomatoesAudience,
-        },
-        update: {
-          imdbId: movie.imdbId,
-          tmdbId: movie.tmdbId,
-          traktSlug: movie.traktSlug,
-          title: movie.title,
-          year: movie.year,
-          posterUrl: movie.posterUrl,
-          overview: movie.overview,
-          runtime: movie.runtime,
-          era: movie.era,
-          imdbRating: movie.imdbRating,
-          rottenTomatoesAudience: movie.rottenTomatoesAudience,
-        },
+        create: { id: movie.id, ...movieData },
+        update: movieData,
       });
       stats.movies++;
     } catch {
@@ -621,6 +648,69 @@ export async function POST(req: NextRequest) {
       } catch {
         stats.skipped++;
       }
+    }
+  }
+
+  // Import Radarr sync data
+  for (const rs of backup.radarrSyncs || []) {
+    try {
+      await prisma.radarrSync.upsert({
+        where: { movieId: rs.movieId },
+        create: {
+          movieId: rs.movieId,
+          radarrId: rs.radarrId,
+          monitored: rs.monitored,
+          available: rs.available,
+        },
+        update: {
+          radarrId: rs.radarrId,
+          monitored: rs.monitored,
+          available: rs.available,
+        },
+      });
+      stats.radarrSyncs++;
+    } catch {
+      stats.skipped++;
+    }
+  }
+
+  // Import Plex availability data
+  for (const pa of backup.plexAvailabilities || []) {
+    try {
+      await prisma.plexAvailability.upsert({
+        where: { movieId: pa.movieId },
+        create: {
+          movieId: pa.movieId,
+          plexKey: pa.plexKey,
+          available: pa.available,
+        },
+        update: {
+          plexKey: pa.plexKey,
+          available: pa.available,
+        },
+      });
+      stats.plexAvailabilities++;
+    } catch {
+      stats.skipped++;
+    }
+  }
+
+  // Import activity logs
+  for (const al of backup.activityLogs || []) {
+    try {
+      const mappedUserId = al.userId ? userIdMap.get(al.userId) : null;
+      await prisma.activityLog.create({
+        data: {
+          userId: mappedUserId || al.userId,
+          action: al.action,
+          entityType: al.entityType,
+          entityId: al.entityId,
+          createdAt: new Date(al.createdAt),
+        },
+      });
+      stats.activityLogs++;
+    } catch {
+      stats.skipped++;
     }
   }
 

@@ -50,11 +50,19 @@ interface BackupData {
     title: string;
     year: number | null;
     posterUrl: string | null;
+    backdropUrl: string | null;
     overview: string | null;
     runtime: number | null;
-    era: string | null;
+    releaseDate: string | null;
+    certification: string | null;
+    popularity: number | null;
+    voteAverage: number | null;
+    voteCount: number | null;
     imdbRating: number | null;
+    imdbVotes: number | null;
     rottenTomatoesAudience: number | null;
+    letterboxdRating: number | null;
+    era: string | null;
   }[];
   movieGenres: {
     movieId: string;
@@ -153,6 +161,26 @@ interface BackupData {
     ratingCount: number;
     topGenreIds: string | null;
   }[];
+  // Availability data
+  radarrSyncs: {
+    movieId: string;
+    radarrId: number | null;
+    monitored: boolean;
+    available: boolean;
+  }[];
+  plexAvailabilities: {
+    movieId: string;
+    plexKey: string | null;
+    available: boolean;
+  }[];
+  // Activity log for ML training
+  activityLogs: {
+    userId: string | null;
+    action: string;
+    entityType: string | null;
+    entityId: string | null;
+    createdAt: string;
+  }[];
 }
 
 export async function GET() {
@@ -185,6 +213,9 @@ export async function GET() {
     featureEmbeddings,
     mfModelMetadata,
     userFeatureCaches,
+    radarrSyncs,
+    plexAvailabilities,
+    activityLogs,
   ] = await Promise.all([
     prisma.user.findMany({
       select: {
@@ -220,11 +251,19 @@ export async function GET() {
         title: true,
         year: true,
         posterUrl: true,
+        backdropUrl: true,
         overview: true,
         runtime: true,
-        era: true,
+        releaseDate: true,
+        certification: true,
+        popularity: true,
+        voteAverage: true,
+        voteCount: true,
         imdbRating: true,
+        imdbVotes: true,
         rottenTomatoesAudience: true,
+        letterboxdRating: true,
+        era: true,
       },
     }),
     prisma.movieGenre.findMany({
@@ -301,6 +340,32 @@ export async function GET() {
         topGenreIds: true,
       },
     }),
+    // Availability data
+    prisma.radarrSync.findMany({
+      select: {
+        movieId: true,
+        radarrId: true,
+        monitored: true,
+        available: true,
+      },
+    }),
+    prisma.plexAvailability.findMany({
+      select: {
+        movieId: true,
+        plexKey: true,
+        available: true,
+      },
+    }),
+    // Activity log
+    prisma.activityLog.findMany({
+      select: {
+        userId: true,
+        action: true,
+        entityType: true,
+        entityId: true,
+        createdAt: true,
+      },
+    }),
   ]);
 
   const backup: BackupData = {
@@ -312,7 +377,10 @@ export async function GET() {
     genres,
     studios,
     people,
-    movies,
+    movies: movies.map((m) => ({
+      ...m,
+      releaseDate: m.releaseDate?.toISOString() || null,
+    })),
     movieGenres,
     movieStudios,
     movieCast,
@@ -333,6 +401,12 @@ export async function GET() {
         }
       : null,
     userFeatureCaches,
+    radarrSyncs,
+    plexAvailabilities,
+    activityLogs: activityLogs.map((a) => ({
+      ...a,
+      createdAt: a.createdAt.toISOString(),
+    })),
   };
 
   return new NextResponse(JSON.stringify(backup, null, 2), {
