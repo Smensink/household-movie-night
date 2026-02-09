@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
 interface AffinityItem {
@@ -58,11 +58,18 @@ interface ProfileStats {
   } | null;
 }
 
+interface ProfileLoadError {
+  userId: string;
+  message: string;
+}
+
 interface HouseholdMemberOption {
   id: string;
   name: string;
   ratingCount: number;
-}function AffinityBar({ affinity }: { affinity: number }) {
+}
+
+function AffinityBar({ affinity }: { affinity: number }) {
   // affinity is -1 to 1, we need to map it to 0-100%
   const percentage = ((affinity + 1) / 2) * 100;
   const isPositive = affinity >= 0;
@@ -186,19 +193,17 @@ function RatingDistribution({
   );
 }
 
-export default function ProfilePage() {
+function ProfilePageContent() {
   const { data: session, status } = useSession();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [stats, setStats] = useState<ProfileStats | null>(null);
   const [householdMembers, setHouseholdMembers] = useState<HouseholdMemberOption[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ProfileLoadError | null>(null);
 
   const selectedUserId =
-    (typeof window !== "undefined"
-      ? new URLSearchParams(window.location.search).get("userId")?.trim()
-      : null) ||
+    searchParams.get("userId")?.trim() ||
     session?.user?.id ||
     null;
 
@@ -208,6 +213,8 @@ export default function ProfilePage() {
 
   useEffect(() => {
     if (status !== "authenticated" || !selectedUserId) return;
+
+    let isCancelled = false;
 
     Promise.all([
       fetch(`/api/profile/stats?userId=${encodeURIComponent(selectedUserId)}`),
@@ -223,7 +230,9 @@ export default function ProfilePage() {
         }
 
         const statsData = (await statsResponse.json()) as ProfileStats;
+        if (isCancelled) return;
         setStats(statsData);
+        setError(null);
 
         if (householdResponse && householdResponse.ok) {
           const households = await householdResponse.json();
@@ -249,18 +258,35 @@ export default function ProfilePage() {
           const members = Array.from(memberMap.values()).sort((a, b) =>
             a.name.localeCompare(b.name)
           );
-          setHouseholdMembers(members);
+          if (!isCancelled) {
+            setHouseholdMembers(members);
+          }
         }
 
-        setLoading(false);
       })
       .catch((err) => {
-        setError(err.message);
-        setLoading(false);
+        if (!isCancelled) {
+          setError({
+            userId: selectedUserId,
+            message: err instanceof Error ? err.message : "Failed to load profile stats",
+          });
+        }
       });
+
+    return () => {
+      isCancelled = true;
+    };
   }, [selectedUserId, status]);
 
-  if (status === "loading" || loading) {
+  const activeError = error && error.userId === selectedUserId ? error.message : null;
+  const isLoading =
+    status === "loading" ||
+    (status === "authenticated" &&
+      !!selectedUserId &&
+      !activeError &&
+      (!stats || stats.user.id !== selectedUserId));
+
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
@@ -268,10 +294,10 @@ export default function ProfilePage() {
     );
   }
 
-  if (error) {
+  if (activeError) {
     return (
       <div className="bg-error/10 border border-error/20 text-error text-sm px-4 py-2 rounded-xl">
-        {error}
+        {activeError}
       </div>
     );
   }
@@ -651,23 +677,10 @@ export default function ProfilePage() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+export default function ProfilePage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-64"><div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" /></div>}>
+      <ProfilePageContent />
+    </Suspense>
+  );
+}

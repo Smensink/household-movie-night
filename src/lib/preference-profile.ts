@@ -31,6 +31,7 @@ interface LoadedPreferenceRows {
     explorationFactor: number;
     discoverySourcePref: string;
   }>;
+  totalGenres: number;
   genreRankings: GenreRankingRow[];
   movieRatings: MovieRatingRow[];
   actorRatings: PersonRatingRow[];
@@ -97,25 +98,23 @@ function addWeighted(
 
 function buildGenreAffinity(
   genreRankings: GenreRankingRow[],
-  userWeights: Map<string, number>
+  userWeights: Map<string, number>,
+  totalGenreCount: number
 ): Map<string, number> {
-  const maxRankByUser = new Map<string, number>();
-  for (const ranking of genreRankings) {
-    const currentMax = maxRankByUser.get(ranking.userId) ?? 0;
-    if (ranking.rank > currentMax) {
-      maxRankByUser.set(ranking.userId, ranking.rank);
-    }
-  }
-
+  const safeTotalGenres = Math.max(totalGenreCount, 1);
   const aggregated = new Map<string, { weightedSum: number; totalWeight: number }>();
+
   for (const ranking of genreRankings) {
     const userWeight = userWeights.get(ranking.userId) ?? 0;
     if (userWeight <= 0) continue;
-    const maxRank = maxRankByUser.get(ranking.userId) ?? 1;
+
+    const boundedRank = Math.min(Math.max(ranking.rank, 1), safeTotalGenres);
     const normalizedRank =
-      maxRank <= 1 ? 0 : (maxRank - ranking.rank) / (maxRank - 1); // 0..1
-    const score = normalizedRank * 2 - 1; // -1..1
-    addWeighted(aggregated, ranking.genreId, score, userWeight);
+      safeTotalGenres <= 1
+        ? 1
+        : (safeTotalGenres - boundedRank) / (safeTotalGenres - 1);
+    const score = normalizedRank * 2 - 1;
+    addWeighted(aggregated, ranking.genreId, score, userWeight * DIRECT_RATING_WEIGHT);
   }
 
   return finalizeWeightedMap(aggregated);
@@ -163,13 +162,14 @@ async function getHouseholdUserIdsForUser(userId: string): Promise<string[]> {
 
 interface MovieMetadata {
   movieId: string;
+  genreIds: string[];
   actorIds: string[];
   directorIds: string[];
   studioIds: string[];
 }
 
 async function loadPreferenceRows(userIds: string[]): Promise<LoadedPreferenceRows> {
-  const [settings, genreRankings, movieRatings, actorRatings, directorRatings, studioRatings] =
+  const [settings, totalGenres, genreRankings, movieRatings, actorRatings, directorRatings, studioRatings] =
     await Promise.all([
       prisma.userSettings.findMany({
         where: { userId: { in: userIds } },
@@ -179,6 +179,7 @@ async function loadPreferenceRows(userIds: string[]): Promise<LoadedPreferenceRo
           discoverySourcePref: true,
         },
       }),
+      prisma.genre.count(),
       prisma.genreRanking.findMany({
         where: { userId: { in: userIds } },
         select: { userId: true, genreId: true, rank: true },
@@ -224,6 +225,7 @@ async function loadPreferenceRows(userIds: string[]): Promise<LoadedPreferenceRo
 
   return {
     settings,
+    totalGenres,
     genreRankings,
     movieRatings,
     actorRatings,
@@ -239,6 +241,9 @@ async function loadMovieMetadata(movieIds: string[]): Promise<Map<string, MovieM
     where: { id: { in: movieIds } },
     select: {
       id: true,
+      genres: {
+        select: { genreId: true },
+      },
       cast: {
         select: { personId: true },
         take: 5,
@@ -258,6 +263,7 @@ async function loadMovieMetadata(movieIds: string[]): Promise<Map<string, MovieM
   for (const movie of movies) {
     metadataMap.set(movie.id, {
       movieId: movie.id,
+      genreIds: movie.genres.map((g) => g.genreId),
       actorIds: movie.cast.map((c) => c.personId),
       directorIds: movie.crew.map((c) => c.personId),
       studioIds: movie.studios.map((s) => s.studioId),
@@ -275,13 +281,18 @@ function buildAffinitiesWithInference(
   userWeights: Map<string, number>,
   movieMetadata: Map<string, MovieMetadata>
 ): AffinityProfile {
-  const genreAffinity = buildGenreAffinity(rows.genreRankings, userWeights);
+  const genreAggregated = new Map<string, { weightedSum: number; totalWeight: number }>();
   const movieAffinity = buildRatingAffinity(rows.movieRatings, (row) => row.movieId, userWeights);
 
-  // Build actor affinity: direct ratings (strong) + inferred from movies (weak)
-  const actorAggregated = new Map<string, { weightedSum: number; totalWeight: number }>();
+  const directGenreAffinity = buildGenreAffinity(rows.genreRankings, userWeights, rows.totalGenres);
+  for (const [genreId, score] of directGenreAffinity) {
+    addWeighted(genreAggregated, genreId, score, DIRECT_RATING_WEIGHT);
+  }
 
-  // Add direct actor ratings
+  const actorAggregated = new Map<string, { weightedSum: number; totalWeight: number }>();
+  const directorAggregated = new Map<string, { weightedSum: number; totalWeight: number }>();
+  const studioAggregated = new Map<string, { weightedSum: number; totalWeight: number }>();
+
   for (const row of rows.actorRatings) {
     const userWeight = userWeights.get(row.userId) ?? 0;
     if (userWeight <= 0 || row.notHeardOf || row.rating === null) continue;
@@ -289,22 +300,6 @@ function buildAffinitiesWithInference(
     addWeighted(actorAggregated, row.personId, score, userWeight * DIRECT_RATING_WEIGHT);
   }
 
-  // Add inferred actor affinities from movie ratings
-  for (const row of rows.movieRatings) {
-    const userWeight = userWeights.get(row.userId) ?? 0;
-    if (userWeight <= 0 || row.notHeardOf || row.rating === null) continue;
-    const score = normalizeFiveStarRating(row.rating);
-    const metadata = movieMetadata.get(row.movieId);
-    if (!metadata) continue;
-    for (const actorId of metadata.actorIds) {
-      addWeighted(actorAggregated, actorId, score, userWeight * INFERRED_RATING_WEIGHT);
-    }
-  }
-
-  // Build director affinity: direct ratings (strong) + inferred from movies (weak)
-  const directorAggregated = new Map<string, { weightedSum: number; totalWeight: number }>();
-
-  // Add direct director ratings
   for (const row of rows.directorRatings) {
     const userWeight = userWeights.get(row.userId) ?? 0;
     if (userWeight <= 0 || row.notHeardOf || row.rating === null) continue;
@@ -312,22 +307,6 @@ function buildAffinitiesWithInference(
     addWeighted(directorAggregated, row.personId, score, userWeight * DIRECT_RATING_WEIGHT);
   }
 
-  // Add inferred director affinities from movie ratings
-  for (const row of rows.movieRatings) {
-    const userWeight = userWeights.get(row.userId) ?? 0;
-    if (userWeight <= 0 || row.notHeardOf || row.rating === null) continue;
-    const score = normalizeFiveStarRating(row.rating);
-    const metadata = movieMetadata.get(row.movieId);
-    if (!metadata) continue;
-    for (const directorId of metadata.directorIds) {
-      addWeighted(directorAggregated, directorId, score, userWeight * INFERRED_RATING_WEIGHT);
-    }
-  }
-
-  // Build studio affinity: direct ratings (strong) + inferred from movies (weak)
-  const studioAggregated = new Map<string, { weightedSum: number; totalWeight: number }>();
-
-  // Add direct studio ratings
   for (const row of rows.studioRatings) {
     const userWeight = userWeights.get(row.userId) ?? 0;
     if (userWeight <= 0 || row.notHeardOf || row.rating === null) continue;
@@ -335,20 +314,29 @@ function buildAffinitiesWithInference(
     addWeighted(studioAggregated, row.studioId, score, userWeight * DIRECT_RATING_WEIGHT);
   }
 
-  // Add inferred studio affinities from movie ratings
   for (const row of rows.movieRatings) {
     const userWeight = userWeights.get(row.userId) ?? 0;
     if (userWeight <= 0 || row.notHeardOf || row.rating === null) continue;
     const score = normalizeFiveStarRating(row.rating);
     const metadata = movieMetadata.get(row.movieId);
     if (!metadata) continue;
+
+    for (const genreId of metadata.genreIds) {
+      addWeighted(genreAggregated, genreId, score, userWeight * INFERRED_RATING_WEIGHT);
+    }
+    for (const actorId of metadata.actorIds) {
+      addWeighted(actorAggregated, actorId, score, userWeight * INFERRED_RATING_WEIGHT);
+    }
+    for (const directorId of metadata.directorIds) {
+      addWeighted(directorAggregated, directorId, score, userWeight * INFERRED_RATING_WEIGHT);
+    }
     for (const studioId of metadata.studioIds) {
       addWeighted(studioAggregated, studioId, score, userWeight * INFERRED_RATING_WEIGHT);
     }
   }
 
   return {
-    genreAffinity,
+    genreAffinity: finalizeWeightedMap(genreAggregated),
     movieAffinity,
     actorAffinity: finalizeWeightedMap(actorAggregated),
     directorAffinity: finalizeWeightedMap(directorAggregated),
@@ -440,4 +428,6 @@ export function averageAffinityForIds(
     .filter((value): value is number => value !== undefined);
   return average(values);
 }
+
+
 

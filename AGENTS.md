@@ -615,3 +615,12 @@ Core entities in `prisma/schema.prisma`:
   - Added post-import MF retrain trigger (`shouldRetrain` gate + `trainMatrixFactorization`) so newly imported Letterboxd ratings can affect ML predictions without waiting for manual retrain.
   - Added recommendation feedback endpoint (`POST /api/feedback/recommendations`) and UI button on movie/upcoming rating cards; feedback is now stored in `ActivityLog` with movie linkage.
   - Learned workflow preference: users want a lightweight in-flow feedback control directly on recommendation cards to improve relevance tuning.
+- 2026-02-08 (Profile switching reliability + affinity normalization follow-up):
+  - Fixed household profile switching race/staleness on `/profile` by making query param selection reactive (`useSearchParams`) and adding request-cancellation guards so rapid member switches do not require manual refresh.
+  - Added Suspense wrapper for `/profile` to satisfy Next.js `useSearchParams()` CSR boundary requirement during production build.
+  - Extended `GET /api/profile/stats` response with `user.id` so UI can correctly determine active profile and self-vs-other state.
+  - Updated profile genre-affinity normalization to use total available genre count (catalog-scale rank mapping) rather than only the number of user-ranked genres.
+  - Added Letterboxd data remediation utilities:
+    - `scripts/repair-letterboxd-import-matches.ts` (repair canonical movie matching/ID links).
+    - `scripts/backfill-letterboxd-ml-data.ts` (backfill ML-critical metadata fields without requiring poster backfill).
+  - Learned workflow preference: profile-to-profile navigation must be instant and stable in-app without refresh, especially for households reviewing each other's stats.

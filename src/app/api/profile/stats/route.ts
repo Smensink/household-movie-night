@@ -12,6 +12,7 @@ interface AffinityItem {
 
 interface ProfileStats {
   user: {
+    id: string;
     name: string;
     explorationFactor: number;
     discoverySourcePref: string;
@@ -115,6 +116,7 @@ export async function GET(req: NextRequest) {
   const [
     user,
     settings,
+    totalGenres,
     genreRankings,
     movieRatings,
     actorRatings,
@@ -129,6 +131,7 @@ export async function GET(req: NextRequest) {
       where: { userId },
       select: { explorationFactor: true, discoverySourcePref: true },
     }),
+    prisma.genre.count(),
     prisma.genreRanking.findMany({
       where: { userId },
       include: { genre: { select: { id: true, name: true } } },
@@ -175,7 +178,7 @@ export async function GET(req: NextRequest) {
   ]);
 
   // Calculate genre affinities from rankings
-  const maxRank = genreRankings.length;
+  const maxRank = Math.max(totalGenres, 1);
   const genreAffinities: AffinityItem[] = genreRankings.map((gr) => ({
     id: gr.genre.id,
     name: gr.genre.name,
@@ -343,6 +346,7 @@ export async function GET(req: NextRequest) {
 
   const stats: ProfileStats = {
     user: {
+      id: user?.id || userId,
       name: user?.name || "Unknown",
       explorationFactor: settings?.explorationFactor ?? 0.5,
       discoverySourcePref: settings?.discoverySourcePref ?? "balanced",
@@ -381,6 +385,8 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(stats);
 }
+
+
 
 
 
