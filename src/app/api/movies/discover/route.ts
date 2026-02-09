@@ -471,6 +471,23 @@ export async function GET(req: NextRequest) {
         ? mainstream * 0.9 + recentness * 0.2
         : 0;
 
+      // RADARR PROXIMITY: Boost movies close to the Radarr auto-add threshold
+      // so remaining household members see them sooner and can complete the quorum.
+      let radarrProximityBoost = 0;
+      if (movie.tmdbId && !movie.radarrSync) {
+        const householdSize = profile.householdUserIds.length;
+        const threshold = Math.floor(householdSize / 2) + 1; // >50% means ceil(size/2+1) for even, (size+1)/2 for odd
+        const nearThresholdVotes = movie.ratings.filter(
+          (r) => r.userId !== userId && !r.notHeardOf && r.rating !== null && r.rating >= 3.5 && !r.hasSeen
+        ).length;
+        const votesNeeded = threshold - nearThresholdVotes;
+        if (votesNeeded === 1) {
+          radarrProximityBoost = tuning.radarrProximityBoost;
+        } else if (votesNeeded === 2 && nearThresholdVotes > 0) {
+          radarrProximityBoost = tuning.radarrProximityBoost * 0.5;
+        }
+      }
+
       const heuristicScore =
         preferenceSignal *
           tuning.preferenceWeight *
@@ -483,6 +500,7 @@ export async function GET(req: NextRequest) {
         -indieMainstreamPenalty + // Strong penalty against blockbusters/new mainstream in indie mode
         dislikePenalty +
         genreExplorationBonus * effectiveExplorationFactor + // Only explore genres when exploring
+        radarrProximityBoost +
         Math.random() * tuning.randomJitter;
 
       const score =

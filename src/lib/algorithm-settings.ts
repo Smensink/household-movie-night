@@ -10,6 +10,7 @@ export interface AlgorithmSettings {
     qualityInfluence: number;
     sourceInfluence: number;
     availabilityBonus: number;
+    radarrProximityBoost: number;
     dislikePenalty: number;
     randomJitter: number;
   };
@@ -43,6 +44,7 @@ export const DEFAULT_ALGORITHM_SETTINGS: AlgorithmSettings = {
     qualityInfluence: 0.2,
     sourceInfluence: 0.35,
     availabilityBonus: 0.05,
+    radarrProximityBoost: 0.25,
     dislikePenalty: -0.08,
     randomJitter: 0.04,
   },
@@ -138,6 +140,12 @@ function sanitizeSettings(raw: unknown): AlgorithmSettings {
         -1,
         1,
         DEFAULT_ALGORITHM_SETTINGS.movieDiscovery.availabilityBonus
+      ),
+      radarrProximityBoost: clampNumber(
+        movieDiscovery.radarrProximityBoost,
+        0,
+        1,
+        DEFAULT_ALGORITHM_SETTINGS.movieDiscovery.radarrProximityBoost
       ),
       dislikePenalty: clampNumber(
         movieDiscovery.dislikePenalty,
