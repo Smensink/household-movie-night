@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getTMDBMovie } from "@/lib/api/tmdb";
 import { getOMDBMovie, extractRatingsFromOMDB } from "@/lib/api/omdb";
+import { isInternalOrAdmin } from "@/lib/internal-auth";
 
 const BATCH_SIZE = 50; // Process 50 movies per request
 const MIN_VOTE_COUNT = 500; // Minimum votes for older movies
@@ -13,7 +14,10 @@ const RECENT_MOVIE_MONTHS = 6; // Movies released in last 6 months get lower thr
  * Fetches vote counts and removes movies that don't meet the recognition threshold.
  * This keeps the database focused on movies people would actually recognize.
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   console.log("[Movie Cleanup] Starting vote count fetch and cleanup...");
 
   const sixMonthsAgo = new Date();
@@ -153,7 +157,10 @@ export async function POST() {
  * GET /api/movies/cleanup
  * Check status of movies below threshold
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   const sixMonthsAgo = new Date();
   sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - RECENT_MOVIE_MONTHS);
 

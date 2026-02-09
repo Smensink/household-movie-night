@@ -219,12 +219,14 @@ const RATINGS_CACHE_TTL_MS = 60 * 60_000; // 1 hour
 /**
  * Get Trakt ratings for a movie by IMDB ID or Trakt slug
  */
+const NEGATIVE_SENTINEL: TraktRatings = { rating: -1, votes: 0, distribution: {} };
+
 export async function getTraktMovieRatings(
   idOrSlug: string
 ): Promise<TraktRatings | null> {
   const cacheKey = `ratings:${idOrSlug}`;
   const cached = getCached(ratingsCache, cacheKey);
-  if (cached !== null) return cached;
+  if (cached !== null) return cached === NEGATIVE_SENTINEL ? null : cached;
 
   const apiKey = await getTraktApiKey();
   if (!apiKey) return null;
@@ -235,7 +237,7 @@ export async function getTraktMovieRatings(
       { headers: getHeaders(apiKey), cache: "no-store" }
     );
     if (!res.ok) {
-      setCached(ratingsCache, cacheKey, null, RATINGS_CACHE_TTL_MS);
+      setCached(ratingsCache, cacheKey, NEGATIVE_SENTINEL, RATINGS_CACHE_TTL_MS);
       return null;
     }
 

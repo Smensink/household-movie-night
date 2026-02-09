@@ -6,6 +6,7 @@ import {
   shouldRetrain,
   isSystemInactive,
 } from "@/lib/matrix-factorization";
+import { isInternalOrAdmin } from "@/lib/internal-auth";
 
 const INACTIVITY_THRESHOLD_MINUTES = 10;
 
@@ -75,7 +76,10 @@ export async function POST(req: NextRequest) {
  * Auto-retrain if inactive for 10 minutes and retraining is needed
  * This is called periodically by a background job
  */
-export async function PATCH() {
+export async function PATCH(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   // Check inactivity
   const inactive = await isSystemInactive(INACTIVITY_THRESHOLD_MINUTES);
   if (!inactive) {

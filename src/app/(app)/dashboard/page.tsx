@@ -68,7 +68,10 @@ export default function DashboardPage() {
   useEffect(() => {
     if (status === "authenticated") {
       fetch("/api/household")
-        .then((response) => response.json())
+        .then((response) => {
+          if (!response.ok) return [];
+          return response.json();
+        })
         .then((data) => {
           setHouseholds(data);
           const firstAdminHousehold = data.find(
@@ -77,11 +80,19 @@ export default function DashboardPage() {
           if (firstAdminHousehold) {
             setInviteHouseholdId(firstAdminHousehold.id);
           }
-        });
-      fetch("/api/sessions").then((response) => response.json()).then(setSessions);
+        })
+        .catch(() => {});
+      fetch("/api/sessions")
+        .then((response) => {
+          if (!response.ok) return [];
+          return response.json();
+        })
+        .then(setSessions)
+        .catch(() => {});
       fetch("/api/household/invites")
         .then((response) => (response.ok ? response.json() : []))
-        .then((data) => setHouseholdInvites(Array.isArray(data) ? data : []));
+        .then((data) => setHouseholdInvites(Array.isArray(data) ? data : []))
+        .catch(() => {});
     }
   }, [status]);
 

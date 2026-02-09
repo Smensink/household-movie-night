@@ -203,6 +203,8 @@ export default function SessionPage() {
         setDecidedMovie(null);
       }
       setLoading(false);
+    }).catch(() => {
+      setLoading(false);
     });
   }, [authStatus, guestReady, guestToken, guestUserId, sessionId, session?.user?.id]);
 

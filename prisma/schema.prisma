@@ -173,6 +173,7 @@ model MovieRating {
   movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
 
   @@unique([userId, movieId])
+  @@index([movieId])
 }
 
 model ActorRating {
@@ -216,6 +217,8 @@ model MovieNightSession {
   participants     SessionParticipant[]
   genrePreferences SessionGenrePreference[]
   movies           SessionMovie[]
+
+  @@index([householdId])
 }
 
 model SessionParticipant {
@@ -252,6 +255,8 @@ model HouseholdInvite {
   household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
   createdBy User      @relation("HouseholdInviteCreator", fields: [createdByUserId], references: [id], onDelete: Cascade)
   claimedBy User?     @relation("HouseholdInviteClaimer", fields: [claimedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([householdId])
 }
 
 model SessionGenrePreference {
@@ -278,6 +283,7 @@ model SessionMovie {
   votes   SessionVote[]
 
   @@unique([sessionId, movieId])
+  @@index([sessionId])
 }
 
 model SessionVote {
@@ -291,6 +297,7 @@ model SessionVote {
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([sessionMovieId, userId])
+  @@index([sessionMovieId])
 }
 
 model RadarrSync {

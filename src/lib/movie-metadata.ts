@@ -81,11 +81,21 @@ async function findOrCreatePersonIdByName(name: string): Promise<string> {
   });
   if (existing) return existing.id;
 
-  const created = await prisma.person.create({
-    data: { name },
-    select: { id: true },
-  });
-  return created.id;
+  try {
+    const created = await prisma.person.create({
+      data: { name },
+      select: { id: true },
+    });
+    return created.id;
+  } catch {
+    // Handle race condition: another request may have created this person
+    const retried = await prisma.person.findFirst({
+      where: { name: { equals: name, mode: "insensitive" } },
+      select: { id: true },
+    });
+    if (retried) return retried.id;
+    throw new Error(`Failed to find or create person: ${name}`);
+  }
 }
 
 export async function syncMovieMetadataFromOMDB(

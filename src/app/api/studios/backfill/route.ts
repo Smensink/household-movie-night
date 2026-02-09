@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { isInternalOrAdmin } from "@/lib/internal-auth";
 import {
   searchTMDBCompany,
   getTMDBCompanyMovies,
@@ -24,7 +25,10 @@ interface BackfillResult {
  * Backfill popular movies for studios that have fewer than MIN_MOVIES_PER_STUDIO linked movies.
  * This is intended to be run as a background task on startup.
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   console.log("[Studio Backfill] Starting studio movie backfill...");
   const results: BackfillResult[] = [];
 
@@ -294,7 +298,10 @@ export async function POST() {
  * GET /api/studios/backfill
  * Check status of studios that need backfill
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   const studios = await prisma.studio.findMany({
     where: {
       movies: { some: {} },

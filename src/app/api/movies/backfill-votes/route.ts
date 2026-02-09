@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getTMDBMovie } from "@/lib/api/tmdb";
 import { getOMDBMovie, extractRatingsFromOMDB } from "@/lib/api/omdb";
+import { isInternalOrAdmin } from "@/lib/internal-auth";
 
 const BATCH_SIZE = 100; // Process 100 movies per request to avoid timeout
 
@@ -11,7 +12,10 @@ const BATCH_SIZE = 100; // Process 100 movies per request to avoid timeout
  * Uses the maximum vote count from either source.
  * This helps filter out obscure movies that few people have seen.
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   console.log("[Vote Backfill] Starting vote count backfill from TMDB/OMDB...");
 
   // Find movies with TMDB ID but no vote count data
@@ -130,7 +134,10 @@ export async function POST() {
  * GET /api/movies/backfill-votes
  * Check status of vote count data
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   const [total, withVoteCount, withoutVoteCount] = await Promise.all([
     prisma.movie.count(),
     prisma.movie.count({

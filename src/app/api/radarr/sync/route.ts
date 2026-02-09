@@ -61,9 +61,15 @@ export async function POST(req: NextRequest) {
 }
 
 // PATCH - Add next top rated movie (used when a movie is watched)
-export async function PATCH() {
-  // This can be called by Tautulli webhook, so no auth required
-  // But we'll add a simple API key check for security
+export async function PATCH(req: NextRequest) {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const isAdmin = await isUserHouseholdAdmin(session.user.id);
+  if (!isAdmin) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   try {
     const result = await addNextTopRatedToRadarr();

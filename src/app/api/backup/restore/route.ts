@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { runPostRestoreTraining } from "@/lib/post-restore-training";
+import { isUserHouseholdAdmin } from "@/lib/household-admin";
 
 const SUPPORTED_VERSIONS = [1, 2];
 
@@ -191,6 +192,11 @@ export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const isAdmin = await isUserHouseholdAdmin(session.user.id);
+  if (!isAdmin) {
+    return NextResponse.json({ error: "Forbidden: admin only" }, { status: 403 });
   }
 
   let backup: BackupData;

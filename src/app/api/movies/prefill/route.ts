@@ -1,9 +1,10 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getBoxOfficeMovies, getPopularMovies, getTrendingMovies, getTraktMovieRatings } from "@/lib/api/trakt";
 import { getOMDBMovie, getHighResPosterUrl, extractRatingsFromOMDB } from "@/lib/api/omdb";
 import { getTMDBMovieByImdbId, extractTMDBRating } from "@/lib/api/tmdb";
 import { prisma } from "@/lib/prisma";
 import { syncMovieMetadataFromOMDB } from "@/lib/movie-metadata";
+import { isInternalOrAdmin } from "@/lib/internal-auth";
 
 const PREFILL_LIMIT = 500;
 
@@ -23,7 +24,10 @@ function getEra(year: number | null): string | null {
   return "classic";
 }
 
-export async function POST() {
+export async function POST(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   console.log("[Movie Prefill] Starting movie prefill...");
 
   // Check how many movies we already have
@@ -151,7 +155,10 @@ export async function POST() {
   });
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   const count = await prisma.movie.count();
   const moviesWithPosters = await prisma.movie.count({
     where: { posterUrl: { not: null } },
@@ -165,7 +172,10 @@ export async function GET() {
 }
 
 // PATCH - Upgrade existing movies: high-res posters and backfill ratings
-export async function PATCH() {
+export async function PATCH(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   console.log("[Movie Prefill] Starting poster upgrade and ratings backfill...");
 
   // 1. Upgrade low-res poster URLs

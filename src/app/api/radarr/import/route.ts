@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { importRadarrLibrary, syncRadarrAvailability } from "@/lib/api/radarr";
+import { isInternalOrAdmin } from "@/lib/internal-auth";
 
 /**
  * POST /api/radarr/import
@@ -7,7 +8,10 @@ import { importRadarrLibrary, syncRadarrAvailability } from "@/lib/api/radarr";
  * This ensures all Radarr movies are available in the rating queue.
  * Called on startup and can be triggered manually.
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   console.log("[Radarr Import] Starting Radarr library import via API...");
 
   try {
@@ -30,7 +34,10 @@ export async function POST() {
  * GET /api/radarr/import
  * Check status of Radarr integration and movie counts.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   try {
     // Quick availability sync to get current counts
     const syncResult = await syncRadarrAvailability();

@@ -39,6 +39,18 @@ interface TautulliPayload {
 }
 
 export async function POST(req: NextRequest) {
+  // Verify webhook secret if configured
+  const config = await prisma.integrationConfig.findUnique({
+    where: { service: "tautulli" },
+    select: { apiKey: true, enabled: true },
+  });
+  if (config?.apiKey) {
+    const providedSecret = req.headers.get("x-tautulli-secret") || req.nextUrl.searchParams.get("secret");
+    if (providedSecret !== config.apiKey) {
+      return NextResponse.json({ error: "Invalid webhook secret" }, { status: 401 });
+    }
+  }
+
   let payload: TautulliPayload;
 
   try {

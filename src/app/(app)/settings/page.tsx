@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Input from "@/components/ui/Input";
@@ -169,6 +169,16 @@ export default function SettingsPage() {
     total: number;
   } | null>(null);
   const [backupDownloading, setBackupDownloading] = useState(false);
+  const activeIntervalsRef = useRef<ReturnType<typeof setInterval>[]>([]);
+
+  // Cleanup backup polling intervals on unmount
+  useEffect(() => {
+    return () => {
+      for (const id of activeIntervalsRef.current) {
+        clearInterval(id);
+      }
+    };
+  }, []);
 
   const [forms, setForms] = useState<
     Record<string, { baseUrl: string; apiKey: string }>
@@ -322,16 +332,19 @@ export default function SettingsPage() {
           setBackupProgress(progress);
           if (!progress.inProgress && progress.phase === "Complete") {
             clearInterval(pollInterval);
+            activeIntervalsRef.current = activeIntervalsRef.current.filter((id) => id !== pollInterval);
           }
         }
       } catch {
         // Ignore polling errors
       }
     }, 500);
+    activeIntervalsRef.current.push(pollInterval);
 
     try {
       const res = await fetch("/api/backup/v3");
       clearInterval(pollInterval);
+      activeIntervalsRef.current = activeIntervalsRef.current.filter((id) => id !== pollInterval);
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
@@ -345,6 +358,7 @@ export default function SettingsPage() {
               setBackupProgress(progress);
               if (!progress.inProgress) {
                 clearInterval(waitInterval);
+                activeIntervalsRef.current = activeIntervalsRef.current.filter((id) => id !== waitInterval);
                 setBackupDownloading(false);
                 if (progress.phase === "Complete") {
                   // Retry the download
@@ -353,6 +367,7 @@ export default function SettingsPage() {
               }
             }
           }, 1000);
+          activeIntervalsRef.current.push(waitInterval);
           return;
         }
         setBackupProgress(null);

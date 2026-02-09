@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { isInternalOrAdmin } from "@/lib/internal-auth";
 import {
   getTMDBPerson,
   getTMDBPersonByName,
@@ -27,7 +28,10 @@ interface BackfillResult {
  * Backfill movies for actors/directors that have fewer than MIN_MOVIES_PER_PERSON linked movies.
  * Limits to MAX_PEOPLE_TO_PROCESS people per run to prevent database bloat.
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   console.log("[People Backfill] Starting actor/director movie backfill...");
   const results: BackfillResult[] = [];
 
@@ -374,7 +378,10 @@ async function backfillPersonMovies(
  * GET /api/people/backfill
  * Check status of people that need backfill
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await isInternalOrAdmin(req))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   const actors = await prisma.person.findMany({
     where: {
       moviesCast: { some: {} },

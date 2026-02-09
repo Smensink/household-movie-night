@@ -219,13 +219,13 @@ export async function getRecommendationsForSession(
       (movie.plexAvailability?.available ? tuning.plexAvailableBoost : 0);
 
     const preferenceSignal =
-      genreSignal * 0.28 +
+      genreSignal * 0.25 +
       actorSignal * 0.16 +
       directorSignal * 0.1 +
       studioSignal * 0.12 +
       movieHistorySignal * 0.14 +
       participantRatingSignal * 0.14 +
-      releaseYearSignal * 0.16 +
+      releaseYearSignal * 0.13 +
       mixedSeenPenalty;
 
     const knownByParticipantsRatio =

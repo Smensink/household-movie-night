@@ -338,10 +338,10 @@ async function loadLatentVectors(featureDimensions: number): Promise<LatentVecto
  * Save latent vectors and embeddings to database
  */
 async function saveLatentVectors(vectors: LatentVectors): Promise<void> {
-  const upserts: Promise<unknown>[] = [];
+  const factories: (() => Promise<unknown>)[] = [];
 
   for (const [userId, vector] of vectors.userVectors) {
-    upserts.push(
+    factories.push(() =>
       prisma.latentVector.upsert({
         where: { entityType_entityId: { entityType: "user", entityId: userId } },
         create: {
@@ -359,7 +359,7 @@ async function saveLatentVectors(vectors: LatentVectors): Promise<void> {
   }
 
   for (const [movieId, vector] of vectors.movieVectors) {
-    upserts.push(
+    factories.push(() =>
       prisma.latentVector.upsert({
         where: { entityType_entityId: { entityType: "movie", entityId: movieId } },
         create: {
@@ -378,7 +378,7 @@ async function saveLatentVectors(vectors: LatentVectors): Promise<void> {
 
   for (const [key, emb] of vectors.featureEmbeddings) {
     const [featureType, featureId] = key.split(":", 2);
-    upserts.push(
+    factories.push(() =>
       prisma.featureEmbedding.upsert({
         where: { featureType_featureId: { featureType, featureId } },
         create: {
@@ -395,10 +395,10 @@ async function saveLatentVectors(vectors: LatentVectors): Promise<void> {
     );
   }
 
-  // Process in batches
+  // Process in batches (factories are lazy, so promises start only when invoked)
   const batchSize = 100;
-  for (let i = 0; i < upserts.length; i += batchSize) {
-    await Promise.all(upserts.slice(i, i + batchSize));
+  for (let i = 0; i < factories.length; i += batchSize) {
+    await Promise.all(factories.slice(i, i + batchSize).map((fn) => fn()));
   }
 }
 
@@ -461,18 +461,25 @@ export async function trainMatrixFactorization(
   const latentDimensions = options.latentDimensions ?? DEFAULT_LATENT_DIMENSIONS;
   const featureDimensions = options.featureDimensions ?? DEFAULT_FEATURE_DIMENSIONS;
 
-  // Check if already training
+  // Atomically acquire training lock to prevent TOCTOU race
   const metadata = await prisma.mFModelMetadata.findFirst();
-  if (metadata?.isTraining) {
-    throw new Error("Model is already being trained");
+  if (metadata) {
+    const updated = await prisma.mFModelMetadata.updateMany({
+      where: { id: metadata.id, isTraining: false },
+      data: { isTraining: true },
+    });
+    if (updated.count === 0) {
+      throw new Error("Model is already being trained");
+    }
+  } else {
+    try {
+      await prisma.mFModelMetadata.create({
+        data: { id: "default", isTraining: true, latentDimensions, featureDimensions },
+      });
+    } catch {
+      throw new Error("Model is already being trained");
+    }
   }
-
-  // Mark as training
-  await prisma.mFModelMetadata.upsert({
-    where: { id: metadata?.id ?? "default" },
-    create: { id: "default", isTraining: true, latentDimensions, featureDimensions },
-    update: { isTraining: true },
-  });
 
   try {
     // Load all ratings with movie and user features
