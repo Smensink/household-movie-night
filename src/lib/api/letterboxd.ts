@@ -27,48 +27,75 @@ interface CandidateMovie {
 }
 
 export function parseLetterboxdCSV(csvContent: string): LetterboxdEntry[] {
-  const lines = csvContent.split("\n");
-  if (lines.length < 2) return [];
+  const rows = parseCSVRows(csvContent);
+  if (rows.length < 2) return [];
 
-  const headers = parseCSVLine(lines[0]);
+  const headers = rows[0];
+
+  // Validate that essential "Name" header exists
+  if (!headers.includes("Name")) return [];
+
   const entries: LetterboxdEntry[] = [];
 
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    const values = parseCSVLine(lines[i]);
+  for (let i = 1; i < rows.length; i++) {
+    const values = rows[i];
     const entry: Record<string, string> = {};
     headers.forEach((h, idx) => {
       entry[h] = values[idx] || "";
     });
+
+    // Skip entries with empty, missing, or obviously invalid names
+    const name = entry.Name?.trim();
+    if (!name || name.length > 200) continue;
+
     entries.push(entry as unknown as LetterboxdEntry);
   }
 
   return entries;
 }
 
-function parseCSVLine(line: string): string[] {
-  const result: string[] = [];
+/**
+ * Parse CSV content into rows, correctly handling multi-line quoted fields
+ * (e.g. Letterboxd reviews.csv where the Review column contains newlines).
+ */
+function parseCSVRows(csvContent: string): string[][] {
+  const rows: string[][] = [];
   let current = "";
   let inQuotes = false;
+  const fields: string[] = [];
 
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
+  for (let i = 0; i < csvContent.length; i++) {
+    const char = csvContent[i];
     if (char === '"') {
-      if (inQuotes && line[i + 1] === '"') {
+      if (inQuotes && csvContent[i + 1] === '"') {
         current += '"';
         i++;
       } else {
         inQuotes = !inQuotes;
       }
     } else if (char === "," && !inQuotes) {
-      result.push(current.trim());
+      fields.push(current.trim());
       current = "";
+    } else if ((char === "\n" || char === "\r") && !inQuotes) {
+      // Skip \n after \r
+      if (char === "\r" && csvContent[i + 1] === "\n") i++;
+      fields.push(current.trim());
+      current = "";
+      if (fields.some((f) => f !== "")) {
+        rows.push([...fields]);
+      }
+      fields.length = 0;
     } else {
       current += char;
     }
   }
-  result.push(current.trim());
-  return result;
+  // Final field / row
+  fields.push(current.trim());
+  if (fields.some((f) => f !== "")) {
+    rows.push([...fields]);
+  }
+
+  return rows;
 }
 
 function parseYear(yearRaw: string | undefined): number | null {
@@ -294,22 +321,9 @@ export async function importLetterboxdData(
         }
       }
 
-      if (!movie) {
-        movie = await prisma.movie.create({
-          data: {
-            title: entry.Name,
-            year: parsedYear,
-          },
-          select: {
-            id: true,
-            title: true,
-            year: true,
-            imdbId: true,
-            tmdbId: true,
-            traktSlug: true,
-          },
-        });
-      }
+      // If neither local nor OMDB lookup found this movie, skip it.
+      // Creating stub movies with no external IDs produces junk entries.
+      if (!movie) continue;
 
       // Enrich existing local movie if it doesn't have an external ID yet.
       if (!movie.imdbId) {
