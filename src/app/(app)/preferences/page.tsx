@@ -184,6 +184,26 @@ export default function PreferencesPage() {
         </Link>
 
         <Link
+          href="/preferences/search"
+          className="flex items-center justify-between bg-card border border-border rounded-xl p-4 hover:border-accent/30 transition-all"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-accent-soft rounded-xl flex items-center justify-center">
+              <svg className="w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+            </div>
+            <div>
+              <div className="text-sm font-semibold">Search & Rate</div>
+              <div className="text-[11px] text-muted">Find and rate something specific</div>
+            </div>
+          </div>
+          <svg className="w-5 h-5 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
+        <Link
           href="/preferences/upcoming"
           className="flex items-center justify-between bg-card border border-border rounded-xl p-4 hover:border-accent/30 transition-all"
         >
