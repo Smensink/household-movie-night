@@ -61,6 +61,8 @@ export async function POST(req: NextRequest) {
       epochs: body.epochs ?? 20,
       learningRate: body.learningRate,
       regularization: body.regularization,
+      weightDecay: body.weightDecay,
+      featureRegularization: body.featureRegularization,
       earlyStopping: body.earlyStopping,
     });
 

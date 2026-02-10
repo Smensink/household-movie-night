@@ -651,3 +651,12 @@ Core entities in `prisma/schema.prisma`:
   - Implemented in-memory weight checkpoints (best-so-far snapshots) so the saved model uses the best validation epoch even if later epochs degrade.
   - For the TF/GPU path, checkpoints are Tensor clones of `uTensor/mTensor/uBiasTensor/mBiasTensor` plus a deep copy of feature-embeddings; for JS fallback, checkpoints deep-copy the vector/bias Maps.
   - `/api/mf/train` POST now accepts `earlyStopping` in the JSON body and passes it through to training (default remains unchanged unless enabled).
+- 2026-02-10 (MF validation split + regularization knobs):
+  - Changed household validation split in MF training to be deterministic by `(userId, movieId)` hash instead of per-run random shuffle.
+    - Motivation: stable metrics between retrains, no cross-run train/val swapping, and more reliable early-stopping behavior.
+  - Removed `ORDER BY random()` from ML-user sampling (uses deterministic ordering), avoiding an expensive non-deterministic DB operation.
+  - Split MF “regularization” into explicit knobs:
+    - `weightDecay`: AdamW decoupled weight decay (latent vectors only) for the TF/GPU training path.
+    - `featureRegularization`: L2 penalty used for feature-embedding SGD updates (and JS fallback training).
+    - `regularization` remains supported as a backwards-compatible default for both when the explicit knobs aren’t provided.
+  - `/api/mf/train` POST now accepts `weightDecay` and `featureRegularization`.

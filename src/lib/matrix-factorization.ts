@@ -62,6 +62,21 @@ const ML_SAMPLE_USERS = 500000; // Sample up to 500K ML users (effectively all ~
 const ML_RATING_WEIGHT = 0.1; // Relative weight vs household ratings (1.0)
 const ML_SAMPLE_PER_EPOCH = Infinity; // Use ALL mapped ML ratings every epoch
 
+function fnv1a32(input: string): number {
+  // Deterministic non-crypto hash for stable splits.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = (h + (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24)) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function isInValidationSplit(userId: string, movieId: string, splitFraction: number): boolean {
+  const pct = Math.max(1, Math.min(99, Math.floor(splitFraction * 100)));
+  return fnv1a32(`${userId}:${movieId}`) % 100 < pct;
+}
+
 // Feature types
 type FeatureType =
   | "genre"
@@ -658,7 +673,11 @@ export async function trainMatrixFactorization(
   options: {
     epochs?: number;
     learningRate?: number;
+    // Back-compat: regularization used to mean L2 reg. In GPU training this is treated as AdamW weight decay.
+    // Prefer passing weightDecay/featureRegularization explicitly going forward.
     regularization?: number;
+    weightDecay?: number;
+    featureRegularization?: number;
     latentDimensions?: number;
     featureDimensions?: number;
     earlyStopping?: {
@@ -678,7 +697,9 @@ export async function trainMatrixFactorization(
 }> {
   const epochs = options.epochs ?? DEFAULT_EPOCHS;
   const learningRate = options.learningRate ?? DEFAULT_LEARNING_RATE;
-  const regularization = options.regularization ?? DEFAULT_REGULARIZATION;
+  const legacyRegularization = options.regularization ?? DEFAULT_REGULARIZATION;
+  const weightDecay = options.weightDecay ?? legacyRegularization;
+  const featureRegularization = options.featureRegularization ?? legacyRegularization;
   const latentDimensions = options.latentDimensions ?? DEFAULT_LATENT_DIMENSIONS;
   const featureDimensions = options.featureDimensions ?? DEFAULT_FEATURE_DIMENSIONS;
 
@@ -885,8 +906,10 @@ export async function trainMatrixFactorization(
       }
 
       // Sample ML users to get complete preference profiles
+      // Deterministic (no ORDER BY random()) so results are stable between retrains.
+      // Note: this still needs to scan the MLRating index, but avoids the extreme cost of random ordering.
       const allMLUserIds: { mlUserId: string }[] = await prisma.$queryRaw`
-        SELECT "mlUserId" FROM (SELECT DISTINCT "mlUserId" FROM "MLRating") t ORDER BY random() LIMIT ${ML_SAMPLE_USERS}
+        SELECT DISTINCT "mlUserId" FROM "MLRating" ORDER BY "mlUserId" LIMIT ${ML_SAMPLE_USERS}
       `;
       const sampledUserIds = allMLUserIds.map((u) => u.mlUserId);
 
@@ -1018,11 +1041,13 @@ export async function trainMatrixFactorization(
     // Calculate global mean (of household normalized ratings only — ML has different scale)
     const globalMean = ratings.reduce((sum, r) => sum + r.rating, 0) / ratings.length;
 
-    // Split HOUSEHOLD ratings into training and validation (validate on household only)
-    const shuffled = [...ratings].sort(() => Math.random() - 0.5);
-    const validationSize = Math.floor(shuffled.length * VALIDATION_SPLIT);
-    const validationSet = shuffled.slice(0, validationSize);
-    const householdTrainingSet = shuffled.slice(validationSize);
+    // Split HOUSEHOLD ratings into training and validation (validate on household only).
+    // Deterministic split so metrics are comparable between retrains and early stopping is stable.
+    const validationSet = ratings.filter((r) => isInValidationSplit(r.userId, r.movieId, VALIDATION_SPLIT));
+    const householdTrainingSet = ratings.filter((r) => !isInValidationSplit(r.userId, r.movieId, VALIDATION_SPLIT));
+    console.log(
+      `[MF Train] Household split: train=${householdTrainingSet.length} val=${validationSet.length} (fraction=${VALIDATION_SPLIT})`
+    );
 
     // Combine household training + ML ratings for the full training set
     const trainingSet = [...householdTrainingSet, ...mlRatings];
@@ -1141,7 +1166,7 @@ export async function trainMatrixFactorization(
       const ADAM_BETA2 = 0.999;
       const ADAM_EPSILON = 1e-8;
       const adamLR = learningRate * 0.2; // Adam needs lower LR than SGD (0.005 * 0.2 = 0.001)
-      const weightDecay = regularization; // AdamW decoupled weight decay (applied to vectors, not biases)
+      const weightDecayLocal = weightDecay; // AdamW decoupled weight decay (applied to vectors, not biases)
       let adamStep = 0;
 
       // First moment (mean) and second moment (variance) estimates
@@ -1280,7 +1305,7 @@ export async function trainMatrixFactorization(
             uVecV.assign(uVecV.mul(beta2).add(uGrad.square().mul(1 - beta2)));
             uTensor.assign(
               uTensor
-                .mul(1 - lr * weightDecay)
+                .mul(1 - lr * weightDecayLocal)
                 .add(uVecM.div(uVecV.sqrt().add(eps)).mul(lr))
             );
 
@@ -1289,7 +1314,7 @@ export async function trainMatrixFactorization(
             mVecV.assign(mVecV.mul(beta2).add(mGrad.square().mul(1 - beta2)));
             mTensor.assign(
               mTensor
-                .mul(1 - lr * weightDecay)
+                .mul(1 - lr * weightDecayLocal)
                 .add(mVecM.div(mVecV.sqrt().add(eps)).mul(lr))
             );
 
@@ -1317,7 +1342,7 @@ export async function trainMatrixFactorization(
           // CPU: update feature embeddings using errors
           for (let i = 0; i < B; i++) {
             const wError = errorArr[i] * batch[i].weight;
-            updateFeatureEmbeddings(batch[i], wError, featureEmbeddings, featureLR, regularization, featureDimensions);
+            updateFeatureEmbeddings(batch[i], wError, featureEmbeddings, featureLR, featureRegularization, featureDimensions);
 
             if (batch[i].weight === 1.0) {
               totalSquaredError += errorArr[i] * errorArr[i];
@@ -1356,7 +1381,7 @@ export async function trainMatrixFactorization(
           }
           validationRmse = Math.sqrt(validationSquaredError / validationSet.length);
           const effectiveLR = adamLR * Math.sqrt(1 - Math.pow(ADAM_BETA2, adamStep)) / (1 - Math.pow(ADAM_BETA1, adamStep));
-          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} adamLR=${effectiveLR.toFixed(6)} wd=${weightDecay.toFixed(4)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`);
+          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} adamLR=${effectiveLR.toFixed(6)} wd=${weightDecayLocal.toFixed(4)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`);
 
           // Early stopping uses household validation only.
           if (earlyStoppingEnabled) {
@@ -1490,7 +1515,7 @@ export async function trainMatrixFactorization(
         let totalSquaredError = 0;
         let householdCount = 0;
 
-        for (const rating of epochTraining) {
+      for (const rating of epochTraining) {
           const userVector = userVectors.get(rating.userId)!;
           const movieVector = movieVectors.get(rating.movieId)!;
           const userBias = userBiases.get(rating.userId)!;
@@ -1509,17 +1534,17 @@ export async function trainMatrixFactorization(
             householdCount++;
           }
 
-          userBiases.set(rating.userId, userBias + learningRate * (weightedError - regularization * userBias));
-          movieBiases.set(rating.movieId, movieBias + learningRate * (weightedError - regularization * movieBias));
+          userBiases.set(rating.userId, userBias + learningRate * (weightedError - featureRegularization * userBias));
+          movieBiases.set(rating.movieId, movieBias + learningRate * (weightedError - featureRegularization * movieBias));
 
           for (let k = 0; k < latentDimensions; k++) {
             const userK = userVector[k];
             const movieK = movieVector[k];
-            userVector[k] += learningRate * (weightedError * movieK - regularization * userK);
-            movieVector[k] += learningRate * (weightedError * userK - regularization * movieK);
+            userVector[k] += learningRate * (weightedError * movieK - featureRegularization * userK);
+            movieVector[k] += learningRate * (weightedError * userK - featureRegularization * movieK);
           }
 
-          updateFeatureEmbeddings(rating, weightedError, featureEmbeddings, learningRate, regularization, featureDimensions);
+          updateFeatureEmbeddings(rating, weightedError, featureEmbeddings, learningRate, featureRegularization, featureDimensions);
         }
 
         rmse = householdCount > 0 ? Math.sqrt(totalSquaredError / householdCount) : 0;
@@ -1632,7 +1657,7 @@ export async function trainMatrixFactorization(
         latentDimensions,
         featureDimensions,
         learningRate,
-        regularization,
+        regularization: legacyRegularization,
         trainedEpochs: epochs,
         totalRatings: ratings.length,
         rmse,
