@@ -1204,17 +1204,29 @@ export async function trainMatrixFactorization(
             const userBiasGrads = tf.sub(wErrors, tf.mul(regScalar, bUserBias));
             const movieBiasGrads = tf.sub(wErrors, tf.mul(regScalar, bMovieBias));
 
-            // Accumulate gradients per entity via segment sum
+            // Accumulate gradients per entity via segment sum, then average by occurrence count
+            const onesVec = tf.ones([B]);
+            const userCounts = tf.unsortedSegmentSum(onesVec, userIdx, numUsers);
+            const movieCounts = tf.unsortedSegmentSum(onesVec, movieIdx, numMovies);
+            const userCountsExp = tf.maximum(userCounts.expandDims(1), 1); // [numUsers, 1]
+            const movieCountsExp = tf.maximum(movieCounts.expandDims(1), 1); // [numMovies, 1]
+
             const uGradAcc = tf.unsortedSegmentSum(userGrads, userIdx, numUsers);
             const mGradAcc = tf.unsortedSegmentSum(movieGrads, movieIdx, numMovies);
             const uBiasAcc = tf.unsortedSegmentSum(userBiasGrads, userIdx, numUsers);
             const mBiasAcc = tf.unsortedSegmentSum(movieBiasGrads, movieIdx, numMovies);
 
-            // Apply gradient updates
-            uTensor.assign(uTensor.add(tf.mul(lrScalar, uGradAcc)));
-            mTensor.assign(mTensor.add(tf.mul(lrScalar, mGradAcc)));
-            uBiasTensor.assign(uBiasTensor.add(tf.mul(lrScalar, uBiasAcc)));
-            mBiasTensor.assign(mBiasTensor.add(tf.mul(lrScalar, mBiasAcc)));
+            // Average gradients by per-entity occurrence count (prevents divergence for frequent entities)
+            const uGradAvg = tf.div(uGradAcc, userCountsExp);
+            const mGradAvg = tf.div(mGradAcc, movieCountsExp);
+            const uBiasAvg = tf.div(uBiasAcc, tf.maximum(userCounts, 1));
+            const mBiasAvg = tf.div(mBiasAcc, tf.maximum(movieCounts, 1));
+
+            // Apply averaged gradient updates
+            uTensor.assign(uTensor.add(tf.mul(lrScalar, uGradAvg)));
+            mTensor.assign(mTensor.add(tf.mul(lrScalar, mGradAvg)));
+            uBiasTensor.assign(uBiasTensor.add(tf.mul(lrScalar, uBiasAvg)));
+            mBiasTensor.assign(mBiasTensor.add(tf.mul(lrScalar, mBiasAvg)));
 
             return errors; // keep alive for CPU-side feature updates
           });
@@ -1843,6 +1855,21 @@ export async function getModelMetadata(): Promise<{
     confidence: Math.max(0, Math.min(1, confidence)),
     featuresLearned: featureCount,
   };
+}
+
+/**
+ * Reset a stale training lock (e.g., after container restart mid-training)
+ */
+export async function resetTrainingLock(): Promise<boolean> {
+  const result = await prisma.mFModelMetadata.updateMany({
+    where: { isTraining: true },
+    data: { isTraining: false },
+  });
+  if (result.count > 0) {
+    console.log("[MF] Reset stale training lock from previous container");
+    return true;
+  }
+  return false;
 }
 
 /**

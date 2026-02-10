@@ -5,6 +5,7 @@ import {
   getModelMetadata,
   shouldRetrain,
   isSystemInactive,
+  resetTrainingLock,
 } from "@/lib/matrix-factorization";
 import { isInternalOrAdmin } from "@/lib/internal-auth";
 
@@ -81,6 +82,10 @@ export async function PATCH(req: NextRequest) {
   if (!(await isInternalOrAdmin(req))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  // Reset stale training lock from a previous container crash
+  await resetTrainingLock();
+
   // Check inactivity
   const inactive = await isSystemInactive(INACTIVITY_THRESHOLD_MINUTES);
   if (!inactive) {
