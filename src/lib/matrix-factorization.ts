@@ -22,6 +22,7 @@ import { prisma } from "./prisma";
 let _tf: any = undefined; // undefined = not yet tried, null = unavailable
 let _tfBackend: "gpu" | "cpu" | "none" | "pending" = "pending";
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getTF(): Promise<{ tf: any; backend: "gpu" | "cpu" } | null> {
   if (_tfBackend === "none") return null;
   if (_tf) return { tf: _tf, backend: _tfBackend as "gpu" | "cpu" };
@@ -54,7 +55,7 @@ const DEFAULT_LATENT_DIMENSIONS = 50;
 const DEFAULT_FEATURE_DIMENSIONS = 16;
 const DEFAULT_LEARNING_RATE = 0.005;
 const DEFAULT_REGULARIZATION = 0.02;
-const DEFAULT_EPOCHS = 40;
+const DEFAULT_EPOCHS = 20;
 const MIN_RATINGS_TO_TRAIN = 20;
 const VALIDATION_SPLIT = 0.1;
 const ML_SAMPLE_USERS = 500000; // Sample up to 500K ML users (effectively all ~200K+)
@@ -859,7 +860,7 @@ export async function trainMatrixFactorization(
     // ── Load ML community ratings for joint training ──
     // ML ratings are stored by imdbId (no FK to Movie) — map to local movieIds
     const mlRatingCount = await prisma.mLRating.count();
-    let mlRatings: Rating[] = [];
+    const mlRatings: Rating[] = [];
 
     if (mlRatingCount > 0) {
       console.log(`[MF Train] Loading ML community ratings (${mlRatingCount} total in DB)...`);
@@ -1131,7 +1132,7 @@ export async function trainMatrixFactorization(
       const ADAM_BETA2 = 0.999;
       const ADAM_EPSILON = 1e-8;
       const adamLR = learningRate * 0.2; // Adam needs lower LR than SGD (0.005 * 0.2 = 0.001)
-      const regLambda = regularization; // L2 reg applied per-entity in gradient (not as global weight decay)
+      const weightDecay = regularization; // AdamW decoupled weight decay (applied to vectors, not biases)
       let adamStep = 0;
 
       // First moment (mean) and second moment (variance) estimates
@@ -1221,13 +1222,12 @@ export async function trainMatrixFactorization(
             const errors = targets.sub(preds);
             const wErrors = errors.mul(weights);
 
-            // Gradients with per-entity L2 reg (matches SGD: error * other - reg * self)
-            // Only regularizes entities present in this batch (unlike global weight decay)
+            // Gradients (no L2 here): AdamW decoupled weight decay applied in the update step.
             const wErrorsExp = tf.expandDims(wErrors, 1);
-            const userGrads = tf.sub(tf.mul(wErrorsExp, bMovieVecs), tf.mul(regLambda, bUserVecs));
-            const movieGrads = tf.sub(tf.mul(wErrorsExp, bUserVecs), tf.mul(regLambda, bMovieVecs));
-            const userBiasGrads = tf.sub(wErrors, tf.mul(regLambda, bUserBias));
-            const movieBiasGrads = tf.sub(wErrors, tf.mul(regLambda, bMovieBias));
+            const userGrads = tf.mul(wErrorsExp, bMovieVecs);
+            const movieGrads = tf.mul(wErrorsExp, bUserVecs);
+            const userBiasGrads = wErrors;
+            const movieBiasGrads = wErrors;
 
             // Average gradients per entity
             const onesVec = tf.ones([B]);
@@ -1245,7 +1245,7 @@ export async function trainMatrixFactorization(
             return { errors: tf.keep(errors), uGrad: tf.keep(uGrad), mGrad: tf.keep(mGrad), uBGrad: tf.keep(uBGrad), mBGrad: tf.keep(mBGrad) };
           });
 
-          // Step 2: Adam update (L2 reg already in gradients — no separate weight decay)
+          // Step 2: AdamW update (decoupled weight decay on vectors only; no decay on biases)
           tf.tidy(() => {
             const beta1 = ADAM_BETA1;
             const beta2 = ADAM_BETA2;
@@ -1255,12 +1255,20 @@ export async function trainMatrixFactorization(
             // Update user vectors
             uVecM.assign(uVecM.mul(beta1).add(uGrad.mul(1 - beta1)));
             uVecV.assign(uVecV.mul(beta2).add(uGrad.square().mul(1 - beta2)));
-            uTensor.assign(uTensor.add(uVecM.div(uVecV.sqrt().add(eps)).mul(lr)));
+            uTensor.assign(
+              uTensor
+                .mul(1 - lr * weightDecay)
+                .add(uVecM.div(uVecV.sqrt().add(eps)).mul(lr))
+            );
 
             // Update movie vectors
             mVecM.assign(mVecM.mul(beta1).add(mGrad.mul(1 - beta1)));
             mVecV.assign(mVecV.mul(beta2).add(mGrad.square().mul(1 - beta2)));
-            mTensor.assign(mTensor.add(mVecM.div(mVecV.sqrt().add(eps)).mul(lr)));
+            mTensor.assign(
+              mTensor
+                .mul(1 - lr * weightDecay)
+                .add(mVecM.div(mVecV.sqrt().add(eps)).mul(lr))
+            );
 
             // Update user biases
             uBiasM.assign(uBiasM.mul(beta1).add(uBGrad.mul(1 - beta1)));
@@ -1325,7 +1333,7 @@ export async function trainMatrixFactorization(
           }
           validationRmse = Math.sqrt(validationSquaredError / validationSet.length);
           const effectiveLR = adamLR * Math.sqrt(1 - Math.pow(ADAM_BETA2, adamStep)) / (1 - Math.pow(ADAM_BETA1, adamStep));
-          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} adamLR=${effectiveLR.toFixed(6)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`);
+          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} adamLR=${effectiveLR.toFixed(6)} wd=${weightDecay.toFixed(4)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`);
         }
 
         // Decay feature embedding LR (AdamW handles its own adaptive LR for GPU params)
@@ -1356,7 +1364,7 @@ export async function trainMatrixFactorization(
       mTensor.dispose();
       uBiasTensor.dispose();
       mBiasTensor.dispose();
-      // Cleanup Adam moment tensors
+      // Cleanup AdamW moment tensors
       uVecM.dispose();
       uVecV.dispose();
       mVecM.dispose();

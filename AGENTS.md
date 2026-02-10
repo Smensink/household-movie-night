@@ -624,3 +624,12 @@ Core entities in `prisma/schema.prisma`:
     - `scripts/repair-letterboxd-import-matches.ts` (repair canonical movie matching/ID links).
     - `scripts/backfill-letterboxd-ml-data.ts` (backfill ML-critical metadata fields without requiring poster backfill).
   - Learned workflow preference: profile-to-profile navigation must be instant and stable in-app without refresh, especially for households reviewing each other's stats.
+- 2026-02-10 (AdamW deployment alignment):
+  - Verified live deployment host `100.94.141.30` runs Docker on Windows; the running `household-movie-night-app-1` container was built from an older pre-AdamW bundle even though the repo checkout was at the AdamW commit.
+  - Root-caused why the AdamW commit had not been successfully deployed: `src/lib/matrix-factorization.ts` referenced an undefined `regLambda` in the GPU training path, preventing a clean rebuild.
+  - Implemented a correct GPU-path AdamW update:
+    - Gradients exclude L2 regularization.
+    - Decoupled weight decay applied to latent vectors only (not biases) during the AdamW update step.
+    - Training logs now include `wd=...` for easy verification in container logs/bundles.
+  - Set MF default epochs back to 20 to keep unattended retrains reasonable; `/api/mf/train` still allows overriding `epochs`.
+  - Learned deployment hygiene: always validate the actually-running Next standalone bundle (not just repo HEAD) when troubleshooting optimizer/model changes.
