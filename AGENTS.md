@@ -633,3 +633,10 @@ Core entities in `prisma/schema.prisma`:
     - Training logs now include `wd=...` for easy verification in container logs/bundles.
   - Set MF default epochs back to 20 to keep unattended retrains reasonable; `/api/mf/train` still allows overriding `epochs`.
   - Learned deployment hygiene: always validate the actually-running Next standalone bundle (not just repo HEAD) when troubleshooting optimizer/model changes.
+  - Deployment notes (remote Windows host):
+    - SSH target is `seb_m@100.94.141.30` (password auth, commonly via `sshpass`; do not commit credentials).
+    - Repo lives at `C:\tools\household movie night\household-movie-night` (note spaces; use `cd /d "..."`).
+    - Rebuild/redeploy is via `docker compose up --build -d` from that repo directory.
+    - App container is `household-movie-night-app-1` (host port `8347` to container `3000`), DB is `household-movie-night-db-1`.
+    - Windows shell constraints: no `tail`; use `docker logs --tail N ...`, and filter with `findstr` not `grep`.
+    - Optimizer verification: grep the running container bundle for `adamLR=` and `wd=` in `/app/.next/server/chunks/src_lib_matrix-factorization_ts_*.js` (ensures the deployed bundle, not just git HEAD, has AdamW).
