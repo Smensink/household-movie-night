@@ -641,3 +641,8 @@ Core entities in `prisma/schema.prisma`:
     - App container is `household-movie-night-app-1` (host port `8347` to container `3000`), DB is `household-movie-night-db-1`.
     - Windows shell constraints: no `tail`; use `docker logs --tail N ...`, and filter with `findstr` not `grep`.
     - Optimizer verification: grep the running container bundle for `adamLR=` and `wd=` in `/app/.next/server/chunks/src_lib_matrix-factorization_ts_*.js` (ensures the deployed bundle, not just git HEAD, has AdamW).
+- 2026-02-10 (MF ranking eval metrics):
+  - Added `POST /api/mf/eval` (internal/admin only) to evaluate the saved matrix-factorization model with ranking-focused metrics on a deterministic holdout split (no retraining).
+  - Metrics computed: `NDCG@K`, `MAP@K`, `AUC` (pairwise positives vs sampled unrated negatives), and `HitRate@K`.
+  - Implementation lives in `src/lib/mf-eval.ts` and uses `getPredictedRatingsForUser` for scoring.
+  - Learned product constraint: for this app, RMSE is a health metric but ranking metrics better reflect the “show best next” / “pick a winner” goals.
