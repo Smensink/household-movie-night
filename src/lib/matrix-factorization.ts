@@ -25,9 +25,9 @@ const DEFAULT_REGULARIZATION = 0.02;
 const DEFAULT_EPOCHS = 20;
 const MIN_RATINGS_TO_TRAIN = 20;
 const VALIDATION_SPLIT = 0.1;
-const ML_SAMPLE_USERS = 50000; // Number of ML users to sample per training run
+const ML_SAMPLE_USERS = 500000; // Sample up to 500K ML users (effectively all ~200K+)
 const ML_RATING_WEIGHT = 0.1; // Relative weight vs household ratings (1.0)
-const ML_SAMPLE_PER_EPOCH = 200000; // Max ML ratings per epoch (10x increase for better feature learning)
+const ML_SAMPLE_PER_EPOCH = Infinity; // Use ALL mapped ML ratings every epoch
 
 // Feature types
 type FeatureType =

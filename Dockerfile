@@ -1,4 +1,4 @@
-FROM node:22-alpine AS base
+FROM node:22 AS base
 
 # Install dependencies only when needed
 FROM base AS deps
@@ -21,8 +21,8 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+RUN groupadd --system --gid 1001 nodejs
+RUN useradd --system --uid 1001 --gid nodejs nextjs
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
@@ -32,8 +32,7 @@ COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/src/generated ./src/generated
 
-# Install curl for startup scripts (busybox wget doesn't support all HTTP methods)
-RUN apk add --no-cache curl
+# curl is already available in Debian base
 
 # Create and own the cache directory for image optimization
 RUN mkdir -p /app/.next/cache && chown -R nextjs:nodejs /app/.next
