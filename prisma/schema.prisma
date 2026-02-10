@@ -462,7 +462,7 @@ model MovieTag {
   id        String @id @default(cuid())
   movieId   String
   tag       String
-  relevance Float  // 0-1 relevance based on user tagging frequency
+  relevance Float  // 0-1 relevance (genome score from ml-25m or user-frequency from ml-32m)
 
   movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
 
