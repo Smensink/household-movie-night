@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { isInternalOrAdmin } from "@/lib/internal-auth";
+import { backfillMLDataForMovie } from "@/lib/ml-backfill";
 import {
   searchTMDBCompany,
   getTMDBCompanyMovies,
@@ -146,6 +147,7 @@ export async function POST(req: NextRequest) {
             },
             select: { id: true },
           });
+          if (movieDetails.imdb_id) await backfillMLDataForMovie(existingMovie.id, movieDetails.imdb_id);
           result.moviesAdded++;
 
           // Add genres if available

@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { searchOMDB, getOMDBMovie, extractRatingsFromOMDB } from "@/lib/api/omdb";
 import { searchTraktMovies } from "@/lib/api/trakt";
 import { prisma } from "@/lib/prisma";
+import { backfillMLDataForMovie } from "@/lib/ml-backfill";
 import {
   extractMovieMetadataFromRelations,
   splitCsvNames,
@@ -171,6 +172,9 @@ export async function GET(req: NextRequest) {
         },
       },
     });
+
+    // Backfill MovieLens tags + average rating from cached data
+    await backfillMLDataForMovie(persisted.id, movie.imdbId);
 
     const relationMetadata = extractMovieMetadataFromRelations(persisted);
     let metadata = relationMetadata;

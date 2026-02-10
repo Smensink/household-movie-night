@@ -1,4 +1,5 @@
 import { prisma } from "../prisma";
+import { backfillMLDataForMovie } from "../ml-backfill";
 
 interface RadarrConfig {
   baseUrl: string;
@@ -248,6 +249,9 @@ export async function importRadarrLibrary(): Promise<{
         },
         select: { id: true },
       });
+
+      // Backfill MovieLens tags + average rating from cached data
+      if (radarrMovie.imdbId) await backfillMLDataForMovie(movie.id, radarrMovie.imdbId);
 
       // Create RadarrSync record
       await prisma.radarrSync.create({

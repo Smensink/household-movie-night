@@ -1,4 +1,5 @@
 import { prisma } from "./prisma";
+import { backfillMLDataForMovie } from "./ml-backfill";
 import { getTrendingMovies, getPopularMovies, getAnticipatedMovies } from "./api/trakt";
 import { getOMDBMovie, getHighResPosterUrl, extractRatingsFromOMDB } from "./api/omdb";
 import {
@@ -201,7 +202,7 @@ export async function expandMoviePool(): Promise<{
     }
 
     try {
-      await prisma.movie.create({
+      const created = await prisma.movie.create({
         data: {
           imdbId,
           tmdbId,
@@ -219,7 +220,9 @@ export async function expandMoviePool(): Promise<{
           imdbRating,
           rottenTomatoesAudience,
         },
+        select: { id: true },
       });
+      if (imdbId) await backfillMLDataForMovie(created.id, imdbId);
       added++;
     } catch {
       // Skip if insert fails (e.g., duplicate)

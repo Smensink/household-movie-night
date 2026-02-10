@@ -697,11 +697,22 @@ export async function trainMatrixFactorization(
     });
 
     // ── Load ML community ratings for joint training ──
+    // ML ratings are stored by imdbId (no FK to Movie) — map to local movieIds
     const mlRatingCount = await prisma.mLRating.count();
     let mlRatings: Rating[] = [];
 
     if (mlRatingCount > 0) {
       console.log(`[MF Train] Loading ML community ratings (${mlRatingCount} total in DB)...`);
+
+      // Build imdbId → local movieId mapping
+      const localMoviesForML = await prisma.movie.findMany({
+        where: { imdbId: { not: null } },
+        select: { id: true, imdbId: true },
+      });
+      const imdbToLocalId = new Map<string, string>();
+      for (const m of localMoviesForML) {
+        if (m.imdbId) imdbToLocalId.set(m.imdbId, m.id);
+      }
 
       // Sample ML users to get complete preference profiles
       const allMLUserIds: { mlUserId: string }[] = await prisma.$queryRaw`
@@ -715,9 +726,15 @@ export async function trainMatrixFactorization(
       });
       console.log(`[MF Train] Loaded ${rawMLRatings.length} ratings from ${sampledUserIds.length} ML users`);
 
+      // Map imdbId → local movieId, skip ratings for movies not in local DB
+      const mappedMLRatings = rawMLRatings
+        .map((r) => ({ ...r, movieId: imdbToLocalId.get(r.imdbId) }))
+        .filter((r): r is typeof r & { movieId: string } => r.movieId != null);
+      console.log(`[MF Train] ${mappedMLRatings.length} ML ratings mapped to local movies (of ${rawMLRatings.length})`);
+
       // Compute per-ML-user stats for normalization and features
       const mlUserStats = new Map<string, { sum: number; sumSq: number; count: number }>();
-      for (const r of rawMLRatings) {
+      for (const r of mappedMLRatings) {
         if (!mlUserStats.has(r.mlUserId)) mlUserStats.set(r.mlUserId, { sum: 0, sumSq: 0, count: 0 });
         const stats = mlUserStats.get(r.mlUserId)!;
         stats.sum += r.rating;
@@ -741,7 +758,7 @@ export async function trainMatrixFactorization(
 
       // Load movie features for ML-rated movies not already loaded
       const householdMovieIds = new Set(rawRatings.map((r) => r.movieId));
-      const mlOnlyMovieIds = [...new Set(rawMLRatings.map((r) => r.movieId))].filter(
+      const mlOnlyMovieIds = [...new Set(mappedMLRatings.map((r) => r.movieId))].filter(
         (id) => !householdMovieIds.has(id)
       );
 
@@ -800,7 +817,7 @@ export async function trainMatrixFactorization(
       };
 
       // Build ML Rating objects
-      for (const r of rawMLRatings) {
+      for (const r of mappedMLRatings) {
         const mf = movieFeaturesMap.get(r.movieId);
         if (!mf) continue;
         const uf = mlUserFeatureCache.get(`ml_${r.mlUserId}`);

@@ -5,6 +5,7 @@ import { getTMDBMovieByImdbId, extractTMDBRating } from "@/lib/api/tmdb";
 import { prisma } from "@/lib/prisma";
 import { syncMovieMetadataFromOMDB } from "@/lib/movie-metadata";
 import { isInternalOrAdmin } from "@/lib/internal-auth";
+import { backfillMLDataForMovie } from "@/lib/ml-backfill";
 
 const PREFILL_LIMIT = 500;
 
@@ -139,6 +140,8 @@ export async function POST(req: NextRequest) {
       } catch {
         // Ignore metadata sync errors - movie is still created
       }
+      // Backfill MovieLens tags + average rating from cached data
+      await backfillMLDataForMovie(created.id, imdbId);
       added++;
     } catch {
       // Skip if insert fails (e.g., duplicate)

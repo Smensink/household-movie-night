@@ -1,4 +1,5 @@
 import { prisma } from "../prisma";
+import { backfillMLDataForMovie } from "../ml-backfill";
 import {
   extractRatingsFromOMDB,
   getHighResPosterUrl,
@@ -279,6 +280,9 @@ async function upsertMovieFromOMDB(details: OMDBMovie): Promise<CandidateMovie> 
       traktSlug: true,
     },
   });
+
+  // Backfill MovieLens tags + average rating from cached data
+  await backfillMLDataForMovie(movie.id, details.imdbID);
 
   return movie;
 }
