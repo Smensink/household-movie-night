@@ -669,3 +669,5 @@ Core entities in `prisma/schema.prisma`:
     - `ML_SAMPLE_PER_EPOCH`: `Infinity` -> `1_000_000`
   - Added `mlRatingWeight` and `mlSamplePerEpoch` overrides to `trainMatrixFactorization()` and `POST /api/mf/train`.
   - ML sampling and epoch shuffles are now seeded/deterministic (repeatable retrains for debugging).
+- 2026-02-10 (Auto-retrain early stopping):
+  - `PATCH /api/mf/train` auto-retrain now enables early stopping (`patience=3`, `minDelta=0.001`) so unattended retrains save the best household-validation epoch instead of always running all epochs.
