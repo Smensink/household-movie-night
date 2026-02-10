@@ -22,9 +22,10 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # Install CUDA 11.8 runtime libraries for tfjs-node-gpu (requires CUDA 11 + cuDNN 8)
+# Use Ubuntu 22.04 NVIDIA repo (debian12 repo only has CUDA 12+)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends wget && \
-    wget -q https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
+    apt-get install -y --no-install-recommends wget gnupg && \
+    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -36,7 +37,7 @@ RUN apt-get update && \
       libcusparse-11-8 \
       libcudnn8 && \
     rm -rf /var/lib/apt/lists/* cuda-keyring_*.deb && \
-    apt-get purge -y --auto-remove wget
+    apt-get purge -y --auto-remove wget gnupg
 
 # Set CUDA library path
 ENV LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
