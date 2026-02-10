@@ -646,3 +646,8 @@ Core entities in `prisma/schema.prisma`:
   - Metrics computed: `NDCG@K`, `MAP@K`, `AUC` (pairwise positives vs sampled unrated negatives), and `HitRate@K`.
   - Implementation lives in `src/lib/mf-eval.ts` and uses `getPredictedRatingsForUser` for scoring.
   - Learned product constraint: for this app, RMSE is a health metric but ranking metrics better reflect the “show best next” / “pick a winner” goals.
+- 2026-02-10 (MF early stopping checkpoints):
+  - Added optional early stopping to `trainMatrixFactorization()` using household validation RMSE with `patience` + `minDelta`.
+  - Implemented in-memory weight checkpoints (best-so-far snapshots) so the saved model uses the best validation epoch even if later epochs degrade.
+  - For the TF/GPU path, checkpoints are Tensor clones of `uTensor/mTensor/uBiasTensor/mBiasTensor` plus a deep copy of feature-embeddings; for JS fallback, checkpoints deep-copy the vector/bias Maps.
+  - `/api/mf/train` POST now accepts `earlyStopping` in the JSON body and passes it through to training (default remains unchanged unless enabled).

@@ -661,6 +661,11 @@ export async function trainMatrixFactorization(
     regularization?: number;
     latentDimensions?: number;
     featureDimensions?: number;
+    earlyStopping?: {
+      enabled?: boolean;
+      patience?: number;
+      minDelta?: number;
+    };
   } = {}
 ): Promise<{
   rmse: number;
@@ -676,6 +681,10 @@ export async function trainMatrixFactorization(
   const regularization = options.regularization ?? DEFAULT_REGULARIZATION;
   const latentDimensions = options.latentDimensions ?? DEFAULT_LATENT_DIMENSIONS;
   const featureDimensions = options.featureDimensions ?? DEFAULT_FEATURE_DIMENSIONS;
+
+  const earlyStoppingEnabled = options.earlyStopping?.enabled === true;
+  const earlyStoppingPatience = Math.max(1, Math.floor(options.earlyStopping?.patience ?? 3));
+  const earlyStoppingMinDelta = Math.max(0, options.earlyStopping?.minDelta ?? 0.001);
 
   // Atomically acquire training lock to prevent TOCTOU race
   const metadata = await prisma.mFModelMetadata.findFirst();
@@ -1148,6 +1157,20 @@ export async function trainMatrixFactorization(
       // Feature embedding learning rate (simple SGD with lower rate for CPU-side features)
       let featureLR = learningRate * 0.2;
 
+      // Early stopping (best checkpoint in memory; restored before saving)
+      let bestVal = Number.POSITIVE_INFINITY;
+      let bestEpoch = -1;
+      let epochsWithoutImprove = 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let bestUTensor: any | null = null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let bestMTensor: any | null = null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let bestUBiasTensor: any | null = null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let bestMBiasTensor: any | null = null;
+      let bestFeatureEmbeddings: Map<string, { vector: number[]; bias: number }> | null = null;
+
       for (let epoch = 0; epoch < epochs; epoch++) {
         let epochTraining: Rating[];
         if (mlRatings.length > ML_SAMPLE_PER_EPOCH) {
@@ -1334,10 +1357,70 @@ export async function trainMatrixFactorization(
           validationRmse = Math.sqrt(validationSquaredError / validationSet.length);
           const effectiveLR = adamLR * Math.sqrt(1 - Math.pow(ADAM_BETA2, adamStep)) / (1 - Math.pow(ADAM_BETA1, adamStep));
           console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} adamLR=${effectiveLR.toFixed(6)} wd=${weightDecay.toFixed(4)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`);
+
+          // Early stopping uses household validation only.
+          if (earlyStoppingEnabled) {
+            const improved = validationRmse + earlyStoppingMinDelta < bestVal;
+            if (improved) {
+              bestVal = validationRmse;
+              bestEpoch = epoch;
+              epochsWithoutImprove = 0;
+
+              // Replace best checkpoint (dispose previous tensors to avoid GPU leak).
+              if (bestUTensor) bestUTensor.dispose();
+              if (bestMTensor) bestMTensor.dispose();
+              if (bestUBiasTensor) bestUBiasTensor.dispose();
+              if (bestMBiasTensor) bestMBiasTensor.dispose();
+
+              bestUTensor = uTensor.clone();
+              bestMTensor = mTensor.clone();
+              bestUBiasTensor = uBiasTensor.clone();
+              bestMBiasTensor = mBiasTensor.clone();
+
+              // Deep copy feature embeddings (small enough to snapshot; avoids mutation after checkpoint).
+              bestFeatureEmbeddings = new Map();
+              for (const [k, v] of featureEmbeddings.entries()) {
+                bestFeatureEmbeddings.set(k, { vector: [...v.vector], bias: v.bias });
+              }
+
+              console.log(
+                `[MF Train] EarlyStop checkpoint: best valRMSE=${bestVal.toFixed(4)} at epoch ${bestEpoch + 1}`
+              );
+            } else {
+              epochsWithoutImprove++;
+              if (epochsWithoutImprove >= earlyStoppingPatience) {
+                console.log(
+                  `[MF Train] EarlyStop: no valRMSE improvement for ${earlyStoppingPatience} epoch(s). Stopping at epoch ${epoch + 1}/${epochs}; best was epoch ${bestEpoch + 1} (valRMSE=${bestVal.toFixed(4)}).`
+                );
+                break;
+              }
+            }
+          }
         }
 
         // Decay feature embedding LR (AdamW handles its own adaptive LR for GPU params)
         featureLR *= 0.98;
+      }
+
+      // If early stopping was enabled, restore best checkpointed weights before saving.
+      if (earlyStoppingEnabled && bestUTensor && bestMTensor && bestUBiasTensor && bestMBiasTensor) {
+        tf.tidy(() => {
+          uTensor.assign(bestUTensor);
+          mTensor.assign(bestMTensor);
+          uBiasTensor.assign(bestUBiasTensor);
+          mBiasTensor.assign(bestMBiasTensor);
+        });
+        if (bestFeatureEmbeddings) {
+          featureEmbeddings.clear();
+          for (const [k, v] of bestFeatureEmbeddings.entries()) {
+            featureEmbeddings.set(k, { vector: [...v.vector], bias: v.bias });
+          }
+        }
+        // Dispose checkpoint tensors after restore.
+        bestUTensor.dispose();
+        bestMTensor.dispose();
+        bestUBiasTensor.dispose();
+        bestMBiasTensor.dispose();
       }
 
       // Read final tensors back to Maps
@@ -1378,6 +1461,16 @@ export async function trainMatrixFactorization(
     } else {
       // ── Pure JavaScript fallback (no tf.js) ──
       console.log(`[MF Train] Using pure JS training loop`);
+
+      // Early stopping (best checkpoint in memory; restored before saving)
+      let bestVal = Number.POSITIVE_INFINITY;
+      let bestEpoch = -1;
+      let epochsWithoutImprove = 0;
+      let bestUserVectors: Map<string, number[]> | null = null;
+      let bestMovieVectors: Map<string, number[]> | null = null;
+      let bestUserBiases: Map<string, number> | null = null;
+      let bestMovieBiases: Map<string, number> | null = null;
+      let bestFeatureEmbeddings: Map<string, { vector: number[]; bias: number }> | null = null;
 
       for (let epoch = 0; epoch < epochs; epoch++) {
         let epochTraining: Rating[];
@@ -1450,6 +1543,50 @@ export async function trainMatrixFactorization(
         validationRmse = validationSet.length > 0 ? Math.sqrt(validationSquaredError / validationSet.length) : rmse;
 
         console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} (JS)`);
+
+        if (earlyStoppingEnabled && validationSet.length > 0) {
+          const improved = validationRmse + earlyStoppingMinDelta < bestVal;
+          if (improved) {
+            bestVal = validationRmse;
+            bestEpoch = epoch;
+            epochsWithoutImprove = 0;
+
+            // Deep copy maps (exclude nothing here; we only filter ML users on save).
+            bestUserVectors = new Map();
+            for (const [k, v] of userVectors.entries()) bestUserVectors.set(k, [...v]);
+            bestMovieVectors = new Map();
+            for (const [k, v] of movieVectors.entries()) bestMovieVectors.set(k, [...v]);
+            bestUserBiases = new Map(userBiases.entries());
+            bestMovieBiases = new Map(movieBiases.entries());
+            bestFeatureEmbeddings = new Map();
+            for (const [k, v] of featureEmbeddings.entries()) bestFeatureEmbeddings.set(k, { vector: [...v.vector], bias: v.bias });
+
+            console.log(
+              `[MF Train] EarlyStop checkpoint: best valRMSE=${bestVal.toFixed(4)} at epoch ${bestEpoch + 1}`
+            );
+          } else {
+            epochsWithoutImprove++;
+            if (epochsWithoutImprove >= earlyStoppingPatience) {
+              console.log(
+                `[MF Train] EarlyStop: no valRMSE improvement for ${earlyStoppingPatience} epoch(s). Stopping at epoch ${epoch + 1}/${epochs}; best was epoch ${bestEpoch + 1} (valRMSE=${bestVal.toFixed(4)}).`
+              );
+              break;
+            }
+          }
+        }
+      }
+
+      if (earlyStoppingEnabled && bestUserVectors && bestMovieVectors && bestUserBiases && bestMovieBiases && bestFeatureEmbeddings) {
+        userVectors.clear();
+        for (const [k, v] of bestUserVectors.entries()) userVectors.set(k, v);
+        movieVectors.clear();
+        for (const [k, v] of bestMovieVectors.entries()) movieVectors.set(k, v);
+        userBiases.clear();
+        for (const [k, v] of bestUserBiases.entries()) userBiases.set(k, v);
+        movieBiases.clear();
+        for (const [k, v] of bestMovieBiases.entries()) movieBiases.set(k, v);
+        featureEmbeddings.clear();
+        for (const [k, v] of bestFeatureEmbeddings.entries()) featureEmbeddings.set(k, v);
       }
     }
 
