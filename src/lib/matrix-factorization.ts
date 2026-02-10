@@ -716,7 +716,7 @@ export async function trainMatrixFactorization(
 
       // Sample ML users to get complete preference profiles
       const allMLUserIds: { mlUserId: string }[] = await prisma.$queryRaw`
-        SELECT DISTINCT "mlUserId" FROM "MLRating" ORDER BY random() LIMIT ${ML_SAMPLE_USERS}
+        SELECT "mlUserId" FROM (SELECT DISTINCT "mlUserId" FROM "MLRating") t ORDER BY random() LIMIT ${ML_SAMPLE_USERS}
       `;
       const sampledUserIds = allMLUserIds.map((u) => u.mlUserId);
 
