@@ -1249,8 +1249,8 @@ export async function trainMatrixFactorization(
 
         rmse = householdCount > 0 ? Math.sqrt(totalSquaredError / householdCount) : 0;
 
-        // Compute validation RMSE on last epoch or every 5th (sync vectors from GPU first)
-        const isLogEpoch = epoch % 5 === 0 || epoch === epochs - 1;
+        // Compute validation RMSE every epoch (sync vectors from GPU first)
+        const isLogEpoch = true;
         if (isLogEpoch && validationSet.length > 0) {
           // Sync current tensor state to Maps for validation
           const curUVecs = uTensor.dataSync() as Float32Array;
@@ -1382,9 +1382,7 @@ export async function trainMatrixFactorization(
         }
         validationRmse = validationSet.length > 0 ? Math.sqrt(validationSquaredError / validationSet.length) : rmse;
 
-        if (epoch % 5 === 0 || epoch === epochs - 1) {
-          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} (JS)`);
-        }
+        console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} (JS)`);
       }
     }
 
