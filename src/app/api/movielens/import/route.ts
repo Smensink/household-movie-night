@@ -3,14 +3,15 @@ import { prisma } from "@/lib/prisma";
 import { isInternalOrAdmin } from "@/lib/internal-auth";
 import { parse } from "csv-parse";
 
-const ML_32M_URL = "https://files.grouplens.org/datasets/movielens/ml-32m.zip";
+// ml-25m contains genome-scores.csv and genome-tags.csv; ml-32m does not
+const ML_25M_URL = "https://files.grouplens.org/datasets/movielens/ml-25m.zip";
 const MAX_TAGS_PER_MOVIE = 15;
 const MIN_RELEVANCE = 0.5;
 const BATCH_SIZE = 100;
 
 /**
  * POST /api/movielens/import
- * Download ML-32M dataset, extract tag genome data, and import into MovieTag table.
+ * Download ML-25M dataset, extract tag genome data, and import into MovieTag table.
  * Matches MovieLens movies to local movies via imdbId.
  * Idempotent: skips movies that already have tags.
  */
@@ -29,14 +30,14 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  console.log("[MovieLens Import] Starting tag genome import from ML-32M...");
+  console.log("[MovieLens Import] Starting tag genome import from ML-25M...");
 
   try {
     // Step 1: Download the ZIP file
-    console.log("[MovieLens Import] Downloading ml-32m.zip...");
-    const response = await fetch(ML_32M_URL);
+    console.log("[MovieLens Import] Downloading ml-25m.zip...");
+    const response = await fetch(ML_25M_URL);
     if (!response.ok) {
-      throw new Error(`Failed to download ML-32M: ${response.status} ${response.statusText}`);
+      throw new Error(`Failed to download ML-25M: ${response.status} ${response.statusText}`);
     }
 
     const zipBuffer = Buffer.from(await response.arrayBuffer());
