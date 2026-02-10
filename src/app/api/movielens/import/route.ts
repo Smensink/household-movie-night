@@ -2,17 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { isInternalOrAdmin } from "@/lib/internal-auth";
 import { parse } from "csv-parse";
+import { Readable } from "stream";
 
 // ml-25m: genome-scores.csv + genome-tags.csv (1128 curated semantic tag scores per movie)
 const ML_25M_URL = "https://files.grouplens.org/datasets/movielens/ml-25m.zip";
 // ml-32m: tags.csv (user-applied tags), ratings.csv (32M individual ratings), links.csv
 const ML_32M_URL = "https://files.grouplens.org/datasets/movielens/ml-32m.zip";
 const MAX_TAGS_PER_MOVIE = 15;
-const MIN_USER_TAG_COUNT = 3; // Minimum distinct users who must apply a tag for it to count
-const GENOME_MIN_RELEVANCE = 0.5; // Minimum genome relevance score to include a tag
+const MIN_USER_TAG_COUNT = 3;
+const GENOME_MIN_RELEVANCE = 0.5;
 const BATCH_SIZE = 2000;
 
-type ZipDirectory = { files: Array<{ path: string; buffer: () => Promise<Buffer> }> };
+type ZipEntry = {
+  path: string;
+  buffer: () => Promise<Buffer>;
+  stream: () => NodeJS.ReadableStream;
+};
+type ZipDirectory = { files: ZipEntry[] };
 
 /**
  * POST /api/movielens/import
@@ -20,6 +26,8 @@ type ZipDirectory = { files: Array<{ path: string; buffer: () => Promise<Buffer>
  * - Tags: genome scores from ml-25m (primary) + user-frequency from ml-32m (supplementary)
  * - Ratings: ALL individual ML user ratings from ml-32m for MF training
  * - Per-movie averages: stored as letterboxdRating for quality signal
+ *
+ * Uses streaming for large CSV files to avoid JS string length limits.
  *
  * Query params:
  * - force=true: reimport tags even if they already exist
@@ -77,12 +85,14 @@ export async function POST(req: NextRequest) {
       unzipper.Open.buffer(zip25mBuf),
       unzipper.Open.buffer(zip32mBuf),
     ]);
+    const d25m = dir25m as unknown as ZipDirectory;
+    const d32m = dir32m as unknown as ZipDirectory;
 
-    // Step 3: Parse links.csv from ml-32m (superset of ml-25m — all ML movie IDs)
+    // Step 3: Parse links.csv from ml-32m (small file, buffer is fine)
     console.log("[MovieLens Import] Parsing links.csv...");
     const mlToImdb = new Map<string, string>();
-    await parseCsv(
-      await getFileFromZip(dir32m as ZipDirectory, "links.csv"),
+    await parseCsvString(
+      await getFileString(d32m, "links.csv"),
       (row: { movieId: string; imdbId: string }) => {
         if (row.imdbId) mlToImdb.set(row.movieId, `tt${row.imdbId.padStart(7, "0")}`);
       }
@@ -108,29 +118,28 @@ export async function POST(req: NextRequest) {
       // Phase A1: Genome tags from ml-25m (primary — dense, algorithmically computed for 1128 curated tags)
       console.log("[MovieLens Import] Phase A1: Parsing genome data from ml-25m...");
       const genomeTagNames = new Map<string, string>();
-      await parseCsv(
-        await getFileFromZip(dir25m as ZipDirectory, "genome-tags.csv"),
+      await parseCsvString(
+        await getFileString(d25m, "genome-tags.csv"),
         (row: { tagId: string; tag: string }) => {
           genomeTagNames.set(row.tagId, row.tag.toLowerCase().trim());
         }
       );
       console.log(`[MovieLens Import] ${genomeTagNames.size} genome tag names loaded`);
 
-      // Parse genome scores — collect tags above threshold per matched movie
+      // Stream genome scores (large file ~350MB uncompressed)
       const genomeMovieTags = new Map<string, { tag: string; relevance: number }[]>();
-      await parseCsv(
-        await getFileFromZip(dir25m as ZipDirectory, "genome-scores.csv"),
-        (row: { movieId: string; tagId: string; relevance: string }) => {
-          const localId = mlToLocal.get(row.movieId);
-          if (!localId) return;
-          const relevance = parseFloat(row.relevance);
-          if (isNaN(relevance) || relevance < GENOME_MIN_RELEVANCE) return;
-          const tagName = genomeTagNames.get(row.tagId);
-          if (!tagName) return;
-          if (!genomeMovieTags.has(localId)) genomeMovieTags.set(localId, []);
-          genomeMovieTags.get(localId)!.push({ tag: tagName, relevance });
-        }
-      );
+      const genomeParser = createStreamParser(d25m, "genome-scores.csv");
+      for await (const row of genomeParser) {
+        const r = row as { movieId: string; tagId: string; relevance: string };
+        const localId = mlToLocal.get(r.movieId);
+        if (!localId) continue;
+        const relevance = parseFloat(r.relevance);
+        if (isNaN(relevance) || relevance < GENOME_MIN_RELEVANCE) continue;
+        const tagName = genomeTagNames.get(r.tagId);
+        if (!tagName) continue;
+        if (!genomeMovieTags.has(localId)) genomeMovieTags.set(localId, []);
+        genomeMovieTags.get(localId)!.push({ tag: tagName, relevance });
+      }
 
       // Insert top genome tags per movie
       const genomeCoveredMovies = new Set<string>();
@@ -156,20 +165,19 @@ export async function POST(req: NextRequest) {
       // Phase A2: User-frequency tags from ml-32m (supplementary — for movies NOT covered by genome)
       console.log("[MovieLens Import] Phase A2: Parsing user-frequency tags from ml-32m...");
       const movieTagUsers = new Map<string, Map<string, Set<string>>>();
-      await parseCsv(
-        await getFileFromZip(dir32m as ZipDirectory, "tags.csv"),
-        (row: { userId: string; movieId: string; tag: string }) => {
-          const localId = mlToLocal.get(row.movieId);
-          if (!localId || !row.tag) return;
-          if (genomeCoveredMovies.has(localId)) return; // Skip genome-covered movies
-          const tag = row.tag.toLowerCase().trim();
-          if (tag.length < 2 || tag.length > 50) return;
-          if (!movieTagUsers.has(localId)) movieTagUsers.set(localId, new Map());
-          const tagUsers = movieTagUsers.get(localId)!;
-          if (!tagUsers.has(tag)) tagUsers.set(tag, new Set());
-          tagUsers.get(tag)!.add(row.userId);
-        }
-      );
+      const tagsParser = createStreamParser(d32m, "tags.csv");
+      for await (const row of tagsParser) {
+        const r = row as { userId: string; movieId: string; tag: string };
+        const localId = mlToLocal.get(r.movieId);
+        if (!localId || !r.tag) continue;
+        if (genomeCoveredMovies.has(localId)) continue;
+        const tag = r.tag.toLowerCase().trim();
+        if (tag.length < 2 || tag.length > 50) continue;
+        if (!movieTagUsers.has(localId)) movieTagUsers.set(localId, new Map());
+        const tagUsers = movieTagUsers.get(localId)!;
+        if (!tagUsers.has(tag)) tagUsers.set(tag, new Set());
+        tagUsers.get(tag)!.add(r.userId);
+      }
 
       const userTagBatch: { movieId: string; tag: string; relevance: number }[] = [];
       for (const [localId, tagUsers] of movieTagUsers) {
@@ -204,47 +212,52 @@ export async function POST(req: NextRequest) {
     let ratingsUpdated = 0;
 
     if (existingMLRatingCount <= 1000) {
-      console.log("[MovieLens Import] Phase B: Parsing ratings.csv (storing ALL matching ratings)...");
-      const ratingsContent = await getFileFromZip(dir32m as ZipDirectory, "ratings.csv");
+      console.log("[MovieLens Import] Phase B: Streaming ratings.csv (storing ALL matching ratings)...");
 
+      // Stream ratings — batch insert as we go to avoid holding millions of rows in memory
       const movieAvgs = new Map<string, { sum: number; count: number }>();
-      const mlBatch: { mlUserId: string; movieId: string; rating: number }[] = [];
+      let mlBatch: { mlUserId: string; movieId: string; rating: number }[] = [];
       let totalMatched = 0;
+      let totalInserted = 0;
+      const insertStart = Date.now();
 
-      await parseCsv(ratingsContent, (row: { userId: string; movieId: string; rating: string }) => {
-        const localId = mlToLocal.get(row.movieId);
-        if (!localId) return;
-        const rating = parseFloat(row.rating);
-        if (isNaN(rating)) return;
+      const ratingsParser = createStreamParser(d32m, "ratings.csv");
+      for await (const row of ratingsParser) {
+        const r = row as { userId: string; movieId: string; rating: string };
+        const localId = mlToLocal.get(r.movieId);
+        if (!localId) continue;
+        const rating = parseFloat(r.rating);
+        if (isNaN(rating)) continue;
 
         if (!movieAvgs.has(localId)) movieAvgs.set(localId, { sum: 0, count: 0 });
         const avg = movieAvgs.get(localId)!;
         avg.sum += rating;
         avg.count++;
 
-        mlBatch.push({ mlUserId: row.userId, movieId: localId, rating });
+        mlBatch.push({ mlUserId: r.userId, movieId: localId, rating });
         totalMatched++;
-      });
 
-      console.log(`[MovieLens Import] ${totalMatched} matching ratings found for ${movieAvgs.size} movies`);
-
-      // Batch insert all ML ratings
-      console.log("[MovieLens Import] Inserting ML ratings...");
-      const insertStart = Date.now();
-      for (let i = 0; i < mlBatch.length; i += BATCH_SIZE) {
-        const batch = mlBatch.slice(i, i + BATCH_SIZE);
-        await prisma.mLRating.createMany({
-          data: batch,
-          skipDuplicates: true,
-        });
-        if ((i / BATCH_SIZE) % 100 === 0 && i > 0) {
-          const pct = ((i / mlBatch.length) * 100).toFixed(1);
-          console.log(`[MovieLens Import] Rating insert progress: ${pct}% (${i}/${mlBatch.length})`);
+        if (mlBatch.length >= BATCH_SIZE) {
+          await prisma.mLRating.createMany({ data: mlBatch, skipDuplicates: true });
+          totalInserted += mlBatch.length;
+          mlBatch = [];
+          if ((totalInserted / BATCH_SIZE) % 100 === 0) {
+            console.log(`[MovieLens Import] Rating insert progress: ${totalInserted} inserted...`);
+          }
         }
       }
+
+      // Flush remaining batch
+      if (mlBatch.length > 0) {
+        await prisma.mLRating.createMany({ data: mlBatch, skipDuplicates: true });
+        totalInserted += mlBatch.length;
+      }
+
       mlRatingsStored = await prisma.mLRating.count();
       const insertSecs = ((Date.now() - insertStart) / 1000).toFixed(1);
-      console.log(`[MovieLens Import] Stored ${mlRatingsStored} ML ratings in ${insertSecs}s`);
+      console.log(
+        `[MovieLens Import] Stored ${mlRatingsStored} ML ratings in ${insertSecs}s (${totalMatched} matched from stream)`
+      );
 
       // Update per-movie average ratings
       console.log("[MovieLens Import] Updating per-movie average ratings...");
@@ -292,7 +305,20 @@ export async function POST(req: NextRequest) {
   }
 }
 
-async function getFileFromZip(dir: ZipDirectory, filename: string): Promise<string> {
+/** Create a streaming CSV parser from a ZIP entry (for large files) */
+function createStreamParser(dir: ZipDirectory, filename: string) {
+  const entry = findEntry(dir, filename);
+  const stream = entry.stream() as Readable;
+  return stream.pipe(parse({ columns: true, skip_empty_lines: true }));
+}
+
+/** Get file content as string (only for small files like links.csv, genome-tags.csv) */
+async function getFileString(dir: ZipDirectory, filename: string): Promise<string> {
+  const entry = findEntry(dir, filename);
+  return (await entry.buffer()).toString("utf-8");
+}
+
+function findEntry(dir: ZipDirectory, filename: string): ZipEntry {
   const entry = dir.files.find((f) => f.path.endsWith(`/${filename}`) || f.path === filename);
   if (!entry) {
     const available = dir.files
@@ -301,7 +327,7 @@ async function getFileFromZip(dir: ZipDirectory, filename: string): Promise<stri
       .join(", ");
     throw new Error(`${filename} not found in ZIP. Available: ${available}`);
   }
-  return (await entry.buffer()).toString("utf-8");
+  return entry;
 }
 
 async function flushTagBatch(batch: { movieId: string; tag: string; relevance: number }[]) {
@@ -315,7 +341,8 @@ async function flushTagBatch(batch: { movieId: string; tag: string; relevance: n
   });
 }
 
-function parseCsv<T>(content: string, onRow: (row: T) => void): Promise<void> {
+/** Parse a small CSV string */
+function parseCsvString<T>(content: string, onRow: (row: T) => void): Promise<void> {
   return new Promise((resolve, reject) => {
     const parser = parse(content, { columns: true, skip_empty_lines: true });
     parser.on("data", onRow);
