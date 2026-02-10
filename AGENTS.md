@@ -635,6 +635,7 @@ Core entities in `prisma/schema.prisma`:
   - Learned deployment hygiene: always validate the actually-running Next standalone bundle (not just repo HEAD) when troubleshooting optimizer/model changes.
   - Deployment notes (remote Windows host):
     - SSH target is `seb_m@100.94.141.30` (password auth, commonly via `sshpass`; do not commit credentials).
+    - Alternate Tailscale IP seen in use: `100.88.80.14` (may be the preferred browser-access host for the same deployment).
     - Repo lives at `C:\tools\household movie night\household-movie-night` (note spaces; use `cd /d "..."`).
     - Rebuild/redeploy is via `docker compose up --build -d` from that repo directory.
     - App container is `household-movie-night-app-1` (host port `8347` to container `3000`), DB is `household-movie-night-db-1`.
