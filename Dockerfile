@@ -21,25 +21,25 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-# Install CUDA runtime libraries for GPU-accelerated training
+# Install CUDA 11.8 runtime libraries for tfjs-node-gpu (requires CUDA 11 + cuDNN 8)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends wget && \
     wget -q https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-      cuda-cudart-12-6 \
-      libcublas-12-6 \
-      libcufft-12-6 \
-      libcurand-12-6 \
-      libcusolver-12-6 \
-      libcusparse-12-6 \
-      libcudnn9-cuda-12 && \
+      cuda-cudart-11-8 \
+      libcublas-11-8 \
+      libcufft-11-8 \
+      libcurand-11-8 \
+      libcusolver-11-8 \
+      libcusparse-11-8 \
+      libcudnn8 && \
     rm -rf /var/lib/apt/lists/* cuda-keyring_*.deb && \
     apt-get purge -y --auto-remove wget
 
 # Set CUDA library path
-ENV LD_LIBRARY_PATH=/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
 
 RUN groupadd --system --gid 1001 nodejs
 RUN useradd --system --uid 1001 --gid nodejs nextjs

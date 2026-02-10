@@ -1145,8 +1145,13 @@ export async function trainMatrixFactorization(
 
         let totalSquaredError = 0;
         let householdCount = 0;
+        const totalBatches = Math.ceil(epochTraining.length / BATCH_SIZE);
 
         for (let bStart = 0; bStart < epochTraining.length; bStart += BATCH_SIZE) {
+          const batchNum = Math.floor(bStart / BATCH_SIZE) + 1;
+          if (batchNum === 1 || batchNum % 50 === 0) {
+            console.log(`[MF Train] Epoch ${epoch + 1}/${epochs} batch ${batchNum}/${totalBatches}`);
+          }
           const batch = epochTraining.slice(bStart, Math.min(bStart + BATCH_SIZE, epochTraining.length));
           const B = batch.length;
 
