@@ -35,10 +35,12 @@ type FeatureType =
   | "director"
   | "language"
   | "origin_country"
+  | "tag"
   | "popularity_bin"
   | "runtime_bin"
   | "vote_avg_bin"
   | "vote_count_bin"
+  | "surprise_factor_bin"
   | "user_exploration"
   | "user_rating_pattern"
   | "household_consensus";
@@ -57,6 +59,7 @@ interface MovieFeatures {
   era: string | null;
   language: string | null;
   originCountry: string | null;
+  tags: { tag: string; relevance: number }[];
   studioIds: string[];
   actorIds: string[];
   directorIds: string[];
@@ -64,12 +67,14 @@ interface MovieFeatures {
   runtimeBin: string;
   voteAvgBin: string;
   voteCountBin: string;
+  surpriseFactorBin: string;
 }
 
 interface UserFeatures {
   explorationFactor: number;
   ratingMean: number;
   ratingStdDev: number;
+  ratingCount: number;
   topGenreIds: string[];
 }
 
@@ -148,11 +153,25 @@ function binExploration(factor: number): string {
   return "adventurous";
 }
 
-function binRatingPattern(mean: number, stdDev: number): string {
-  if (stdDev < 0.5) return "consistent";
-  if (mean > 3.5) return "generous";
-  if (mean < 2.5) return "critical";
-  return "varied";
+function binSurpriseFactor(surpriseFactor: number | null): string {
+  if (surpriseFactor === null) return "unknown";
+  if (surpriseFactor > 0.5) return "exceeds_expectations";
+  if (surpriseFactor < -0.5) return "disappointing";
+  return "meets_expectations";
+}
+
+function classifyRatingDisposition(mean: number, stdDev: number, count: number): string {
+  if (count < 5) return "insufficient";
+  const leniency = mean - 3.0;
+  const isDiscriminating = stdDev > 0.8;
+  if (Math.abs(leniency) < 0.3) return isDiscriminating ? "balanced_wide" : "balanced_narrow";
+  if (leniency >= 0.3) return isDiscriminating ? "lenient_wide" : "lenient_narrow";
+  return isDiscriminating ? "harsh_wide" : "harsh_narrow";
+}
+
+function normalizeRating(rating: number, userMean: number, userStdDev: number): number {
+  if (userStdDev < 0.1) return rating;
+  return Math.max(1, Math.min(5, 3 + (rating - userMean) / userStdDev));
 }
 
 /**
@@ -241,12 +260,22 @@ function predictRating(
     }
   }
 
+  // Tag genome features (weighted by relevance)
+  for (const { tag, relevance } of movieFeatures.tags.slice(0, 8)) {
+    const emb = featureEmbeddings.get(getFeatureKey("tag", tag));
+    if (emb) {
+      prediction += emb.bias * 0.15 * relevance;
+      activeFeatures.push(emb);
+    }
+  }
+
   // Binned features
   const binFeatures = [
     { type: "popularity_bin" as FeatureType, id: movieFeatures.popularityBin, weight: 0.1 },
     { type: "runtime_bin" as FeatureType, id: movieFeatures.runtimeBin, weight: 0.05 },
     { type: "vote_avg_bin" as FeatureType, id: movieFeatures.voteAvgBin, weight: 0.15 },
-    { type: "vote_count_bin" as FeatureType, id: movieFeatures.voteCountBin, weight: 0.2 }, // How mainstream/known the movie is
+    { type: "vote_count_bin" as FeatureType, id: movieFeatures.voteCountBin, weight: 0.2 },
+    { type: "surprise_factor_bin" as FeatureType, id: movieFeatures.surpriseFactorBin, weight: 0.1 },
   ];
 
   for (const { type, id, weight } of binFeatures) {
@@ -265,7 +294,7 @@ function predictRating(
     activeFeatures.push(explorationEmb);
   }
 
-  const ratingPatternBin = binRatingPattern(userFeatures.ratingMean, userFeatures.ratingStdDev);
+  const ratingPatternBin = classifyRatingDisposition(userFeatures.ratingMean, userFeatures.ratingStdDev, userFeatures.ratingCount);
   const ratingPatternEmb = featureEmbeddings.get(getFeatureKey("user_rating_pattern", ratingPatternBin));
   if (ratingPatternEmb) {
     prediction += ratingPatternEmb.bias * 0.1;
@@ -447,10 +476,12 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
       ? ratings.reduce((sum, r) => sum + Math.pow(r - ratingMean, 2), 0) / (ratings.length - 1)
       : 0;
 
+  const stdDev = Math.sqrt(ratingVariance);
   return {
     explorationFactor: settings?.explorationFactor ?? 0.5,
     ratingMean,
-    ratingStdDev: Math.sqrt(ratingVariance),
+    ratingStdDev: stdDev,
+    ratingCount: ratings.length,
     topGenreIds: genreRankings.map((g) => g.genreId),
   };
 }
@@ -518,6 +549,7 @@ export async function trainMatrixFactorization(
             era: true,
             originalLanguage: true,
             originCountry: true,
+            surpriseFactor: true,
             popularity: true,
             runtime: true,
             voteAverage: true,
@@ -526,6 +558,7 @@ export async function trainMatrixFactorization(
             studios: { select: { studioId: true }, take: 3 },
             cast: { select: { personId: true }, take: 5, orderBy: { castOrder: "asc" } },
             crew: { where: { job: "Director" }, select: { personId: true }, take: 2 },
+            movieTags: { select: { tag: true, relevance: true }, take: 10, orderBy: { relevance: "desc" } },
           },
         },
         user: {
@@ -559,26 +592,30 @@ export async function trainMatrixFactorization(
     }
 
     // Cache user feature data to database for faster inference
-    const cacheUpserts = Array.from(userFeatureCache.entries()).map(([userId, features]) =>
-      prisma.userFeatureCache.upsert({
+    const cacheUpserts = Array.from(userFeatureCache.entries()).map(([userId, features]) => {
+      const count = rawRatings.filter((r) => r.userId === userId).length;
+      const disposition = classifyRatingDisposition(features.ratingMean, features.ratingStdDev, count);
+      return prisma.userFeatureCache.upsert({
         where: { userId },
         create: {
           userId,
           explorationFactor: features.explorationFactor,
           ratingMean: features.ratingMean,
           ratingStdDev: features.ratingStdDev,
-          ratingCount: rawRatings.filter((r) => r.userId === userId).length,
+          ratingCount: count,
+          ratingDisposition: disposition,
           topGenreIds: JSON.stringify(features.topGenreIds),
         },
         update: {
           explorationFactor: features.explorationFactor,
           ratingMean: features.ratingMean,
           ratingStdDev: features.ratingStdDev,
-          ratingCount: rawRatings.filter((r) => r.userId === userId).length,
+          ratingCount: count,
+          ratingDisposition: disposition,
           topGenreIds: JSON.stringify(features.topGenreIds),
         },
-      })
-    );
+      });
+    });
     await Promise.all(cacheUpserts);
 
     // Build household rating lookup
@@ -611,6 +648,7 @@ export async function trainMatrixFactorization(
         era: r.movie.era,
         language: r.movie.originalLanguage,
         originCountry: r.movie.originCountry,
+        tags: (r.movie.movieTags ?? []).map((t) => ({ tag: t.tag, relevance: t.relevance })),
         studioIds: r.movie.studios.map((s) => s.studioId),
         actorIds: r.movie.cast.map((c) => c.personId),
         directorIds: r.movie.crew.map((c) => c.personId),
@@ -618,6 +656,7 @@ export async function trainMatrixFactorization(
         runtimeBin: binRuntime(r.movie.runtime),
         voteAvgBin: binVoteAverage(r.movie.voteAverage),
         voteCountBin: binVoteCount(r.movie.voteCount),
+        surpriseFactorBin: binSurpriseFactor(r.movie.surpriseFactor),
       };
 
       const userFeatures = userFeatureCache.get(r.userId)!;
@@ -645,14 +684,14 @@ export async function trainMatrixFactorization(
       return {
         userId: r.userId,
         movieId: r.movieId,
-        rating: r.rating!,
+        rating: normalizeRating(r.rating!, userFeatures.ratingMean, userFeatures.ratingStdDev),
         movieFeatures,
         userFeatures,
         householdFeatures,
       };
     });
 
-    // Calculate global mean
+    // Calculate global mean (of normalized ratings)
     const globalMean = ratings.reduce((sum, r) => sum + r.rating, 0) / ratings.length;
 
     // Split into training and validation
@@ -679,12 +718,16 @@ export async function trainMatrixFactorization(
       for (const directorId of r.movieFeatures.directorIds) {
         allFeatures.add(getFeatureKey("director", directorId));
       }
+      for (const { tag } of r.movieFeatures.tags) {
+        allFeatures.add(getFeatureKey("tag", tag));
+      }
       allFeatures.add(getFeatureKey("popularity_bin", r.movieFeatures.popularityBin));
       allFeatures.add(getFeatureKey("runtime_bin", r.movieFeatures.runtimeBin));
       allFeatures.add(getFeatureKey("vote_avg_bin", r.movieFeatures.voteAvgBin));
       allFeatures.add(getFeatureKey("vote_count_bin", r.movieFeatures.voteCountBin));
+      allFeatures.add(getFeatureKey("surprise_factor_bin", r.movieFeatures.surpriseFactorBin));
       allFeatures.add(getFeatureKey("user_exploration", binExploration(r.userFeatures.explorationFactor)));
-      allFeatures.add(getFeatureKey("user_rating_pattern", binRatingPattern(r.userFeatures.ratingMean, r.userFeatures.ratingStdDev)));
+      allFeatures.add(getFeatureKey("user_rating_pattern", classifyRatingDisposition(r.userFeatures.ratingMean, r.userFeatures.ratingStdDev, r.userFeatures.ratingCount)));
       if (r.householdFeatures.consensusScore > 0) {
         const consensusBin = r.householdFeatures.consensusScore > 3.5 ? "positive" : r.householdFeatures.consensusScore < 2.5 ? "negative" : "neutral";
         allFeatures.add(getFeatureKey("household_consensus", consensusBin));
@@ -782,12 +825,16 @@ export async function trainMatrixFactorization(
         for (const directorId of rating.movieFeatures.directorIds) {
           featuresToUpdate.push(getFeatureKey("director", directorId));
         }
+        for (const { tag } of rating.movieFeatures.tags.slice(0, 8)) {
+          featuresToUpdate.push(getFeatureKey("tag", tag));
+        }
         featuresToUpdate.push(getFeatureKey("popularity_bin", rating.movieFeatures.popularityBin));
         featuresToUpdate.push(getFeatureKey("runtime_bin", rating.movieFeatures.runtimeBin));
         featuresToUpdate.push(getFeatureKey("vote_avg_bin", rating.movieFeatures.voteAvgBin));
         featuresToUpdate.push(getFeatureKey("vote_count_bin", rating.movieFeatures.voteCountBin));
+        featuresToUpdate.push(getFeatureKey("surprise_factor_bin", rating.movieFeatures.surpriseFactorBin));
         featuresToUpdate.push(getFeatureKey("user_exploration", binExploration(rating.userFeatures.explorationFactor)));
-        featuresToUpdate.push(getFeatureKey("user_rating_pattern", binRatingPattern(rating.userFeatures.ratingMean, rating.userFeatures.ratingStdDev)));
+        featuresToUpdate.push(getFeatureKey("user_rating_pattern", classifyRatingDisposition(rating.userFeatures.ratingMean, rating.userFeatures.ratingStdDev, rating.userFeatures.ratingCount)));
 
         for (const key of featuresToUpdate) {
           const emb = featureEmbeddings.get(key);
@@ -835,6 +882,9 @@ export async function trainMatrixFactorization(
       featureEmbeddings,
       globalMean,
     });
+
+    // Compute per-movie surprise factors (belief calibration)
+    await computeSurpriseFactors(rawRatings, featureEmbeddings, globalMean, featureDimensions);
 
     // Update metadata
     const existingMetadata = await prisma.mFModelMetadata.findFirst();
@@ -955,6 +1005,15 @@ function predictColdStartRating(
     }
   }
 
+  // Tag genome features — especially valuable for cold start
+  for (const { tag, relevance } of movieFeatures.tags.slice(0, 8)) {
+    const emb = featureEmbeddings.get(getFeatureKey("tag", tag));
+    if (emb) {
+      prediction += emb.bias * 0.25 * relevance;
+      activeVectors.push(emb.vector);
+    }
+  }
+
   // Director features - important for cold start
   for (const directorId of movieFeatures.directorIds) {
     const emb = featureEmbeddings.get(getFeatureKey("director", directorId));
@@ -987,7 +1046,8 @@ function predictColdStartRating(
     { type: "popularity_bin" as FeatureType, id: movieFeatures.popularityBin, weight: 0.15 },
     { type: "runtime_bin" as FeatureType, id: movieFeatures.runtimeBin, weight: 0.08 },
     { type: "vote_avg_bin" as FeatureType, id: movieFeatures.voteAvgBin, weight: 0.25 },
-    { type: "vote_count_bin" as FeatureType, id: movieFeatures.voteCountBin, weight: 0.25 }, // Mainstream indicator
+    { type: "vote_count_bin" as FeatureType, id: movieFeatures.voteCountBin, weight: 0.25 },
+    { type: "surprise_factor_bin" as FeatureType, id: movieFeatures.surpriseFactorBin, weight: 0.15 },
   ];
 
   for (const { type, id, weight } of binFeatures) {
@@ -1008,7 +1068,7 @@ function predictColdStartRating(
   }
 
   const ratingPatternEmb = featureEmbeddings.get(
-    getFeatureKey("user_rating_pattern", binRatingPattern(userFeatures.ratingMean, userFeatures.ratingStdDev))
+    getFeatureKey("user_rating_pattern", classifyRatingDisposition(userFeatures.ratingMean, userFeatures.ratingStdDev, userFeatures.ratingCount))
   );
   if (ratingPatternEmb) {
     prediction += ratingPatternEmb.bias * 0.15;
@@ -1073,6 +1133,7 @@ export async function getPredictedRatingsForUser(
         era: true,
         originalLanguage: true,
         originCountry: true,
+        surpriseFactor: true,
         popularity: true,
         runtime: true,
         voteAverage: true,
@@ -1081,6 +1142,7 @@ export async function getPredictedRatingsForUser(
         studios: { select: { studioId: true }, take: 3 },
         cast: { select: { personId: true }, take: 5, orderBy: { castOrder: "asc" } },
         crew: { where: { job: "Director" }, select: { personId: true }, take: 2 },
+        movieTags: { select: { tag: true, relevance: true }, take: 10, orderBy: { relevance: "desc" } },
       },
     }),
     prisma.mFModelMetadata.findFirst(),
@@ -1110,6 +1172,7 @@ export async function getPredictedRatingsForUser(
     explorationFactor: userCache?.explorationFactor ?? 0.5,
     ratingMean: userCache?.ratingMean ?? 3.0,
     ratingStdDev: userCache?.ratingStdDev ?? 1.0,
+    ratingCount: userCache?.ratingCount ?? 0,
     topGenreIds: userCache?.topGenreIds ? JSON.parse(userCache.topGenreIds) : [],
   };
 
@@ -1138,6 +1201,7 @@ export async function getPredictedRatingsForUser(
       era: movie.era,
       language: movie.originalLanguage,
       originCountry: movie.originCountry,
+      tags: (movie.movieTags ?? []).map((t) => ({ tag: t.tag, relevance: t.relevance })),
       studioIds: movie.studios.map((s) => s.studioId),
       actorIds: movie.cast.map((c) => c.personId),
       directorIds: movie.crew.map((c) => c.personId),
@@ -1145,6 +1209,7 @@ export async function getPredictedRatingsForUser(
       runtimeBin: binRuntime(movie.runtime),
       voteAvgBin: binVoteAverage(movie.voteAverage),
       voteCountBin: binVoteCount(movie.voteCount),
+      surpriseFactorBin: binSurpriseFactor(movie.surpriseFactor),
     };
 
     const movieVec = movieVectorMap.get(movie.id);
@@ -1321,4 +1386,76 @@ export async function isSystemInactive(durationMinutes: number): Promise<boolean
   });
 
   return !recentActivity;
+}
+
+/**
+ * Compute per-movie surprise factors (belief calibration).
+ * Compares average satisfaction (hasSeen=true ratings) vs average willingness (hasSeen=false ratings).
+ * For movies with only one type, falls back to average rating vs feature-based prediction.
+ */
+async function computeSurpriseFactors(
+  rawRatings: { userId: string; movieId: string; rating: number | null; movie: { id: string } }[],
+  featureEmbeddings: Map<string, { vector: number[]; bias: number }>,
+  globalMean: number,
+  featureDimensions: number,
+): Promise<void> {
+  // Load hasSeen status for all ratings
+  const ratingsWithSeen = await prisma.movieRating.findMany({
+    where: { rating: { not: null }, notHeardOf: false },
+    select: { movieId: true, rating: true, hasSeen: true },
+  });
+
+  // Group by movie
+  const movieRatings = new Map<string, { seen: number[]; unseen: number[] }>();
+  for (const r of ratingsWithSeen) {
+    if (!movieRatings.has(r.movieId)) {
+      movieRatings.set(r.movieId, { seen: [], unseen: [] });
+    }
+    const group = movieRatings.get(r.movieId)!;
+    if (r.hasSeen) {
+      group.seen.push(r.rating!);
+    } else {
+      group.unseen.push(r.rating!);
+    }
+  }
+
+  // Compute surprise factors
+  const updates: { movieId: string; surpriseFactor: number }[] = [];
+
+  for (const [movieId, { seen, unseen }] of movieRatings) {
+    const totalRatings = seen.length + unseen.length;
+    if (totalRatings < 3) continue;
+
+    let surpriseFactor: number;
+
+    if (seen.length >= 2 && unseen.length >= 2) {
+      // Best case: compare satisfaction vs willingness
+      const seenAvg = seen.reduce((a, b) => a + b, 0) / seen.length;
+      const unseenAvg = unseen.reduce((a, b) => a + b, 0) / unseen.length;
+      surpriseFactor = seenAvg - unseenAvg;
+    } else {
+      // Fallback: compare all ratings vs global mean (no directional signal)
+      const allRatings = [...seen, ...unseen];
+      const avg = allRatings.reduce((a, b) => a + b, 0) / allRatings.length;
+      surpriseFactor = avg - globalMean;
+    }
+
+    updates.push({ movieId, surpriseFactor });
+  }
+
+  // Batch update
+  const SURPRISE_BATCH = 100;
+  for (let i = 0; i < updates.length; i += SURPRISE_BATCH) {
+    const batch = updates.slice(i, i + SURPRISE_BATCH);
+    await Promise.all(
+      batch.map((u) =>
+        prisma.movie.update({
+          where: { id: u.movieId },
+          data: { surpriseFactor: u.surpriseFactor },
+        })
+      )
+    );
+  }
+
+  console.log(`[MF Train] Computed surprise factors for ${updates.length} movies`);
 }

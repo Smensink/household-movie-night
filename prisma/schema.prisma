@@ -79,6 +79,7 @@ model Movie {
   letterboxdRating Float?
   originalLanguage String?
   originCountry    String?
+  surpriseFactor   Float?
   era           String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -91,6 +92,7 @@ model Movie {
   sessionMovies    SessionMovie[]
   radarrSync       RadarrSync?
   plexAvailability PlexAvailability?
+  movieTags        MovieTag[]
 }
 
 model Genre {
@@ -439,6 +441,7 @@ model UserFeatureCache {
   ratingMean        Float?   // User's average rating
   ratingStdDev      Float?   // User's rating standard deviation
   ratingCount       Int      @default(0)
+  ratingDisposition String?  // e.g. "lenient_wide", "harsh_narrow", "balanced_wide"
   topGenreIds       String?  // JSON array of top 5 genre IDs
   updatedAt         DateTime @updatedAt
 }
@@ -454,5 +457,15 @@ model ActivityLog {
   @@index([createdAt])
 }
 
+model MovieTag {
+  id        String @id @default(cuid())
+  movieId   String
+  tag       String
+  relevance Float  // 0-1 genome relevance score from MovieLens tag genome
 
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
 
+  @@unique([movieId, tag])
+  @@index([movieId])
+  @@index([tag])
+}

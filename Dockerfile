@@ -71,6 +71,8 @@ CMD ["sh", "-c", "\
   curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/backfill-language 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] Cleaning up obscure movies...' && \
   curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/cleanup 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Importing MovieLens tag genome...' && \
+  curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movielens/import 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] Checking/training recommendation model...' && \
   curl -s -X PATCH -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/mf/train 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] All startup tasks complete.' && \
