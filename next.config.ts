@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  serverExternalPackages: ["unzipper"],
+  serverExternalPackages: ["unzipper", "@tensorflow/tfjs-node-gpu", "@tensorflow/tfjs-node"],
   images: {
     remotePatterns: [
       {

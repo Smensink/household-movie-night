@@ -17,6 +17,35 @@
 
 import { prisma } from "./prisma";
 
+// Lazy-loaded TensorFlow.js module (GPU with CPU fallback)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _tf: any = undefined; // undefined = not yet tried, null = unavailable
+let _tfBackend: "gpu" | "cpu" | "none" | "pending" = "pending";
+
+async function getTF(): Promise<{ tf: any; backend: "gpu" | "cpu" } | null> {
+  if (_tfBackend === "none") return null;
+  if (_tf) return { tf: _tf, backend: _tfBackend as "gpu" | "cpu" };
+
+  try {
+    _tf = await import("@tensorflow/tfjs-node-gpu");
+    _tfBackend = "gpu";
+    console.log("[MF] TensorFlow.js GPU backend loaded");
+    return { tf: _tf, backend: "gpu" };
+  } catch {
+    try {
+      _tf = await import("@tensorflow/tfjs-node");
+      _tfBackend = "cpu";
+      console.log("[MF] TensorFlow.js CPU (BLAS) backend loaded");
+      return { tf: _tf, backend: "cpu" };
+    } catch {
+      console.log("[MF] TensorFlow.js not available, using pure JS training");
+      _tf = null;
+      _tfBackend = "none";
+      return null;
+    }
+  }
+}
+
 // Model hyperparameters
 const DEFAULT_LATENT_DIMENSIONS = 50;
 const DEFAULT_FEATURE_DIMENSIONS = 16;
@@ -183,6 +212,134 @@ function normalizeRating(rating: number, userMean: number, userStdDev: number): 
  */
 function getFeatureKey(type: FeatureType, id: string): string {
   return `${type}:${id}`;
+}
+
+/**
+ * Compute feature contribution to prediction (everything except core MF dot product and biases).
+ * Used by GPU batch training to separate features (CPU) from MF core (GPU).
+ */
+function computeFeatureContribution(
+  rating: Rating,
+  featureEmbeddings: Map<string, { vector: number[]; bias: number }>,
+  featureDimensions: number
+): number {
+  let contribution = 0;
+  const activeFeatures: { vector: number[]; bias: number }[] = [];
+
+  // Movie feature biases
+  for (const genreId of rating.movieFeatures.genreIds) {
+    const emb = featureEmbeddings.get(getFeatureKey("genre", genreId));
+    if (emb) { contribution += emb.bias * 0.5; activeFeatures.push(emb); }
+  }
+  if (rating.movieFeatures.era) {
+    const emb = featureEmbeddings.get(getFeatureKey("era", rating.movieFeatures.era));
+    if (emb) { contribution += emb.bias * 0.3; activeFeatures.push(emb); }
+  }
+  if (rating.movieFeatures.language) {
+    const emb = featureEmbeddings.get(getFeatureKey("language", rating.movieFeatures.language));
+    if (emb) { contribution += emb.bias * 0.2; activeFeatures.push(emb); }
+  }
+  if (rating.movieFeatures.originCountry) {
+    const emb = featureEmbeddings.get(getFeatureKey("origin_country", rating.movieFeatures.originCountry));
+    if (emb) { contribution += emb.bias * 0.15; activeFeatures.push(emb); }
+  }
+  for (const studioId of rating.movieFeatures.studioIds.slice(0, 2)) {
+    const emb = featureEmbeddings.get(getFeatureKey("studio", studioId));
+    if (emb) { contribution += emb.bias * 0.2; activeFeatures.push(emb); }
+  }
+  for (const actorId of rating.movieFeatures.actorIds.slice(0, 3)) {
+    const emb = featureEmbeddings.get(getFeatureKey("actor", actorId));
+    if (emb) { contribution += emb.bias * 0.15; activeFeatures.push(emb); }
+  }
+  for (const directorId of rating.movieFeatures.directorIds) {
+    const emb = featureEmbeddings.get(getFeatureKey("director", directorId));
+    if (emb) { contribution += emb.bias * 0.25; activeFeatures.push(emb); }
+  }
+  for (const { tag, relevance } of rating.movieFeatures.tags.slice(0, 8)) {
+    const emb = featureEmbeddings.get(getFeatureKey("tag", tag));
+    if (emb) { contribution += emb.bias * 0.15 * relevance; activeFeatures.push(emb); }
+  }
+
+  // Binned features
+  const binFeatures: { type: FeatureType; id: string; weight: number }[] = [
+    { type: "popularity_bin", id: rating.movieFeatures.popularityBin, weight: 0.1 },
+    { type: "runtime_bin", id: rating.movieFeatures.runtimeBin, weight: 0.05 },
+    { type: "vote_avg_bin", id: rating.movieFeatures.voteAvgBin, weight: 0.15 },
+    { type: "vote_count_bin", id: rating.movieFeatures.voteCountBin, weight: 0.2 },
+    { type: "surprise_factor_bin", id: rating.movieFeatures.surpriseFactorBin, weight: 0.1 },
+  ];
+  for (const { type, id, weight } of binFeatures) {
+    const emb = featureEmbeddings.get(getFeatureKey(type, id));
+    if (emb) { contribution += emb.bias * weight; activeFeatures.push(emb); }
+  }
+
+  // User features
+  const explorationEmb = featureEmbeddings.get(getFeatureKey("user_exploration", binExploration(rating.userFeatures.explorationFactor)));
+  if (explorationEmb) { contribution += explorationEmb.bias * 0.1; activeFeatures.push(explorationEmb); }
+  const ratingPatternEmb = featureEmbeddings.get(getFeatureKey("user_rating_pattern", classifyRatingDisposition(rating.userFeatures.ratingMean, rating.userFeatures.ratingStdDev, rating.userFeatures.ratingCount)));
+  if (ratingPatternEmb) { contribution += ratingPatternEmb.bias * 0.1; activeFeatures.push(ratingPatternEmb); }
+
+  // Genre overlap bonus
+  const genreOverlap = rating.movieFeatures.genreIds.filter((g) => rating.userFeatures.topGenreIds.includes(g)).length;
+  if (genreOverlap > 0) contribution += genreOverlap * 0.1;
+
+  // Household consensus
+  if (rating.householdFeatures.consensusScore > 0) {
+    const consensusBin = rating.householdFeatures.consensusScore > 3.5 ? "positive" : rating.householdFeatures.consensusScore < 2.5 ? "negative" : "neutral";
+    const consensusEmb = featureEmbeddings.get(getFeatureKey("household_consensus", consensusBin));
+    if (consensusEmb) { contribution += consensusEmb.bias * 0.2; activeFeatures.push(consensusEmb); }
+    contribution += (rating.householdFeatures.consensusScore - 3) * 0.15;
+  }
+
+  // Pairwise feature interactions (top 5)
+  if (activeFeatures.length > 1) {
+    let interactionSum = 0;
+    for (let i = 0; i < Math.min(activeFeatures.length, 5); i++) {
+      for (let j = i + 1; j < Math.min(activeFeatures.length, 5); j++) {
+        interactionSum += dotProduct(activeFeatures[i].vector, activeFeatures[j].vector);
+      }
+    }
+    contribution += interactionSum * 0.05;
+  }
+
+  return contribution;
+}
+
+/**
+ * Update feature embeddings for a single rating given the weighted error.
+ */
+function updateFeatureEmbeddings(
+  rating: Rating,
+  weightedError: number,
+  featureEmbeddings: Map<string, { vector: number[]; bias: number }>,
+  lr: number,
+  reg: number,
+  featureDims: number
+): void {
+  const keys: string[] = [];
+  for (const genreId of rating.movieFeatures.genreIds) keys.push(getFeatureKey("genre", genreId));
+  if (rating.movieFeatures.era) keys.push(getFeatureKey("era", rating.movieFeatures.era));
+  for (const studioId of rating.movieFeatures.studioIds.slice(0, 2)) keys.push(getFeatureKey("studio", studioId));
+  for (const actorId of rating.movieFeatures.actorIds.slice(0, 3)) keys.push(getFeatureKey("actor", actorId));
+  for (const directorId of rating.movieFeatures.directorIds) keys.push(getFeatureKey("director", directorId));
+  for (const { tag } of rating.movieFeatures.tags.slice(0, 8)) keys.push(getFeatureKey("tag", tag));
+  keys.push(getFeatureKey("popularity_bin", rating.movieFeatures.popularityBin));
+  keys.push(getFeatureKey("runtime_bin", rating.movieFeatures.runtimeBin));
+  keys.push(getFeatureKey("vote_avg_bin", rating.movieFeatures.voteAvgBin));
+  keys.push(getFeatureKey("vote_count_bin", rating.movieFeatures.voteCountBin));
+  keys.push(getFeatureKey("surprise_factor_bin", rating.movieFeatures.surpriseFactorBin));
+  keys.push(getFeatureKey("user_exploration", binExploration(rating.userFeatures.explorationFactor)));
+  keys.push(getFeatureKey("user_rating_pattern", classifyRatingDisposition(rating.userFeatures.ratingMean, rating.userFeatures.ratingStdDev, rating.userFeatures.ratingCount)));
+
+  for (const key of keys) {
+    const emb = featureEmbeddings.get(key);
+    if (emb) {
+      emb.bias += lr * (weightedError * 0.1 - reg * emb.bias);
+      for (let k = 0; k < featureDims; k++) {
+        emb.vector[k] += lr * (weightedError * 0.05 - reg * emb.vector[k]);
+      }
+    }
+  }
 }
 
 /**
@@ -926,129 +1083,289 @@ export async function trainMatrixFactorization(
       });
     }
 
-    // Training loop
+    // Training loop — use GPU batch operations when tf.js is available
+    const tfResult = await getTF();
     let rmse = 0;
     let validationRmse = 0;
 
-    for (let epoch = 0; epoch < epochs; epoch++) {
-      // Subsample ML ratings per epoch (household always included in full)
-      let epochTraining: Rating[];
-      if (mlRatings.length > ML_SAMPLE_PER_EPOCH) {
-        const sampledML = [...mlRatings].sort(() => Math.random() - 0.5).slice(0, ML_SAMPLE_PER_EPOCH);
-        epochTraining = [...householdTrainingSet, ...sampledML];
-      } else {
-        epochTraining = trainingSet;
+    if (tfResult) {
+      // ── GPU/BLAS-accelerated batch training ──
+      const { tf, backend } = tfResult;
+      const BATCH_SIZE = 32768;
+      console.log(`[MF Train] Using TensorFlow.js (${backend}) with batch size ${BATCH_SIZE}`);
+
+      // Build index mappings for tensor operations
+      const userIdList = [...userVectors.keys()];
+      const movieIdList = [...movieVectors.keys()];
+      const userIdxMap = new Map(userIdList.map((id: string, i: number) => [id, i]));
+      const movieIdxMap = new Map(movieIdList.map((id: string, i: number) => [id, i]));
+      const numUsers = userIdList.length;
+      const numMovies = movieIdList.length;
+
+      // Create GPU tensors from Maps
+      const uVecData = new Float32Array(numUsers * latentDimensions);
+      for (let i = 0; i < numUsers; i++) {
+        const vec = userVectors.get(userIdList[i])!;
+        for (let d = 0; d < latentDimensions; d++) uVecData[i * latentDimensions + d] = vec[d];
       }
+      const mVecData = new Float32Array(numMovies * latentDimensions);
+      for (let i = 0; i < numMovies; i++) {
+        const vec = movieVectors.get(movieIdList[i])!;
+        for (let d = 0; d < latentDimensions; d++) mVecData[i * latentDimensions + d] = vec[d];
+      }
+      const uBiasData = new Float32Array(numUsers);
+      for (let i = 0; i < numUsers; i++) uBiasData[i] = userBiases.get(userIdList[i])!;
+      const mBiasData = new Float32Array(numMovies);
+      for (let i = 0; i < numMovies; i++) mBiasData[i] = movieBiases.get(movieIdList[i])!;
 
-      // Shuffle training data
-      const shuffledTraining = epochTraining.sort(() => Math.random() - 0.5);
-      let totalSquaredError = 0;
-      let householdCount = 0;
+      const uTensor = tf.variable(tf.tensor2d(uVecData, [numUsers, latentDimensions]));
+      const mTensor = tf.variable(tf.tensor2d(mVecData, [numMovies, latentDimensions]));
+      const uBiasTensor = tf.variable(tf.tensor1d(uBiasData));
+      const mBiasTensor = tf.variable(tf.tensor1d(mBiasData));
+      const lrScalar = tf.scalar(learningRate);
+      const regScalar = tf.scalar(regularization);
 
-      for (const rating of shuffledTraining) {
-        const userVector = userVectors.get(rating.userId)!;
-        const movieVector = movieVectors.get(rating.movieId)!;
-        const userBias = userBiases.get(rating.userId)!;
-        const movieBias = movieBiases.get(rating.movieId)!;
-
-        // Compute prediction and error
-        const predicted = predictRating(
-          userVector,
-          movieVector,
-          userBias,
-          movieBias,
-          globalMean,
-          rating.movieFeatures,
-          rating.userFeatures,
-          rating.householdFeatures,
-          featureEmbeddings,
-          featureDimensions
-        );
-        const error = rating.rating - predicted;
-        // Weight the gradient: ML ratings have less influence per-example
-        const weightedError = error * rating.weight;
-
-        // Track RMSE from household ratings only (true performance metric)
-        if (rating.weight === 1.0) {
-          totalSquaredError += error * error;
-          householdCount++;
+      for (let epoch = 0; epoch < epochs; epoch++) {
+        let epochTraining: Rating[];
+        if (mlRatings.length > ML_SAMPLE_PER_EPOCH) {
+          const sampledML = [...mlRatings].sort(() => Math.random() - 0.5).slice(0, ML_SAMPLE_PER_EPOCH);
+          epochTraining = [...householdTrainingSet, ...sampledML];
+        } else {
+          epochTraining = trainingSet;
         }
 
-        // Update biases with weighted error
-        userBiases.set(rating.userId, userBias + learningRate * (weightedError - regularization * userBias));
-        movieBiases.set(rating.movieId, movieBias + learningRate * (weightedError - regularization * movieBias));
-
-        // Update latent vectors with weighted error
-        for (let k = 0; k < latentDimensions; k++) {
-          const userK = userVector[k];
-          const movieK = movieVector[k];
-          userVector[k] += learningRate * (weightedError * movieK - regularization * userK);
-          movieVector[k] += learningRate * (weightedError * userK - regularization * movieK);
+        // Shuffle
+        for (let i = epochTraining.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [epochTraining[i], epochTraining[j]] = [epochTraining[j], epochTraining[i]];
         }
 
-        // Update feature embeddings
-        const featuresToUpdate: string[] = [];
-        for (const genreId of rating.movieFeatures.genreIds) {
-          featuresToUpdate.push(getFeatureKey("genre", genreId));
-        }
-        if (rating.movieFeatures.era) {
-          featuresToUpdate.push(getFeatureKey("era", rating.movieFeatures.era));
-        }
-        for (const studioId of rating.movieFeatures.studioIds.slice(0, 2)) {
-          featuresToUpdate.push(getFeatureKey("studio", studioId));
-        }
-        for (const actorId of rating.movieFeatures.actorIds.slice(0, 3)) {
-          featuresToUpdate.push(getFeatureKey("actor", actorId));
-        }
-        for (const directorId of rating.movieFeatures.directorIds) {
-          featuresToUpdate.push(getFeatureKey("director", directorId));
-        }
-        for (const { tag } of rating.movieFeatures.tags.slice(0, 8)) {
-          featuresToUpdate.push(getFeatureKey("tag", tag));
-        }
-        featuresToUpdate.push(getFeatureKey("popularity_bin", rating.movieFeatures.popularityBin));
-        featuresToUpdate.push(getFeatureKey("runtime_bin", rating.movieFeatures.runtimeBin));
-        featuresToUpdate.push(getFeatureKey("vote_avg_bin", rating.movieFeatures.voteAvgBin));
-        featuresToUpdate.push(getFeatureKey("vote_count_bin", rating.movieFeatures.voteCountBin));
-        featuresToUpdate.push(getFeatureKey("surprise_factor_bin", rating.movieFeatures.surpriseFactorBin));
-        featuresToUpdate.push(getFeatureKey("user_exploration", binExploration(rating.userFeatures.explorationFactor)));
-        featuresToUpdate.push(getFeatureKey("user_rating_pattern", classifyRatingDisposition(rating.userFeatures.ratingMean, rating.userFeatures.ratingStdDev, rating.userFeatures.ratingCount)));
+        let totalSquaredError = 0;
+        let householdCount = 0;
 
-        for (const key of featuresToUpdate) {
-          const emb = featureEmbeddings.get(key);
-          if (emb) {
-            emb.bias += learningRate * (weightedError * 0.1 - regularization * emb.bias);
-            for (let k = 0; k < featureDimensions; k++) {
-              emb.vector[k] += learningRate * (weightedError * 0.05 - regularization * emb.vector[k]);
+        for (let bStart = 0; bStart < epochTraining.length; bStart += BATCH_SIZE) {
+          const batch = epochTraining.slice(bStart, Math.min(bStart + BATCH_SIZE, epochTraining.length));
+          const B = batch.length;
+
+          // CPU: pre-compute feature contributions for each rating
+          const featContribs = new Float32Array(B);
+          for (let i = 0; i < B; i++) {
+            featContribs[i] = computeFeatureContribution(
+              batch[i], featureEmbeddings, featureDimensions
+            );
+          }
+
+          // Build batch index arrays
+          const userIdxArr = new Int32Array(B);
+          const movieIdxArr = new Int32Array(B);
+          const targetArr = new Float32Array(B);
+          const weightArr = new Float32Array(B);
+          for (let i = 0; i < B; i++) {
+            userIdxArr[i] = userIdxMap.get(batch[i].userId)!;
+            movieIdxArr[i] = movieIdxMap.get(batch[i].movieId)!;
+            targetArr[i] = batch[i].rating;
+            weightArr[i] = batch[i].weight;
+          }
+
+          // GPU: batch MF prediction, error computation, and gradient updates
+          const rawErrors = tf.tidy(() => {
+            const userIdx = tf.tensor1d(userIdxArr, "int32");
+            const movieIdx = tf.tensor1d(movieIdxArr, "int32");
+            const targets = tf.tensor1d(targetArr);
+            const weights = tf.tensor1d(weightArr);
+            const featC = tf.tensor1d(featContribs);
+
+            // Gather vectors for this batch
+            const bUserVecs = tf.gather(uTensor, userIdx);     // [B, D]
+            const bMovieVecs = tf.gather(mTensor, movieIdx);    // [B, D]
+            const bUserBias = tf.gather(uBiasTensor, userIdx);  // [B]
+            const bMovieBias = tf.gather(mBiasTensor, movieIdx); // [B]
+
+            // Predict: dot(user, movie) + biases + globalMean + featureContribution
+            const dots = tf.sum(tf.mul(bUserVecs, bMovieVecs), 1);
+            const preds = dots.add(bUserBias).add(bMovieBias).add(globalMean).add(featC);
+
+            // Errors
+            const errors = targets.sub(preds);
+            const wErrors = errors.mul(weights);
+
+            // MF gradients: grad_user = wError * movieVec - reg * userVec
+            const wErrorsExp = tf.expandDims(wErrors, 1); // [B, 1]
+            const userGrads = tf.sub(tf.mul(wErrorsExp, bMovieVecs), tf.mul(regScalar, bUserVecs));
+            const movieGrads = tf.sub(tf.mul(wErrorsExp, bUserVecs), tf.mul(regScalar, bMovieVecs));
+            const userBiasGrads = tf.sub(wErrors, tf.mul(regScalar, bUserBias));
+            const movieBiasGrads = tf.sub(wErrors, tf.mul(regScalar, bMovieBias));
+
+            // Accumulate gradients per entity via segment sum
+            const uGradAcc = tf.unsortedSegmentSum(userGrads, userIdx, numUsers);
+            const mGradAcc = tf.unsortedSegmentSum(movieGrads, movieIdx, numMovies);
+            const uBiasAcc = tf.unsortedSegmentSum(userBiasGrads, userIdx, numUsers);
+            const mBiasAcc = tf.unsortedSegmentSum(movieBiasGrads, movieIdx, numMovies);
+
+            // Apply gradient updates
+            uTensor.assign(uTensor.add(tf.mul(lrScalar, uGradAcc)));
+            mTensor.assign(mTensor.add(tf.mul(lrScalar, mGradAcc)));
+            uBiasTensor.assign(uBiasTensor.add(tf.mul(lrScalar, uBiasAcc)));
+            mBiasTensor.assign(mBiasTensor.add(tf.mul(lrScalar, mBiasAcc)));
+
+            return errors; // keep alive for CPU-side feature updates
+          });
+
+          // Read errors back to CPU
+          const errorArr = rawErrors.dataSync() as Float32Array;
+          rawErrors.dispose();
+
+          // CPU: update feature embeddings using errors
+          for (let i = 0; i < B; i++) {
+            const wError = errorArr[i] * batch[i].weight;
+            updateFeatureEmbeddings(batch[i], wError, featureEmbeddings, learningRate, regularization, featureDimensions);
+
+            if (batch[i].weight === 1.0) {
+              totalSquaredError += errorArr[i] * errorArr[i];
+              householdCount++;
             }
           }
         }
+
+        rmse = householdCount > 0 ? Math.sqrt(totalSquaredError / householdCount) : 0;
+
+        // Compute validation RMSE on last epoch or every 5th (sync vectors from GPU first)
+        const isLogEpoch = epoch % 5 === 0 || epoch === epochs - 1;
+        if (isLogEpoch && validationSet.length > 0) {
+          // Sync current tensor state to Maps for validation
+          const curUVecs = uTensor.dataSync() as Float32Array;
+          const curMVecs = mTensor.dataSync() as Float32Array;
+          const curUBias = uBiasTensor.dataSync() as Float32Array;
+          const curMBias = mBiasTensor.dataSync() as Float32Array;
+
+          let validationSquaredError = 0;
+          for (const rating of validationSet) {
+            const uIdx = userIdxMap.get(rating.userId);
+            const mIdx = movieIdxMap.get(rating.movieId);
+            if (uIdx === undefined || mIdx === undefined) continue;
+
+            // Read vectors directly from typed arrays
+            const uVec = Array.from(curUVecs.subarray(uIdx * latentDimensions, (uIdx + 1) * latentDimensions));
+            const mVec = Array.from(curMVecs.subarray(mIdx * latentDimensions, (mIdx + 1) * latentDimensions));
+
+            const predicted = predictRating(
+              uVec, mVec, curUBias[uIdx], curMBias[mIdx], globalMean,
+              rating.movieFeatures, rating.userFeatures, rating.householdFeatures,
+              featureEmbeddings, featureDimensions
+            );
+            validationSquaredError += Math.pow(rating.rating - predicted, 2);
+          }
+          validationRmse = Math.sqrt(validationSquaredError / validationSet.length);
+          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} (${backend})`);
+        }
       }
 
-      rmse = householdCount > 0 ? Math.sqrt(totalSquaredError / householdCount) : 0;
+      // Read final tensors back to Maps
+      const finalUVecs = uTensor.dataSync() as Float32Array;
+      const finalMVecs = mTensor.dataSync() as Float32Array;
+      const finalUBias = uBiasTensor.dataSync() as Float32Array;
+      const finalMBias = mBiasTensor.dataSync() as Float32Array;
 
-      // Calculate validation RMSE
-      let validationSquaredError = 0;
-      for (const rating of validationSet) {
-        const userVector = userVectors.get(rating.userId);
-        const movieVector = movieVectors.get(rating.movieId);
-        if (!userVector || !movieVector) continue;
-
-        const predicted = predictRating(
-          userVector,
-          movieVector,
-          userBiases.get(rating.userId) ?? 0,
-          movieBiases.get(rating.movieId) ?? 0,
-          globalMean,
-          rating.movieFeatures,
-          rating.userFeatures,
-          rating.householdFeatures,
-          featureEmbeddings,
-          featureDimensions
-        );
-        validationSquaredError += Math.pow(rating.rating - predicted, 2);
+      for (let i = 0; i < numUsers; i++) {
+        const vec = new Array(latentDimensions);
+        for (let d = 0; d < latentDimensions; d++) vec[d] = finalUVecs[i * latentDimensions + d];
+        userVectors.set(userIdList[i], vec);
+        userBiases.set(userIdList[i], finalUBias[i]);
       }
-      validationRmse = validationSet.length > 0 ? Math.sqrt(validationSquaredError / validationSet.length) : rmse;
+      for (let i = 0; i < numMovies; i++) {
+        const vec = new Array(latentDimensions);
+        for (let d = 0; d < latentDimensions; d++) vec[d] = finalMVecs[i * latentDimensions + d];
+        movieVectors.set(movieIdList[i], vec);
+        movieBiases.set(movieIdList[i], finalMBias[i]);
+      }
+
+      // Cleanup GPU tensors
+      uTensor.dispose();
+      mTensor.dispose();
+      uBiasTensor.dispose();
+      mBiasTensor.dispose();
+      lrScalar.dispose();
+      regScalar.dispose();
+
+      console.log(`[MF Train] GPU/BLAS training complete: ${epochs} epochs, RMSE=${rmse.toFixed(4)}`);
+    } else {
+      // ── Pure JavaScript fallback (no tf.js) ──
+      console.log(`[MF Train] Using pure JS training loop`);
+
+      for (let epoch = 0; epoch < epochs; epoch++) {
+        let epochTraining: Rating[];
+        if (mlRatings.length > ML_SAMPLE_PER_EPOCH) {
+          const sampledML = [...mlRatings].sort(() => Math.random() - 0.5).slice(0, ML_SAMPLE_PER_EPOCH);
+          epochTraining = [...householdTrainingSet, ...sampledML];
+        } else {
+          epochTraining = trainingSet;
+        }
+
+        // Fisher-Yates shuffle
+        for (let i = epochTraining.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [epochTraining[i], epochTraining[j]] = [epochTraining[j], epochTraining[i]];
+        }
+
+        let totalSquaredError = 0;
+        let householdCount = 0;
+
+        for (const rating of epochTraining) {
+          const userVector = userVectors.get(rating.userId)!;
+          const movieVector = movieVectors.get(rating.movieId)!;
+          const userBias = userBiases.get(rating.userId)!;
+          const movieBias = movieBiases.get(rating.movieId)!;
+
+          const predicted = predictRating(
+            userVector, movieVector, userBias, movieBias, globalMean,
+            rating.movieFeatures, rating.userFeatures, rating.householdFeatures,
+            featureEmbeddings, featureDimensions
+          );
+          const error = rating.rating - predicted;
+          const weightedError = error * rating.weight;
+
+          if (rating.weight === 1.0) {
+            totalSquaredError += error * error;
+            householdCount++;
+          }
+
+          userBiases.set(rating.userId, userBias + learningRate * (weightedError - regularization * userBias));
+          movieBiases.set(rating.movieId, movieBias + learningRate * (weightedError - regularization * movieBias));
+
+          for (let k = 0; k < latentDimensions; k++) {
+            const userK = userVector[k];
+            const movieK = movieVector[k];
+            userVector[k] += learningRate * (weightedError * movieK - regularization * userK);
+            movieVector[k] += learningRate * (weightedError * userK - regularization * movieK);
+          }
+
+          updateFeatureEmbeddings(rating, weightedError, featureEmbeddings, learningRate, regularization, featureDimensions);
+        }
+
+        rmse = householdCount > 0 ? Math.sqrt(totalSquaredError / householdCount) : 0;
+
+        let validationSquaredError = 0;
+        for (const rating of validationSet) {
+          const userVector = userVectors.get(rating.userId);
+          const movieVector = movieVectors.get(rating.movieId);
+          if (!userVector || !movieVector) continue;
+
+          const predicted = predictRating(
+            userVector, movieVector,
+            userBiases.get(rating.userId) ?? 0,
+            movieBiases.get(rating.movieId) ?? 0,
+            globalMean,
+            rating.movieFeatures, rating.userFeatures, rating.householdFeatures,
+            featureEmbeddings, featureDimensions
+          );
+          validationSquaredError += Math.pow(rating.rating - predicted, 2);
+        }
+        validationRmse = validationSet.length > 0 ? Math.sqrt(validationSquaredError / validationSet.length) : rmse;
+
+        if (epoch % 5 === 0 || epoch === epochs - 1) {
+          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} (JS)`);
+        }
+      }
     }
 
     // Save trained vectors (exclude ML user vectors — they're temporary training aids)

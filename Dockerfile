@@ -15,11 +15,31 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
-# Production image
+# Production image with CUDA support
 FROM base AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
+
+# Install CUDA runtime libraries for GPU-accelerated training
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends wget && \
+    wget -q https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      cuda-cudart-12-6 \
+      libcublas-12-6 \
+      libcufft-12-6 \
+      libcurand-12-6 \
+      libcusolver-12-6 \
+      libcusparse-12-6 \
+      libcudnn9-cuda-12 && \
+    rm -rf /var/lib/apt/lists/* cuda-keyring_*.deb && \
+    apt-get purge -y --auto-remove wget
+
+# Set CUDA library path
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH}
 
 RUN groupadd --system --gid 1001 nodejs
 RUN useradd --system --uid 1001 --gid nodejs nextjs
@@ -31,8 +51,6 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/src/generated ./src/generated
-
-# curl is already available in Debian base
 
 # Create and own the cache directory for image optimization
 RUN mkdir -p /app/.next/cache && chown -R nextjs:nodejs /app/.next
