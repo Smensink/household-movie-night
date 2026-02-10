@@ -25,9 +25,9 @@ const DEFAULT_REGULARIZATION = 0.02;
 const DEFAULT_EPOCHS = 20;
 const MIN_RATINGS_TO_TRAIN = 20;
 const VALIDATION_SPLIT = 0.1;
-const ML_SAMPLE_USERS = 5000; // Number of ML users to sample per training run
+const ML_SAMPLE_USERS = 50000; // Number of ML users to sample per training run
 const ML_RATING_WEIGHT = 0.1; // Relative weight vs household ratings (1.0)
-const ML_SAMPLE_PER_EPOCH = 20000; // Max ML ratings per epoch to keep training fast
+const ML_SAMPLE_PER_EPOCH = 200000; // Max ML ratings per epoch (10x increase for better feature learning)
 
 // Feature types
 type FeatureType =
@@ -1061,6 +1061,11 @@ export async function trainMatrixFactorization(
       }
     }
 
+    // Cluster ML users into viewer archetypes (before discarding ML vectors)
+    if (mlRatings.length > 0) {
+      await clusterAndSaveArchetypes(userVectors, householdUserVectors, mlRatings, userFeatureCache);
+    }
+
     await saveLatentVectors({
       userVectors: householdUserVectors,
       movieVectors,
@@ -1650,4 +1655,361 @@ async function computeSurpriseFactors(
   }
 
   console.log(`[MF Train] Computed surprise factors for ${updates.length} movies`);
+}
+
+// ── Viewer Archetype Clustering ──
+
+interface ClusterResult {
+  centroid: number[];
+  memberIds: string[];
+}
+
+function euclideanDistance(a: number[], b: number[]): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const diff = a[i] - b[i];
+    sum += diff * diff;
+  }
+  return Math.sqrt(sum);
+}
+
+/**
+ * K-means clustering on user latent vectors.
+ * Returns cluster centroids and member assignments.
+ */
+function kMeansClustering(
+  vectors: Map<string, number[]>,
+  k: number,
+  iterations: number = 20
+): ClusterResult[] {
+  const ids = Array.from(vectors.keys());
+  if (ids.length < k) return [];
+
+  const dims = vectors.get(ids[0])!.length;
+
+  // Initialize centroids by random selection (k-means++)
+  const shuffled = [...ids].sort(() => Math.random() - 0.5);
+  const centroids: number[][] = shuffled.slice(0, k).map((id) => [...vectors.get(id)!]);
+
+  const assignments = new Map<string, number>();
+
+  for (let iter = 0; iter < iterations; iter++) {
+    // Assignment step
+    for (const id of ids) {
+      const vec = vectors.get(id)!;
+      let minDist = Infinity;
+      let best = 0;
+      for (let c = 0; c < k; c++) {
+        const dist = euclideanDistance(vec, centroids[c]);
+        if (dist < minDist) {
+          minDist = dist;
+          best = c;
+        }
+      }
+      assignments.set(id, best);
+    }
+
+    // Update step
+    for (let c = 0; c < k; c++) {
+      const members = ids.filter((id) => assignments.get(id) === c);
+      if (members.length === 0) continue;
+      const newCentroid = new Array(dims).fill(0);
+      for (const id of members) {
+        const vec = vectors.get(id)!;
+        for (let d = 0; d < dims; d++) {
+          newCentroid[d] += vec[d] / members.length;
+        }
+      }
+      centroids[c] = newCentroid;
+    }
+  }
+
+  // Build results, filter tiny clusters
+  const results: ClusterResult[] = [];
+  for (let c = 0; c < k; c++) {
+    const members = ids.filter((id) => assignments.get(id) === c);
+    if (members.length >= 50) {
+      results.push({ centroid: centroids[c], memberIds: members });
+    }
+  }
+  return results;
+}
+
+interface ArchetypeAnalysis {
+  name: string;
+  description: string;
+  topGenres: { name: string; score: number }[];
+  disposition: string;
+  traits: string[];
+}
+
+/**
+ * Analyze a cluster's characteristics from its members' ratings and features.
+ */
+function analyzeCluster(
+  cluster: ClusterResult,
+  mlRatings: Rating[],
+  userFeatureCache: Map<string, UserFeatures>,
+  genreIdToName: Map<string, string>
+): ArchetypeAnalysis {
+  const memberSet = new Set(cluster.memberIds);
+
+  // Aggregate user stats
+  let totalMean = 0;
+  let totalStdDev = 0;
+  let featureCount = 0;
+  for (const id of cluster.memberIds) {
+    const uf = userFeatureCache.get(id);
+    if (uf) {
+      totalMean += uf.ratingMean;
+      totalStdDev += uf.ratingStdDev;
+      featureCount++;
+    }
+  }
+  const avgMean = featureCount > 0 ? totalMean / featureCount : 3.0;
+  const avgStdDev = featureCount > 0 ? totalStdDev / featureCount : 0.8;
+
+  // Disposition of the cluster
+  const disposition = classifyRatingDisposition(avgMean, avgStdDev, 100);
+
+  // Count genres from cluster members' ratings (only above-average ratings)
+  const genreCounts = new Map<string, number>();
+  let totalGenreHits = 0;
+  for (const r of mlRatings) {
+    if (!memberSet.has(r.userId)) continue;
+    if (r.rating < 0) continue; // normalized ratings: > 0 means above user's mean
+    for (const gid of r.movieFeatures.genreIds) {
+      genreCounts.set(gid, (genreCounts.get(gid) || 0) + 1);
+      totalGenreHits++;
+    }
+  }
+
+  const topGenres = Array.from(genreCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([gid, count]) => ({
+      name: genreIdToName.get(gid) || "Unknown",
+      score: totalGenreHits > 0 ? count / totalGenreHits : 0,
+    }));
+
+  // Generate name and traits
+  const { name, description, traits } = nameArchetype(topGenres, disposition, avgMean, avgStdDev);
+
+  return { name, description, topGenres, disposition, traits };
+}
+
+/**
+ * Generate archetype name, description, and traits from cluster characteristics.
+ */
+function nameArchetype(
+  topGenres: { name: string; score: number }[],
+  disposition: string,
+  avgMean: number,
+  avgStdDev: number
+): { name: string; description: string; traits: string[] } {
+  const traits: string[] = [];
+
+  // Rating behavior traits
+  if (avgMean >= 3.5) {
+    traits.push("Tends to rate movies generously");
+  } else if (avgMean < 2.7) {
+    traits.push("Critical viewer with high standards");
+  } else {
+    traits.push("Balanced perspective on films");
+  }
+
+  if (avgStdDev > 0.9) {
+    traits.push("Strong opinions — loves or hates movies");
+  } else if (avgStdDev < 0.6) {
+    traits.push("Consistent ratings with little variation");
+  } else {
+    traits.push("Moderate range of ratings");
+  }
+
+  const primary = topGenres[0]?.name || "Drama";
+  const secondary = topGenres[1]?.name || "";
+
+  // Genre-based trait
+  const genreTraitMap: Record<string, string> = {
+    Action: "Drawn to high-energy spectacle",
+    Adventure: "Loves epic journeys and discovery",
+    Animation: "Appreciates animated storytelling",
+    Comedy: "Values humor and lighthearted fun",
+    Crime: "Fascinated by the criminal underworld",
+    Documentary: "Seeks real-world stories and knowledge",
+    Drama: "Appreciates emotional depth and character",
+    Family: "Enjoys wholesome, all-ages content",
+    Fantasy: "Loves magical worlds and imagination",
+    History: "Drawn to stories of the past",
+    Horror: "Enjoys suspense and being scared",
+    Music: "Appreciates musical storytelling",
+    Mystery: "Loves puzzles and whodunits",
+    Romance: "Drawn to love stories and relationships",
+    "Science Fiction": "Fascinated by futuristic concepts",
+    Thriller: "Thrives on tension and suspense",
+    War: "Drawn to conflict and heroism",
+    Western: "Appreciates frontier stories",
+  };
+  traits.push(genreTraitMap[primary] || `Enjoys ${primary} films`);
+
+  // Personality component from disposition
+  const personalityMap: Record<string, string> = {
+    lenient_wide: "Enthusiast",
+    lenient_narrow: "Fan",
+    balanced_wide: "Explorer",
+    balanced_narrow: "Traditionalist",
+    harsh_wide: "Critic",
+    harsh_narrow: "Purist",
+    insufficient: "Newcomer",
+  };
+  const personality = personalityMap[disposition] || "Viewer";
+
+  // Genre component — use primary genre, with some creative mapping
+  const genreNameMap: Record<string, string> = {
+    Action: "Action",
+    Adventure: "Adventure",
+    Animation: "Animation",
+    Comedy: "Comedy",
+    Crime: "Crime",
+    Documentary: "Documentary",
+    Drama: "Drama",
+    Family: "Family",
+    Fantasy: "Fantasy",
+    History: "History",
+    Horror: "Horror",
+    Music: "Music",
+    Mystery: "Mystery",
+    Romance: "Romance",
+    "Science Fiction": "Sci-Fi",
+    Thriller: "Thriller",
+    War: "War",
+    Western: "Western",
+  };
+  const genreLabel = genreNameMap[primary] || primary;
+
+  const name = `The ${genreLabel} ${personality}`;
+
+  // Description combines genre preference with viewing style
+  const styleDescriptions: Record<string, string> = {
+    lenient_wide: "with an open mind and varied tastes",
+    lenient_narrow: "with consistent enthusiasm",
+    balanced_wide: "with a discerning but fair eye",
+    balanced_narrow: "with steady, reliable taste",
+    harsh_wide: "with passionate, exacting standards",
+    harsh_narrow: "with unwavering critical standards",
+    insufficient: "still discovering their preferences",
+  };
+  const style = styleDescriptions[disposition] || "with a unique perspective";
+
+  const description = secondary
+    ? `Gravitates toward ${primary.toLowerCase()} and ${secondary.toLowerCase()} films ${style}`
+    : `Gravitates toward ${primary.toLowerCase()} films ${style}`;
+
+  return { name, description, traits };
+}
+
+/**
+ * Run viewer archetype clustering on ML user vectors and save results.
+ * Called during training while ML user vectors are still in memory.
+ */
+async function clusterAndSaveArchetypes(
+  userVectors: Map<string, number[]>,
+  householdUserVectors: Map<string, number[]>,
+  mlRatings: Rating[],
+  userFeatureCache: Map<string, UserFeatures>,
+  k: number = 8
+): Promise<void> {
+  // Extract ML user vectors
+  const mlVectors = new Map<string, number[]>();
+  for (const [userId, vec] of userVectors) {
+    if (userId.startsWith("ml_")) {
+      mlVectors.set(userId, vec);
+    }
+  }
+
+  if (mlVectors.size < k * 50) {
+    console.log(`[MF Train] Not enough ML users for clustering (${mlVectors.size}), skipping`);
+    return;
+  }
+
+  console.log(`[MF Train] Clustering ${mlVectors.size} ML users into ${k} archetypes...`);
+  const clusters = kMeansClustering(mlVectors, k);
+  console.log(`[MF Train] Found ${clusters.length} valid clusters`);
+
+  if (clusters.length === 0) return;
+
+  // Load genre names for analysis
+  const genres = await prisma.genre.findMany({ select: { id: true, name: true } });
+  const genreIdToName = new Map(genres.map((g) => [g.id, g.name]));
+
+  // Analyze and save each cluster
+  const savedNames = new Set<string>();
+  const archetypeIds: { id: string; centroid: number[] }[] = [];
+
+  for (const cluster of clusters) {
+    const analysis = analyzeCluster(cluster, mlRatings, userFeatureCache, genreIdToName);
+
+    // Deduplicate names
+    let finalName = analysis.name;
+    let suffix = 2;
+    while (savedNames.has(finalName)) {
+      finalName = `${analysis.name} ${suffix}`;
+      suffix++;
+    }
+    savedNames.add(finalName);
+
+    const archetype = await prisma.viewerArchetype.upsert({
+      where: { name: finalName },
+      create: {
+        name: finalName,
+        description: analysis.description,
+        centroid: JSON.stringify(cluster.centroid),
+        clusterSize: cluster.memberIds.length,
+        topGenres: JSON.stringify(analysis.topGenres),
+        disposition: analysis.disposition,
+        traits: JSON.stringify(analysis.traits),
+      },
+      update: {
+        description: analysis.description,
+        centroid: JSON.stringify(cluster.centroid),
+        clusterSize: cluster.memberIds.length,
+        topGenres: JSON.stringify(analysis.topGenres),
+        disposition: analysis.disposition,
+        traits: JSON.stringify(analysis.traits),
+      },
+    });
+
+    archetypeIds.push({ id: archetype.id, centroid: cluster.centroid });
+  }
+
+  // Delete stale archetypes not in current set
+  const currentIds = archetypeIds.map((a) => a.id);
+  await prisma.viewerArchetype.deleteMany({
+    where: { id: { notIn: currentIds } },
+  });
+
+  // Match household users to nearest archetype
+  let matched = 0;
+  for (const [userId, userVec] of householdUserVectors) {
+    let minDist = Infinity;
+    let bestId: string | null = null;
+    for (const arch of archetypeIds) {
+      const dist = euclideanDistance(userVec, arch.centroid);
+      if (dist < minDist) {
+        minDist = dist;
+        bestId = arch.id;
+      }
+    }
+    if (bestId) {
+      await prisma.userFeatureCache.updateMany({
+        where: { userId },
+        data: { archetypeId: bestId },
+      });
+      matched++;
+    }
+  }
+
+  console.log(
+    `[MF Train] Saved ${archetypeIds.length} archetypes, matched ${matched} household users`
+  );
 }

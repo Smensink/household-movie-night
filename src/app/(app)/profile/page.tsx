@@ -56,6 +56,17 @@ interface ProfileStats {
     lastTrainedAt: string | null;
     isTraining: boolean;
   } | null;
+  moviePersonality: {
+    archetypeName: string;
+    description: string;
+    traits: string[];
+    disposition: string;
+    dispositionLabel: string;
+    dispositionExplanation: string;
+    topGenres: { name: string; score: number }[];
+    ratingMean: number | null;
+    ratingStdDev: number | null;
+  } | null;
 }
 
 interface ProfileLoadError {
@@ -189,6 +200,119 @@ function RatingDistribution({
         ))}
       </div>
       <div className="text-center text-xs text-muted mt-2">Star Rating</div>
+    </div>
+  );
+}
+
+function MoviePersonalityCard({
+  personality,
+}: {
+  personality: NonNullable<ProfileStats["moviePersonality"]>;
+}) {
+  return (
+    <div className="bg-card border border-border rounded-xl p-4">
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 bg-accent-soft rounded-lg flex items-center justify-center">
+          <svg
+            className="w-4 h-4 text-accent"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={1.5}
+              d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"
+            />
+          </svg>
+        </div>
+        <h3 className="font-semibold">Your Movie Personality</h3>
+      </div>
+
+      <div className="space-y-4">
+        {/* Archetype Name */}
+        <div>
+          <div className="text-lg font-bold text-accent">
+            {personality.archetypeName}
+          </div>
+          <div className="text-sm text-muted mt-0.5">
+            {personality.description}
+          </div>
+        </div>
+
+        {/* Signature Genres */}
+        {personality.topGenres.length > 0 && (
+          <div>
+            <div className="text-xs text-muted uppercase tracking-wide mb-2">
+              Signature Genres
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {personality.topGenres.map((genre, i) => (
+                <span
+                  key={i}
+                  className="px-2.5 py-1 bg-accent/10 border border-accent/20 rounded-lg text-sm"
+                >
+                  {genre.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Viewing Traits */}
+        {personality.traits.length > 0 && (
+          <div>
+            <div className="text-xs text-muted uppercase tracking-wide mb-2">
+              Viewing Traits
+            </div>
+            <ul className="space-y-1">
+              {personality.traits.map((trait, i) => (
+                <li
+                  key={i}
+                  className="text-sm flex items-start gap-2"
+                >
+                  <span className="text-accent mt-0.5">&#8226;</span>
+                  <span>{trait}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Rating Style */}
+        <div>
+          <div className="text-xs text-muted uppercase tracking-wide mb-1">
+            Rating Style
+          </div>
+          <div className="text-sm font-medium">
+            {personality.dispositionLabel}
+          </div>
+          <div className="text-sm text-muted italic mt-0.5">
+            {personality.dispositionExplanation}
+          </div>
+        </div>
+
+        {/* Rating Stats */}
+        {personality.ratingMean != null && (
+          <div className="flex items-center gap-4 pt-2 border-t border-border">
+            <div>
+              <div className="text-xs text-muted">Avg Rating</div>
+              <div className="text-sm font-medium">
+                {personality.ratingMean.toFixed(1)} / 5
+              </div>
+            </div>
+            {personality.ratingStdDev != null && (
+              <div>
+                <div className="text-xs text-muted">Spread</div>
+                <div className="text-sm font-medium">
+                  &plusmn;{personality.ratingStdDev.toFixed(2)}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -507,6 +631,11 @@ function ProfilePageContent() {
           </div>
         </div>
       </div>
+
+      {/* Movie Personality */}
+      {stats.moviePersonality && (
+        <MoviePersonalityCard personality={stats.moviePersonality} />
+      )}
 
       {/* Stats Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">

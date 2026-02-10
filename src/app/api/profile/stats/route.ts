@@ -54,6 +54,17 @@ interface ProfileStats {
     lastTrainedAt: string | null;
     isTraining: boolean;
   } | null;
+  moviePersonality: {
+    archetypeName: string;
+    description: string;
+    traits: string[];
+    disposition: string;
+    dispositionLabel: string;
+    dispositionExplanation: string;
+    topGenres: { name: string; score: number }[];
+    ratingMean: number | null;
+    ratingStdDev: number | null;
+  } | null;
 }
 
 function normalizeRating(rating: number): number {
@@ -344,6 +355,41 @@ export async function GET(req: NextRequest) {
   // Get ML model metadata
   const modelMetadata = await getModelMetadata();
 
+  // Get movie personality (archetype + disposition)
+  const userFeatureCache = await prisma.userFeatureCache.findUnique({
+    where: { userId },
+    include: { archetype: true },
+  });
+
+  const dispositionMap: Record<string, { label: string; explanation: string }> = {
+    insufficient: { label: "Not Enough Data", explanation: "Rate more movies to discover your rating style" },
+    balanced_wide: { label: "Fair & Opinionated", explanation: "You use the full rating scale around a balanced center" },
+    balanced_narrow: { label: "Steady & Consistent", explanation: "You rate most movies similarly near the middle" },
+    lenient_wide: { label: "Generous & Discerning", explanation: "You rate generously overall but strongly differentiate between films" },
+    lenient_narrow: { label: "Generous & Consistent", explanation: "You tend to rate everything positively" },
+    harsh_wide: { label: "Critical & Passionate", explanation: "You're tough to please but love what you love" },
+    harsh_narrow: { label: "Exacting Standards", explanation: "You hold movies to a consistently high bar" },
+  };
+
+  let moviePersonality: ProfileStats["moviePersonality"] = null;
+  if (userFeatureCache?.archetype) {
+    const arch = userFeatureCache.archetype;
+    const disp = userFeatureCache.ratingDisposition || "insufficient";
+    const dispInfo = dispositionMap[disp] || dispositionMap.insufficient;
+
+    moviePersonality = {
+      archetypeName: arch.name,
+      description: arch.description,
+      traits: JSON.parse(arch.traits),
+      disposition: disp,
+      dispositionLabel: dispInfo.label,
+      dispositionExplanation: dispInfo.explanation,
+      topGenres: JSON.parse(arch.topGenres),
+      ratingMean: userFeatureCache.ratingMean,
+      ratingStdDev: userFeatureCache.ratingStdDev,
+    };
+  }
+
   const stats: ProfileStats = {
     user: {
       id: user?.id || userId,
@@ -381,6 +427,7 @@ export async function GET(req: NextRequest) {
           isTraining: modelMetadata.isTraining,
         }
       : null,
+    moviePersonality,
   };
 
   return NextResponse.json(stats);

@@ -443,7 +443,23 @@ model UserFeatureCache {
   ratingCount       Int      @default(0)
   ratingDisposition String?  // e.g. "lenient_wide", "harsh_narrow", "balanced_wide"
   topGenreIds       String?  // JSON array of top 5 genre IDs
+  archetypeId       String?
+  archetype         ViewerArchetype? @relation(fields: [archetypeId], references: [id], onDelete: SetNull)
   updatedAt         DateTime @updatedAt
+}
+
+// Viewer archetype clusters derived from MovieLens user analysis
+model ViewerArchetype {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String
+  centroid    String   // JSON: 50D latent vector
+  clusterSize Int
+  topGenres   String   // JSON: [{ name, score }]
+  disposition String   // Most common disposition in cluster
+  traits      String   // JSON: string[]
+  updatedAt   DateTime @updatedAt
+  users       UserFeatureCache[]
 }
 
 model ActivityLog {
