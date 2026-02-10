@@ -167,6 +167,55 @@ interface HouseholdFeatures {
   consensusScore: number; // Average of other household members' ratings
 }
 
+function denormalizeRating(normalized: number, userMean: number, userStdDev: number): number {
+  if (userStdDev < 0.1) return normalized;
+  return userMean + (normalized - 3) * userStdDev;
+}
+
+function dcgAtK(relevances: number[], k: number): number {
+  let sum = 0;
+  for (let i = 0; i < Math.min(k, relevances.length); i++) {
+    const rel = relevances[i];
+    // Standard graded DCG.
+    sum += (Math.pow(2, rel) - 1) / Math.log2(i + 2);
+  }
+  return sum;
+}
+
+function ndcgAtK(relevancesByRank: number[], k: number): number {
+  const dcg = dcgAtK(relevancesByRank, k);
+  if (dcg <= 0) return 0;
+  const ideal = [...relevancesByRank].sort((a, b) => b - a);
+  const idcg = dcgAtK(ideal, k);
+  return idcg > 0 ? dcg / idcg : 0;
+}
+
+function mapAtK(binaryRelevancesByRank: boolean[], k: number): number {
+  let hits = 0;
+  let sumPrec = 0;
+  for (let i = 0; i < Math.min(k, binaryRelevancesByRank.length); i++) {
+    if (binaryRelevancesByRank[i]) {
+      hits++;
+      sumPrec += hits / (i + 1);
+    }
+  }
+  return hits > 0 ? sumPrec / hits : 0;
+}
+
+function aucFromScores(positiveScores: number[], negativeScores: number[]): number {
+  if (positiveScores.length === 0 || negativeScores.length === 0) return 0;
+  let wins = 0;
+  let ties = 0;
+  for (const p of positiveScores) {
+    for (const n of negativeScores) {
+      if (p > n) wins++;
+      else if (p === n) ties++;
+    }
+  }
+  const total = positiveScores.length * negativeScores.length;
+  return total > 0 ? (wins + 0.5 * ties) / total : 0;
+}
+
 interface LatentVectors {
   userVectors: Map<string, number[]>;
   movieVectors: Map<string, number[]>;
@@ -550,6 +599,43 @@ function predictRating(
   return Math.max(1, Math.min(5, prediction));
 }
 
+function predictRatingTypedVectors(
+  userVecs: Float32Array,
+  userIndex: number,
+  movieVecs: Float32Array,
+  movieIndex: number,
+  latentDimensions: number,
+  userBias: number,
+  movieBias: number,
+  globalMean: number,
+  movieFeatures: MovieFeatures,
+  userFeatures: UserFeatures,
+  householdFeatures: HouseholdFeatures,
+  featureEmbeddings: Map<string, { vector: number[]; bias: number }>,
+  featureDimensions: number
+): number {
+  const uOff = userIndex * latentDimensions;
+  const mOff = movieIndex * latentDimensions;
+  let dot = 0;
+  for (let d = 0; d < latentDimensions; d++) {
+    dot += userVecs[uOff + d] * movieVecs[mOff + d];
+  }
+
+  const dummyRating: Rating = {
+    userId: "",
+    movieId: "",
+    rating: 0,
+    weight: 1,
+    movieFeatures,
+    userFeatures,
+    householdFeatures,
+  };
+
+  const featureContribution = computeFeatureContribution(dummyRating, featureEmbeddings, featureDimensions);
+  const prediction = globalMean + userBias + movieBias + dot + featureContribution;
+  return Math.max(1, Math.min(5, prediction));
+}
+
 /**
  * Load existing latent vectors and embeddings from database
  */
@@ -713,6 +799,17 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
 	    // MovieLens joint-training controls (default caps avoid ML-domain dominating household validation)
 	    mlRatingWeight?: number; // scales ML example loss contributions (household is 1.0)
 	    mlSamplePerEpoch?: number; // max number of ML examples included per epoch (Infinity = all mapped ML)
+	    // Epoch-by-epoch ranking eval on household validation set (approximate; sampled)
+	    epochEval?: {
+	      enabled?: boolean;
+	      everyEpochs?: number; // 1 = every epoch
+	      sampleUsers?: number; // number of validation users to evaluate
+	      k?: number; // ranking cutoff
+	      positiveThreshold?: number; // raw-star threshold to treat as "relevant" for MAP/Hit/AUC
+	      negativesPerPositive?: number;
+	      minNegatives?: number;
+	      maxNegatives?: number;
+	    };
 	    latentDimensions?: number;
 	    featureDimensions?: number;
 	    earlyStopping?: {
@@ -743,6 +840,15 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
   const earlyStoppingEnabled = options.earlyStopping?.enabled === true;
   const earlyStoppingPatience = Math.max(1, Math.floor(options.earlyStopping?.patience ?? 3));
   const earlyStoppingMinDelta = Math.max(0, options.earlyStopping?.minDelta ?? 0.001);
+
+  const epochEvalEnabled = options.epochEval?.enabled ?? true;
+  const epochEvalEvery = Math.max(1, Math.floor(options.epochEval?.everyEpochs ?? 1));
+  const epochEvalSampleUsers = Math.max(10, Math.floor(options.epochEval?.sampleUsers ?? 200));
+  const epochEvalK = Math.max(1, Math.floor(options.epochEval?.k ?? 10));
+  const epochEvalPositiveThreshold = Math.max(1, Math.min(5, options.epochEval?.positiveThreshold ?? 4));
+  const epochEvalNegPerPos = Math.max(1, Math.floor(options.epochEval?.negativesPerPositive ?? 20));
+  const epochEvalMinNeg = Math.max(0, Math.floor(options.epochEval?.minNegatives ?? 50));
+  const epochEvalMaxNeg = Math.max(epochEvalMinNeg, Math.floor(options.epochEval?.maxNegatives ?? 200));
 
   // Atomically acquire training lock to prevent TOCTOU race
   const metadata = await prisma.mFModelMetadata.findFirst();
@@ -873,7 +979,15 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
       movieRatingLookup.get(rating.movieId)!.set(rating.userId, rating.rating!);
     }
 
+    // Per-user rated movies (used for negative sampling in ranking-style validation evals)
+    const ratedMoviesByUser = new Map<string, Set<string>>();
+    for (const r of rawRatings) {
+      if (!ratedMoviesByUser.has(r.userId)) ratedMoviesByUser.set(r.userId, new Set());
+      ratedMoviesByUser.get(r.userId)!.add(r.movieId);
+    }
+
     // Transform raw ratings to enriched format
+    const movieFeaturesMap = new Map<string, MovieFeatures>(); // movieId -> features (household + ML-only)
     const ratings: Rating[] = rawRatings.map((r) => {
       const movieFeatures: MovieFeatures = {
         genreIds: r.movie.genres.map((g) => g.genreId),
@@ -890,6 +1004,7 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
         voteCountBin: binVoteCount(r.movie.voteCount),
         surpriseFactorBin: binSurpriseFactor(r.movie.surpriseFactor),
       };
+      movieFeaturesMap.set(r.movieId, movieFeatures);
 
       const userFeatures = userFeatureCache.get(r.userId)!;
 
@@ -1015,12 +1130,6 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
             })
           : [];
 
-      // Build movie features map for ML movies + household movies
-      const movieFeaturesMap = new Map<string, MovieFeatures>();
-      // Add household movie features (already computed in ratings array)
-      for (const r of ratings) {
-        movieFeaturesMap.set(r.movieId, r.movieFeatures);
-      }
       // Add ML-only movie features
       for (const m of mlMovies) {
         movieFeaturesMap.set(m.id, {
@@ -1094,6 +1203,15 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
       `[MF Train] Household split: train=${householdTrainingSet.length} val=${validationSet.length} (fraction=${VALIDATION_SPLIT})`
     );
 
+    const validationByUser = new Map<string, Rating[]>();
+    for (const r of validationSet) {
+      if (!validationByUser.has(r.userId)) validationByUser.set(r.userId, []);
+      validationByUser.get(r.userId)!.push(r);
+    }
+    const validationUserSample = [...validationByUser.keys()]
+      .sort((a, b) => fnv1a32(a) - fnv1a32(b))
+      .slice(0, epochEvalSampleUsers);
+
     // Combine household training + ML ratings for the full training set
     const trainingSet = [...householdTrainingSet, ...mlTrainingRatings];
 
@@ -1133,6 +1251,7 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
 
     // Get unique users and movies (from ALL ratings)
     const movieIds = new Set(allRatings.map((r) => r.movieId));
+    const movieIdUniverse = [...movieIds];
 
     // Load existing vectors or initialize new ones
     const existing = await loadLatentVectors(featureDimensions);
@@ -1167,6 +1286,23 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
     }
 
     // Training loop — use GPU batch operations when tf.js is available
+    const getHouseholdConsensusScore = (userId: string, movieId: string): number => {
+      const householdMembers = householdMemberMap.get(userId);
+      if (!householdMembers || householdMembers.size === 0) return 0;
+      const movieRatings = movieRatingLookup.get(movieId);
+      if (!movieRatings) return 0;
+      let sum = 0;
+      let count = 0;
+      for (const memberId of householdMembers) {
+        const r = movieRatings.get(memberId);
+        if (r !== undefined) {
+          sum += r;
+          count++;
+        }
+      }
+      return count > 0 ? sum / count : 0;
+    };
+
     const tfResult = await getTF();
     let rmse = 0;
     let validationRmse = 0;
@@ -1419,15 +1555,20 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
             const uIdx = userIdxMap.get(rating.userId);
             const mIdx = movieIdxMap.get(rating.movieId);
             if (uIdx === undefined || mIdx === undefined) continue;
-
-            // Read vectors directly from typed arrays
-            const uVec = Array.from(curUVecs.subarray(uIdx * latentDimensions, (uIdx + 1) * latentDimensions));
-            const mVec = Array.from(curMVecs.subarray(mIdx * latentDimensions, (mIdx + 1) * latentDimensions));
-
-            const predicted = predictRating(
-              uVec, mVec, curUBias[uIdx], curMBias[mIdx], globalMean,
-              rating.movieFeatures, rating.userFeatures, rating.householdFeatures,
-              featureEmbeddings, featureDimensions
+            const predicted = predictRatingTypedVectors(
+              curUVecs,
+              uIdx,
+              curMVecs,
+              mIdx,
+              latentDimensions,
+              curUBias[uIdx],
+              curMBias[mIdx],
+              globalMean,
+              rating.movieFeatures,
+              rating.userFeatures,
+              rating.householdFeatures,
+              featureEmbeddings,
+              featureDimensions
             );
             validationSquaredError += Math.pow(rating.rating - predicted, 2);
           }
@@ -1441,13 +1582,20 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
               const uIdx = userIdxMap.get(rating.userId);
               const mIdx = movieIdxMap.get(rating.movieId);
               if (uIdx === undefined || mIdx === undefined) continue;
-
-              const uVec = Array.from(curUVecs.subarray(uIdx * latentDimensions, (uIdx + 1) * latentDimensions));
-              const mVec = Array.from(curMVecs.subarray(mIdx * latentDimensions, (mIdx + 1) * latentDimensions));
-              const predicted = predictRating(
-                uVec, mVec, curUBias[uIdx], curMBias[mIdx], globalMean,
-                rating.movieFeatures, rating.userFeatures, rating.householdFeatures,
-                featureEmbeddings, featureDimensions
+              const predicted = predictRatingTypedVectors(
+                curUVecs,
+                uIdx,
+                curMVecs,
+                mIdx,
+                latentDimensions,
+                curUBias[uIdx],
+                curMBias[mIdx],
+                globalMean,
+                rating.movieFeatures,
+                rating.userFeatures,
+                rating.householdFeatures,
+                featureEmbeddings,
+                featureDimensions
               );
               mlValSquared += Math.pow(rating.rating - predicted, 2);
               mlValCount++;
@@ -1457,10 +1605,144 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
             mlValidationRmse = 0;
           }
 
+          // Approximate ranking metrics on household validation (sampled users; small candidate sets).
+          let valNdcg = 0;
+          let valMap = 0;
+          let valHit = 0;
+          let valAuc = 0;
+          let evalUsers = 0;
+          if (
+            epochEvalEnabled &&
+            (epoch + 1) % epochEvalEvery === 0 &&
+            validationUserSample.length > 0 &&
+            movieIdUniverse.length > 0
+          ) {
+            for (const userId of validationUserSample) {
+              const uIdx = userIdxMap.get(userId);
+              if (uIdx === undefined) continue;
+              const uf = userFeatureCache.get(userId);
+              if (!uf) continue;
+
+              const userVal = validationByUser.get(userId) ?? [];
+              const positiveRatings = userVal
+                .map((r) => ({
+                  movieId: r.movieId,
+                  rel: denormalizeRating(r.rating, r.userFeatures.ratingMean, r.userFeatures.ratingStdDev),
+                  consensusScore: r.householdFeatures.consensusScore,
+                }))
+                .filter((x) => x.rel >= epochEvalPositiveThreshold)
+                .sort((a, b) => b.rel - a.rel)
+                .slice(0, 5);
+
+              if (positiveRatings.length === 0) continue;
+
+              const ratedSet = ratedMoviesByUser.get(userId) ?? new Set<string>();
+              const posMovieIds = new Set(positiveRatings.map((p) => p.movieId));
+              const targetNeg = Math.min(
+                epochEvalMaxNeg,
+                Math.max(epochEvalMinNeg, positiveRatings.length * epochEvalNegPerPos)
+              );
+
+              const rand = mulberry32(fnv1a32(`epoch-eval-neg:${epoch}:${userId}`));
+              const negatives: string[] = [];
+              const seen = new Set<string>(posMovieIds);
+              let attempts = 0;
+              while (negatives.length < targetNeg && attempts < targetNeg * 50) {
+                attempts++;
+                const idx = Math.floor(rand() * movieIdUniverse.length);
+                const mid = movieIdUniverse[idx];
+                if (!mid) continue;
+                if (seen.has(mid)) continue;
+                if (ratedSet.has(mid)) continue;
+                if (!movieFeaturesMap.has(mid)) continue;
+                if (movieIdxMap.get(mid) === undefined) continue;
+                seen.add(mid);
+                negatives.push(mid);
+              }
+
+              const candidates: { score: number; rel: number; isPos: boolean }[] = [];
+              const posScores: number[] = [];
+              const negScores: number[] = [];
+
+              for (const p of positiveRatings) {
+                const mIdx = movieIdxMap.get(p.movieId);
+                if (mIdx === undefined) continue;
+                const mf = movieFeaturesMap.get(p.movieId);
+                if (!mf) continue;
+                const hh: HouseholdFeatures = { otherUserRatings: new Map(), consensusScore: p.consensusScore };
+                const s = predictRatingTypedVectors(
+                  curUVecs,
+                  uIdx,
+                  curMVecs,
+                  mIdx,
+                  latentDimensions,
+                  curUBias[uIdx],
+                  curMBias[mIdx],
+                  globalMean,
+                  mf,
+                  uf,
+                  hh,
+                  featureEmbeddings,
+                  featureDimensions
+                );
+                candidates.push({ score: s, rel: p.rel, isPos: true });
+                posScores.push(s);
+              }
+
+              for (const mid of negatives) {
+                const mIdx = movieIdxMap.get(mid);
+                if (mIdx === undefined) continue;
+                const mf = movieFeaturesMap.get(mid);
+                if (!mf) continue;
+                const consensusScore = getHouseholdConsensusScore(userId, mid);
+                const hh: HouseholdFeatures = { otherUserRatings: new Map(), consensusScore };
+                const s = predictRatingTypedVectors(
+                  curUVecs,
+                  uIdx,
+                  curMVecs,
+                  mIdx,
+                  latentDimensions,
+                  curUBias[uIdx],
+                  curMBias[mIdx],
+                  globalMean,
+                  mf,
+                  uf,
+                  hh,
+                  featureEmbeddings,
+                  featureDimensions
+                );
+                candidates.push({ score: s, rel: 0, isPos: false });
+                negScores.push(s);
+              }
+
+              if (candidates.length === 0 || posScores.length === 0 || negScores.length === 0) continue;
+
+              candidates.sort((a, b) => b.score - a.score);
+              const relByRank = candidates.map((c) => c.rel);
+              const binByRank = candidates.map((c) => c.rel >= epochEvalPositiveThreshold);
+
+              valNdcg += ndcgAtK(relByRank, epochEvalK);
+              valMap += mapAtK(binByRank, epochEvalK);
+              valHit += binByRank.slice(0, epochEvalK).some(Boolean) ? 1 : 0;
+              valAuc += aucFromScores(posScores, negScores);
+              evalUsers++;
+            }
+
+            if (evalUsers > 0) {
+              valNdcg /= evalUsers;
+              valMap /= evalUsers;
+              valHit /= evalUsers;
+              valAuc /= evalUsers;
+            }
+          }
+
           const effectiveLR = adamLR * Math.sqrt(1 - Math.pow(ADAM_BETA2, adamStep)) / (1 - Math.pow(ADAM_BETA1, adamStep));
           console.log(
             `[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)}` +
               (mlValidationSample.length > 0 ? ` mlValRMSE=${mlValidationRmse.toFixed(4)}` : ``) +
+              (evalUsers > 0
+                ? ` valNDCG@${epochEvalK}=${valNdcg.toFixed(4)} valMAP@${epochEvalK}=${valMap.toFixed(4)} valHit@${epochEvalK}=${valHit.toFixed(4)} valAUC=${valAuc.toFixed(4)}`
+                : ``) +
               ` adamLR=${effectiveLR.toFixed(6)} wd=${weightDecayLocal.toFixed(4)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`
           );
 
@@ -1648,7 +1930,136 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
         }
         validationRmse = validationSet.length > 0 ? Math.sqrt(validationSquaredError / validationSet.length) : rmse;
 
-        console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} (JS)`);
+        // Approximate ranking metrics on household validation (sampled users; small candidate sets).
+        let valNdcg = 0;
+        let valMap = 0;
+        let valHit = 0;
+        let valAuc = 0;
+        let evalUsers = 0;
+        if (
+          epochEvalEnabled &&
+          (epoch + 1) % epochEvalEvery === 0 &&
+          validationUserSample.length > 0 &&
+          movieIdUniverse.length > 0
+        ) {
+          for (const userId of validationUserSample) {
+            const userVector = userVectors.get(userId);
+            if (!userVector) continue;
+            const uf = userFeatureCache.get(userId);
+            if (!uf) continue;
+
+            const userVal = validationByUser.get(userId) ?? [];
+            const positiveRatings = userVal
+              .map((r) => ({
+                movieId: r.movieId,
+                rel: denormalizeRating(r.rating, r.userFeatures.ratingMean, r.userFeatures.ratingStdDev),
+                consensusScore: r.householdFeatures.consensusScore,
+              }))
+              .filter((x) => x.rel >= epochEvalPositiveThreshold)
+              .sort((a, b) => b.rel - a.rel)
+              .slice(0, 5);
+            if (positiveRatings.length === 0) continue;
+
+            const ratedSet = ratedMoviesByUser.get(userId) ?? new Set<string>();
+            const posMovieIds = new Set(positiveRatings.map((p) => p.movieId));
+            const targetNeg = Math.min(
+              epochEvalMaxNeg,
+              Math.max(epochEvalMinNeg, positiveRatings.length * epochEvalNegPerPos)
+            );
+
+            const rand = mulberry32(fnv1a32(`epoch-eval-neg:${epoch}:${userId}`));
+            const negatives: string[] = [];
+            const seen = new Set<string>(posMovieIds);
+            let attempts = 0;
+            while (negatives.length < targetNeg && attempts < targetNeg * 50) {
+              attempts++;
+              const idx = Math.floor(rand() * movieIdUniverse.length);
+              const mid = movieIdUniverse[idx];
+              if (!mid) continue;
+              if (seen.has(mid)) continue;
+              if (ratedSet.has(mid)) continue;
+              if (!movieFeaturesMap.has(mid)) continue;
+              seen.add(mid);
+              negatives.push(mid);
+            }
+
+            const candidates: { score: number; rel: number; isPos: boolean }[] = [];
+            const posScores: number[] = [];
+            const negScores: number[] = [];
+
+            for (const p of positiveRatings) {
+              const movieVector = movieVectors.get(p.movieId);
+              if (!movieVector) continue;
+              const mf = movieFeaturesMap.get(p.movieId);
+              if (!mf) continue;
+              const hh: HouseholdFeatures = { otherUserRatings: new Map(), consensusScore: p.consensusScore };
+              const s = predictRating(
+                userVector,
+                movieVector,
+                userBiases.get(userId) ?? 0,
+                movieBiases.get(p.movieId) ?? 0,
+                globalMean,
+                mf,
+                uf,
+                hh,
+                featureEmbeddings,
+                featureDimensions
+              );
+              candidates.push({ score: s, rel: p.rel, isPos: true });
+              posScores.push(s);
+            }
+
+            for (const mid of negatives) {
+              const movieVector = movieVectors.get(mid);
+              if (!movieVector) continue;
+              const mf = movieFeaturesMap.get(mid);
+              if (!mf) continue;
+              const consensusScore = getHouseholdConsensusScore(userId, mid);
+              const hh: HouseholdFeatures = { otherUserRatings: new Map(), consensusScore };
+              const s = predictRating(
+                userVector,
+                movieVector,
+                userBiases.get(userId) ?? 0,
+                movieBiases.get(mid) ?? 0,
+                globalMean,
+                mf,
+                uf,
+                hh,
+                featureEmbeddings,
+                featureDimensions
+              );
+              candidates.push({ score: s, rel: 0, isPos: false });
+              negScores.push(s);
+            }
+
+            if (candidates.length === 0 || posScores.length === 0 || negScores.length === 0) continue;
+
+            candidates.sort((a, b) => b.score - a.score);
+            const relByRank = candidates.map((c) => c.rel);
+            const binByRank = candidates.map((c) => c.rel >= epochEvalPositiveThreshold);
+
+            valNdcg += ndcgAtK(relByRank, epochEvalK);
+            valMap += mapAtK(binByRank, epochEvalK);
+            valHit += binByRank.slice(0, epochEvalK).some(Boolean) ? 1 : 0;
+            valAuc += aucFromScores(posScores, negScores);
+            evalUsers++;
+          }
+
+          if (evalUsers > 0) {
+            valNdcg /= evalUsers;
+            valMap /= evalUsers;
+            valHit /= evalUsers;
+            valAuc /= evalUsers;
+          }
+        }
+
+        console.log(
+          `[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)}` +
+            (evalUsers > 0
+              ? ` valNDCG@${epochEvalK}=${valNdcg.toFixed(4)} valMAP@${epochEvalK}=${valMap.toFixed(4)} valHit@${epochEvalK}=${valHit.toFixed(4)} valAUC=${valAuc.toFixed(4)}`
+              : ``) +
+            ` (JS)`
+        );
 
         if (earlyStoppingEnabled && validationSet.length > 0) {
           const improved = validationRmse + earlyStoppingMinDelta < bestVal;
