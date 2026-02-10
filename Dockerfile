@@ -67,6 +67,8 @@ CMD ["sh", "-c", "\
   curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/radarr/import 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] Backfilling vote counts from TMDB/OMDB...' && \
   curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/backfill-votes 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Backfilling language/country data...' && \
+  curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/backfill-language 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] Cleaning up obscure movies...' && \
   curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/cleanup 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] Checking/training recommendation model...' && \
@@ -76,6 +78,8 @@ CMD ["sh", "-c", "\
     sleep 300; \
     echo '[Background] Backfilling vote counts...' && \
     curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/backfill-votes 2>&1 | head -c 200 && echo '' && \
+    echo '[Background] Backfilling language/country data...' && \
+    curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/backfill-language 2>&1 | head -c 200 && echo '' && \
     echo '[Background] Cleaning up obscure movies...' && \
     curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/cleanup 2>&1 | head -c 200 && echo '' && \
     echo '[Background] Checking if model retraining needed...' && \

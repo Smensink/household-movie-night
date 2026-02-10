@@ -489,6 +489,7 @@ export async function GET(req: NextRequest) {
           actors: mergeUnique(movie.cast.map((c) => c.person.name).filter(Boolean), [], 3),
           directors: mergeUnique(movie.crew.map((c) => c.person.name).filter(Boolean), [], 2),
           studios: mergeUnique(movie.studios.map((s) => s.studio.name).filter(Boolean), [], 2),
+          originalLanguage: movie.originalLanguage,
           consensus: {
             ratingCount: validRatings.length,
             averageRating,

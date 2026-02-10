@@ -77,6 +77,8 @@ model Movie {
   imdbVotes     Int?      // Number of votes on IMDB
   rottenTomatoesAudience Int?
   letterboxdRating Float?
+  originalLanguage String?
+  originCountry    String?
   era           String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt

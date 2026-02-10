@@ -533,6 +533,7 @@ export async function GET(req: NextRequest) {
         actors: mergeUnique(relationMetadata.actors, dbMetadata.actors, 3),
         directors: mergeUnique(relationMetadata.directors, dbMetadata.directors, 2),
         studios: mergeUnique(relationMetadata.studios, dbMetadata.studios, 2),
+        originalLanguage: movie.originalLanguage,
         score,
       };
     })

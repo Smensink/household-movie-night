@@ -21,6 +21,7 @@ interface UpcomingMovie {
   releaseDate: string | null;
   listCount: number;
   genres: string[];
+  originalLanguage?: string | null;
   actors: string[];
   directors: string[];
   studios: string[];

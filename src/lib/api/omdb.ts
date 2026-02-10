@@ -26,6 +26,8 @@ export interface OMDBMovie {
   imdbRating?: string;
   imdbVotes?: string; // Format: "1,234,567"
   Rated?: string;
+  Language?: string;
+  Country?: string;
   Ratings?: OMDBRating[];
   BoxOffice?: string; // Format: "$123,456,789"
 }

@@ -16,6 +16,8 @@ export interface TMDBMovie {
   id: number;
   imdb_id?: string;
   title: string;
+  original_language?: string;
+  origin_country?: string[];
   overview?: string;
   poster_path?: string | null;
   backdrop_path?: string | null;

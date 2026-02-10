@@ -20,6 +20,7 @@ interface Movie {
   imdbRating?: number | null;
   rottenTomatoesAudience?: number | null;
   genres?: string[];
+  originalLanguage?: string | null;
   directors?: string[];
   actors?: string[];
   studios?: string[];

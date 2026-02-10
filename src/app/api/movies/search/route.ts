@@ -117,6 +117,12 @@ export async function GET(req: NextRequest) {
         posterUrl: movie.posterUrl || null,
         overview: movie.overview,
         runtime: movie.runtime,
+        ...(movie.details?.Language && movie.details.Language !== "N/A" && {
+          originalLanguage: movie.details.Language.split(",")[0].trim().toLowerCase(),
+        }),
+        ...(movie.details?.Country && movie.details.Country !== "N/A" && {
+          originCountry: movie.details.Country.split(",")[0].trim(),
+        }),
       },
       update: {
         ...(() => {
@@ -141,6 +147,12 @@ export async function GET(req: NextRequest) {
         ...(movie.posterUrl !== null && { posterUrl: movie.posterUrl }),
         ...(movie.overview !== null && { overview: movie.overview }),
         ...(movie.runtime !== null && { runtime: movie.runtime }),
+        ...(movie.details?.Language && movie.details.Language !== "N/A" && {
+          originalLanguage: movie.details.Language.split(",")[0].trim().toLowerCase(),
+        }),
+        ...(movie.details?.Country && movie.details.Country !== "N/A" && {
+          originCountry: movie.details.Country.split(",")[0].trim(),
+        }),
       },
       include: {
         cast: {
@@ -197,6 +209,7 @@ export async function GET(req: NextRequest) {
       directors: metadata.directors,
       actors: metadata.actors,
       studios: metadata.studios,
+      originalLanguage: persisted.originalLanguage,
     });
   }
 

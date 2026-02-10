@@ -33,6 +33,8 @@ type FeatureType =
   | "studio"
   | "actor"
   | "director"
+  | "language"
+  | "origin_country"
   | "popularity_bin"
   | "runtime_bin"
   | "vote_avg_bin"
@@ -53,6 +55,8 @@ interface Rating {
 interface MovieFeatures {
   genreIds: string[];
   era: string | null;
+  language: string | null;
+  originCountry: string | null;
   studioIds: string[];
   actorIds: string[];
   directorIds: string[];
@@ -193,6 +197,22 @@ function predictRating(
     const emb = featureEmbeddings.get(getFeatureKey("era", movieFeatures.era));
     if (emb) {
       prediction += emb.bias * 0.3;
+      activeFeatures.push(emb);
+    }
+  }
+
+  if (movieFeatures.language) {
+    const emb = featureEmbeddings.get(getFeatureKey("language", movieFeatures.language));
+    if (emb) {
+      prediction += emb.bias * 0.2;
+      activeFeatures.push(emb);
+    }
+  }
+
+  if (movieFeatures.originCountry) {
+    const emb = featureEmbeddings.get(getFeatureKey("origin_country", movieFeatures.originCountry));
+    if (emb) {
+      prediction += emb.bias * 0.15;
       activeFeatures.push(emb);
     }
   }
@@ -496,6 +516,8 @@ export async function trainMatrixFactorization(
           select: {
             id: true,
             era: true,
+            originalLanguage: true,
+            originCountry: true,
             popularity: true,
             runtime: true,
             voteAverage: true,
@@ -587,6 +609,8 @@ export async function trainMatrixFactorization(
       const movieFeatures: MovieFeatures = {
         genreIds: r.movie.genres.map((g) => g.genreId),
         era: r.movie.era,
+        language: r.movie.originalLanguage,
+        originCountry: r.movie.originCountry,
         studioIds: r.movie.studios.map((s) => s.studioId),
         actorIds: r.movie.cast.map((c) => c.personId),
         directorIds: r.movie.crew.map((c) => c.personId),
@@ -913,6 +937,24 @@ function predictColdStartRating(
     }
   }
 
+  // Language feature
+  if (movieFeatures.language) {
+    const emb = featureEmbeddings.get(getFeatureKey("language", movieFeatures.language));
+    if (emb) {
+      prediction += emb.bias * 0.3;
+      activeVectors.push(emb.vector);
+    }
+  }
+
+  // Origin country feature
+  if (movieFeatures.originCountry) {
+    const emb = featureEmbeddings.get(getFeatureKey("origin_country", movieFeatures.originCountry));
+    if (emb) {
+      prediction += emb.bias * 0.2;
+      activeVectors.push(emb.vector);
+    }
+  }
+
   // Director features - important for cold start
   for (const directorId of movieFeatures.directorIds) {
     const emb = featureEmbeddings.get(getFeatureKey("director", directorId));
@@ -1029,6 +1071,8 @@ export async function getPredictedRatingsForUser(
       select: {
         id: true,
         era: true,
+        originalLanguage: true,
+        originCountry: true,
         popularity: true,
         runtime: true,
         voteAverage: true,
@@ -1092,6 +1136,8 @@ export async function getPredictedRatingsForUser(
     const movieFeatures: MovieFeatures = {
       genreIds: movie.genres.map((g) => g.genreId),
       era: movie.era,
+      language: movie.originalLanguage,
+      originCountry: movie.originCountry,
       studioIds: movie.studios.map((s) => s.studioId),
       actorIds: movie.cast.map((c) => c.personId),
       directorIds: movie.crew.map((c) => c.personId),

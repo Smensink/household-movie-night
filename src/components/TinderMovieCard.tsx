@@ -18,6 +18,7 @@ interface TinderMovieCardProps {
     tmdbRating?: number | null;
     genres?: string[];
     anticipatedListCount?: number | null;
+    originalLanguage?: string | null;
     directors?: string[];
     actors?: string[];
     studios?: string[];
@@ -96,6 +97,11 @@ function TinderMovieCardInner({
             {movie.anticipatedListCount} lists
           </span>
         ) : null}
+        {movie.originalLanguage && movie.originalLanguage !== "english" && movie.originalLanguage !== "en" && (
+          <span className="bg-amber-500/80 backdrop-blur-sm text-white text-xs font-semibold px-2.5 py-1 rounded-full uppercase">
+            {movie.originalLanguage.length <= 3 ? movie.originalLanguage : movie.originalLanguage.slice(0, 2)}
+          </span>
+        )}
         {movie.genres && movie.genres.length > 0 && movie.genres.slice(0, 2).map((genre) => (
           <span
             key={genre}
