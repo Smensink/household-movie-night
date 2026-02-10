@@ -672,6 +672,8 @@ Core entities in `prisma/schema.prisma`:
 - 2026-02-10 (Auto-retrain early stopping):
   - `PATCH /api/mf/train` auto-retrain now enables early stopping (`patience=3`, `minDelta=0.001`) so unattended retrains save the best household-validation epoch instead of always running all epochs.
 - 2026-02-10 (Epoch Ranking Metrics During Training):
-  - MF training now logs sampled ranking metrics each epoch (household validation only): `valNDCG@K`, `valMAP@K`, `valHit@K`, `valAUC`.
+  - MF training now logs sampled ranking metrics each epoch on both deterministic holdouts:
+    - Household: `valNDCG@K`, `valMAP@K`, `valHit@K`, `valAUC`
+    - MovieLens drift monitor: `mlNDCG@K`, `mlMAP@K`, `mlHit@K`, `mlAUC`
   - Metrics are computed on a deterministic sample of validation users with sampled unrated negatives (small candidate sets), so logs are comparable between retrains.
   - Controlled via `epochEval` options passed to `trainMatrixFactorization()` / `POST /api/mf/train` (enabled by default).
