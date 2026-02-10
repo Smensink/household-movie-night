@@ -61,6 +61,8 @@ const VALIDATION_SPLIT = 0.1;
 const ML_SAMPLE_USERS = 500000; // Sample up to 500K ML users (effectively all ~200K+)
 const ML_RATING_WEIGHT = 0.1; // Relative weight vs household ratings (1.0)
 const ML_SAMPLE_PER_EPOCH = Infinity; // Use ALL mapped ML ratings every epoch
+const ML_VALIDATION_SPLIT = 0.01; // Small deterministic holdout for ML-domain drift monitoring
+const ML_VALIDATION_MAX = 50000; // Cap ML validation evaluation set for performance
 
 function fnv1a32(input: string): number {
   // Deterministic non-crypto hash for stable splits.
@@ -1035,7 +1037,15 @@ export async function trainMatrixFactorization(
       console.log(`[MF Train] Built ${mlRatings.length} ML training examples (weight: ${ML_RATING_WEIGHT})`);
     }
 
-    // Combine household + ML ratings
+    // Deterministic ML split: train vs validation (for drift monitoring)
+    const mlTrainingRatings: Rating[] = [];
+    const mlValidationRatings: Rating[] = [];
+    for (const r of mlRatings) {
+      if (isInValidationSplit(r.userId, r.movieId, ML_VALIDATION_SPLIT)) mlValidationRatings.push(r);
+      else mlTrainingRatings.push(r);
+    }
+
+    // Combine household + ML ratings (for feature universe construction etc.)
     const allRatings = [...ratings, ...mlRatings];
 
     // Calculate global mean (of household normalized ratings only — ML has different scale)
@@ -1050,7 +1060,7 @@ export async function trainMatrixFactorization(
     );
 
     // Combine household training + ML ratings for the full training set
-    const trainingSet = [...householdTrainingSet, ...mlRatings];
+    const trainingSet = [...householdTrainingSet, ...mlTrainingRatings];
 
     // Collect all unique features (from ALL ratings: household + ML)
     const allFeatures = new Set<string>();
@@ -1125,6 +1135,15 @@ export async function trainMatrixFactorization(
     const tfResult = await getTF();
     let rmse = 0;
     let validationRmse = 0;
+    let mlValidationRmse = 0;
+
+    // Stable ML validation sample for logging (kept small for perf)
+    const mlValidationSample =
+      mlValidationRatings.length > ML_VALIDATION_MAX
+        ? [...mlValidationRatings]
+            .sort((a, b) => fnv1a32(`${a.userId}:${a.movieId}`) - fnv1a32(`${b.userId}:${b.movieId}`))
+            .slice(0, ML_VALIDATION_MAX)
+        : mlValidationRatings;
 
     if (tfResult) {
       // ── GPU/BLAS-accelerated batch training ──
@@ -1198,8 +1217,8 @@ export async function trainMatrixFactorization(
 
       for (let epoch = 0; epoch < epochs; epoch++) {
         let epochTraining: Rating[];
-        if (mlRatings.length > ML_SAMPLE_PER_EPOCH) {
-          const sampledML = [...mlRatings].sort(() => Math.random() - 0.5).slice(0, ML_SAMPLE_PER_EPOCH);
+        if (mlTrainingRatings.length > ML_SAMPLE_PER_EPOCH) {
+          const sampledML = [...mlTrainingRatings].sort(() => Math.random() - 0.5).slice(0, ML_SAMPLE_PER_EPOCH);
           epochTraining = [...householdTrainingSet, ...sampledML];
         } else {
           epochTraining = trainingSet;
@@ -1380,8 +1399,37 @@ export async function trainMatrixFactorization(
             validationSquaredError += Math.pow(rating.rating - predicted, 2);
           }
           validationRmse = Math.sqrt(validationSquaredError / validationSet.length);
+
+          // ML validation RMSE (drift monitoring; sampled for perf)
+          if (mlValidationSample.length > 0) {
+            let mlValSquared = 0;
+            let mlValCount = 0;
+            for (const rating of mlValidationSample) {
+              const uIdx = userIdxMap.get(rating.userId);
+              const mIdx = movieIdxMap.get(rating.movieId);
+              if (uIdx === undefined || mIdx === undefined) continue;
+
+              const uVec = Array.from(curUVecs.subarray(uIdx * latentDimensions, (uIdx + 1) * latentDimensions));
+              const mVec = Array.from(curMVecs.subarray(mIdx * latentDimensions, (mIdx + 1) * latentDimensions));
+              const predicted = predictRating(
+                uVec, mVec, curUBias[uIdx], curMBias[mIdx], globalMean,
+                rating.movieFeatures, rating.userFeatures, rating.householdFeatures,
+                featureEmbeddings, featureDimensions
+              );
+              mlValSquared += Math.pow(rating.rating - predicted, 2);
+              mlValCount++;
+            }
+            mlValidationRmse = mlValCount > 0 ? Math.sqrt(mlValSquared / mlValCount) : 0;
+          } else {
+            mlValidationRmse = 0;
+          }
+
           const effectiveLR = adamLR * Math.sqrt(1 - Math.pow(ADAM_BETA2, adamStep)) / (1 - Math.pow(ADAM_BETA1, adamStep));
-          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} adamLR=${effectiveLR.toFixed(6)} wd=${weightDecayLocal.toFixed(4)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`);
+          console.log(
+            `[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)}` +
+              (mlValidationSample.length > 0 ? ` mlValRMSE=${mlValidationRmse.toFixed(4)}` : ``) +
+              ` adamLR=${effectiveLR.toFixed(6)} wd=${weightDecayLocal.toFixed(4)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`
+          );
 
           // Early stopping uses household validation only.
           if (earlyStoppingEnabled) {

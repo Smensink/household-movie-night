@@ -660,3 +660,6 @@ Core entities in `prisma/schema.prisma`:
     - `featureRegularization`: L2 penalty used for feature-embedding SGD updates (and JS fallback training).
     - `regularization` remains supported as a backwards-compatible default for both when the explicit knobs aren’t provided.
   - `/api/mf/train` POST now accepts `weightDecay` and `featureRegularization`.
+- 2026-02-10 (ML drift-monitor validation RMSE):
+  - Added a deterministic ML-only holdout split (1%) and epoch log metric `mlValRMSE` (capped to 50k examples) for domain-drift monitoring.
+  - ML holdout is never used for training (training uses the remaining 99% ML examples), preventing leakage while keeping ML-vs-household domain shifts visible during training.
