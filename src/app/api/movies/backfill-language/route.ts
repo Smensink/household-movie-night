@@ -17,6 +17,7 @@ export async function POST(req: NextRequest) {
 
   const movies = await prisma.movie.findMany({
     where: {
+      isMlOnly: false,
       tmdbId: { not: null },
       originalLanguage: null,
     },
@@ -62,7 +63,7 @@ export async function POST(req: NextRequest) {
   }
 
   const remaining = await prisma.movie.count({
-    where: { tmdbId: { not: null }, originalLanguage: null },
+    where: { isMlOnly: false, tmdbId: { not: null }, originalLanguage: null },
   });
 
   console.log(`[Language Backfill] Updated ${updated}, failed ${failed}, remaining ${remaining}`);

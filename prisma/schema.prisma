@@ -62,6 +62,10 @@ model Movie {
   tmdbId        String?   @unique
   imdbId        String?   @unique
   traktSlug     String?   @unique
+  // Movies imported from MovieLens to support collaborative filtering.
+  // These are allowed to surface in discovery only when ranked highly, and are hydrated lazily (poster + metadata)
+  // at the moment they would be shown to a user.
+  isMlOnly      Boolean   @default(false)
   title         String
   year          Int?
   posterUrl     String?
@@ -77,6 +81,7 @@ model Movie {
   imdbVotes     Int?      // Number of votes on IMDB
   rottenTomatoesAudience Int?
   letterboxdRating Float?
+  mlRatingCount Int?      @default(0)  // Approx "vote count" from MovieLens (number of ML ratings for this imdbId)
   originalLanguage String?
   originCountry    String?
   surpriseFactor   Float?

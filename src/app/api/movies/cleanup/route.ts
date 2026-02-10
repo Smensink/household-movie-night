@@ -27,6 +27,7 @@ export async function POST(req: NextRequest) {
   // Find movies that need vote count data OR have low vote counts
   const movies = await prisma.movie.findMany({
     where: {
+      isMlOnly: false,
       OR: [
         { tmdbId: { not: null } },
         { imdbId: { not: null } },
@@ -136,6 +137,7 @@ export async function POST(req: NextRequest) {
   // Count remaining movies that might need cleanup
   const remaining = await prisma.movie.count({
     where: {
+      isMlOnly: false,
       voteCount: { gt: 0, lt: MIN_VOTE_COUNT },
       ratings: { none: {} }, // No user ratings
     },
@@ -165,15 +167,17 @@ export async function GET(req: NextRequest) {
   sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - RECENT_MOVIE_MONTHS);
 
   const [total, belowThreshold, noVoteData, withUserRatings] = await Promise.all([
-    prisma.movie.count(),
+    prisma.movie.count({ where: { isMlOnly: false } }),
     prisma.movie.count({
       where: {
+        isMlOnly: false,
         voteCount: { gt: 0, lt: MIN_VOTE_COUNT },
         ratings: { none: {} },
       },
     }),
     prisma.movie.count({
       where: {
+        isMlOnly: false,
         OR: [
           { voteCount: null },
           { voteCount: 0 },
@@ -182,6 +186,7 @@ export async function GET(req: NextRequest) {
     }),
     prisma.movie.count({
       where: {
+        isMlOnly: false,
         ratings: { some: {} },
       },
     }),

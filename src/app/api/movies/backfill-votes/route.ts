@@ -21,6 +21,7 @@ export async function POST(req: NextRequest) {
   // Find movies with TMDB ID but no vote count data
   const movies = await prisma.movie.findMany({
     where: {
+      isMlOnly: false,
       OR: [
         { tmdbId: { not: null } },
         { imdbId: { not: null } },
@@ -104,6 +105,7 @@ export async function POST(req: NextRequest) {
   // Count remaining movies that still need backfill
   const remaining = await prisma.movie.count({
     where: {
+      isMlOnly: false,
       OR: [
         { tmdbId: { not: null } },
         { imdbId: { not: null } },
@@ -139,14 +141,16 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const [total, withVoteCount, withoutVoteCount] = await Promise.all([
-    prisma.movie.count(),
+    prisma.movie.count({ where: { isMlOnly: false } }),
     prisma.movie.count({
       where: {
+        isMlOnly: false,
         voteCount: { gt: 0 },
       },
     }),
     prisma.movie.count({
       where: {
+        isMlOnly: false,
         tmdbId: { not: null },
         OR: [
           { voteCount: null },

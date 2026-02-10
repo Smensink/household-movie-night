@@ -33,6 +33,9 @@ type ZipDirectory = { files: ZipEntry[] };
  * Query params:
  * - force=true: reimport tags (clears MLTagData + MovieTag)
  * - forceRatings=true: reimport ratings (clears MLRating)
+ * - createMlMovies=true: create ML-only Movie rows from MovieLens catalog (lazy-hydrated if shown)
+ * - minMlVotes=750: minimum MovieLens rating count to include in ML-only catalog
+ * - maxMlMovies=20000: cap ML-only movie creation per import run (safety)
  */
 export async function POST(req: NextRequest) {
   if (!(await isInternalOrAdmin(req))) {
@@ -41,6 +44,17 @@ export async function POST(req: NextRequest) {
 
   const force = req.nextUrl.searchParams.get("force") === "true";
   const forceRatings = req.nextUrl.searchParams.get("forceRatings") === "true";
+  const createMlMovies = req.nextUrl.searchParams.get("createMlMovies") === "true";
+  const minMlVotesRaw = req.nextUrl.searchParams.get("minMlVotes");
+  const maxMlMoviesRaw = req.nextUrl.searchParams.get("maxMlMovies");
+  const minMlVotes =
+    minMlVotesRaw && Number.isFinite(Number(minMlVotesRaw))
+      ? Math.max(0, Math.floor(Number(minMlVotesRaw)))
+      : 750;
+  const maxMlMovies =
+    maxMlMoviesRaw && Number.isFinite(Number(maxMlMoviesRaw))
+      ? Math.max(0, Math.floor(Number(maxMlMoviesRaw)))
+      : 20_000;
 
   const [existingMLTagDataCount, existingMLRatingCount] = await Promise.all([
     prisma.mLTagData.count(),
@@ -110,6 +124,34 @@ export async function POST(req: NextRequest) {
         }
       );
       console.log(`[MovieLens Import] ${mlToImdb.size} ML movies with imdbId mapping`);
+    }
+
+    // Step 2b: Parse movies.csv so we can create ML-only Movie rows (title + year) without hitting external APIs.
+    const imdbToCatalogMeta = new Map<string, { title: string; year: number | null }>();
+    if (d32m && createMlMovies) {
+      console.log("[MovieLens Import] Parsing movies.csv (catalog metadata)...");
+      const mlMovieMeta = new Map<string, { title: string; year: number | null }>();
+
+      await parseCsvString(
+        await getFileString(d32m, "movies.csv"),
+        (row: { movieId: string; title: string }) => {
+          const rawTitle = (row.title || "").trim();
+          if (!row.movieId || !rawTitle) return;
+          const match = rawTitle.match(/^(.*)\\s*\\((\\d{4})\\)\\s*$/);
+          const title = match ? match[1].trim() : rawTitle;
+          const year = match ? Number.parseInt(match[2], 10) : null;
+          mlMovieMeta.set(row.movieId, { title, year: Number.isFinite(year as number) ? year : null });
+        }
+      );
+
+      for (const [mlMovieId, imdbId] of mlToImdb.entries()) {
+        const meta = mlMovieMeta.get(mlMovieId);
+        if (!meta) continue;
+        if (!imdbToCatalogMeta.has(imdbId)) {
+          imdbToCatalogMeta.set(imdbId, meta);
+        }
+      }
+      console.log(`[MovieLens Import] Catalog meta mapped for ${imdbToCatalogMeta.size} imdbIds`);
     }
 
     // ── Phase A: Tags → MLTagData (cached by imdbId) + MovieTag (for local movies) ──
@@ -263,6 +305,7 @@ export async function POST(req: NextRequest) {
     // ── Phase B: ALL individual ML ratings by imdbId + per-movie averages ──
     let mlRatingsStored = 0;
     let ratingsUpdated = 0;
+    let mlOnlyMoviesCreated = 0;
 
     if (!skipRatings) {
       if (existingMLRatingCount > 0) {
@@ -274,6 +317,7 @@ export async function POST(req: NextRequest) {
       console.log("[MovieLens Import] Phase B: Streaming ratings.csv (storing ALL ratings by imdbId)...");
 
       let mlBatch: { mlUserId: string; imdbId: string; rating: number }[] = [];
+      const ratingStats = new Map<string, { sum: number; count: number }>();
       let totalProcessed = 0;
       let totalInserted = 0;
       const insertStart = Date.now();
@@ -288,6 +332,15 @@ export async function POST(req: NextRequest) {
 
         mlBatch.push({ mlUserId: r.userId, imdbId, rating });
         totalProcessed++;
+
+        // Per-imdbId stats for creating ML-only movies and faster local avg updates.
+        const current = ratingStats.get(imdbId);
+        if (current) {
+          current.sum += rating;
+          current.count += 1;
+        } else {
+          ratingStats.set(imdbId, { sum: rating, count: 1 });
+        }
 
         if (mlBatch.length >= BATCH_SIZE) {
           await prisma.mLRating.createMany({ data: mlBatch, skipDuplicates: true });
@@ -311,34 +364,93 @@ export async function POST(req: NextRequest) {
         `[MovieLens Import] Stored ${mlRatingsStored} ML ratings in ${insertSecs}s (${totalProcessed} processed)`
       );
 
-      // Update per-movie average ratings for local movies
-      console.log("[MovieLens Import] Computing per-movie averages for local movies...");
+      // Update per-movie average ratings + ML rating counts for local movies (no per-movie SQL aggregates).
+      console.log("[MovieLens Import] Updating per-movie averages for local movies...");
       const localMovies = await prisma.movie.findMany({
         where: { imdbId: { not: null } },
         select: { id: true, imdbId: true },
       });
 
+      const UPDATE_CONCURRENCY = 25;
       for (let i = 0; i < localMovies.length; i += BATCH_SIZE) {
         const batch = localMovies.slice(i, i + BATCH_SIZE);
-        await Promise.all(
-          batch.map(async (m) => {
-            if (!m.imdbId) return;
-            const agg = await prisma.mLRating.aggregate({
-              where: { imdbId: m.imdbId },
-              _avg: { rating: true },
-              _count: { rating: true },
-            });
-            if (agg._count.rating >= 10 && agg._avg.rating != null) {
-              await prisma.movie.update({
-                where: { id: m.id },
-                data: { letterboxdRating: agg._avg.rating },
-              });
-              ratingsUpdated++;
-            }
-          })
-        );
+        for (let j = 0; j < batch.length; j += UPDATE_CONCURRENCY) {
+          const slice = batch.slice(j, j + UPDATE_CONCURRENCY);
+          await Promise.all(
+            slice.map(async (m) => {
+              if (!m.imdbId) return;
+              const stats = ratingStats.get(m.imdbId);
+              if (!stats) return;
+              const avg = stats.count > 0 ? stats.sum / stats.count : null;
+              if (stats.count >= 10 && avg != null) {
+                await prisma.movie.update({
+                  where: { id: m.id },
+                  data: { letterboxdRating: avg, mlRatingCount: stats.count },
+                });
+                ratingsUpdated++;
+              } else if (stats.count > 0) {
+                await prisma.movie.update({
+                  where: { id: m.id },
+                  data: { mlRatingCount: stats.count },
+                });
+              }
+            })
+          );
+        }
       }
       console.log(`[MovieLens Import] Updated ${ratingsUpdated} movies with ML average ratings`);
+
+      // Optionally create ML-only Movie rows (no poster/overview; hydrated only if shown to a user).
+      if (createMlMovies) {
+        console.log(
+          `[MovieLens Import] Creating ML-only Movie rows (minMlVotes=${minMlVotes}, maxMlMovies=${maxMlMovies})...`
+        );
+
+        const candidates: Array<{
+          imdbId: string;
+          title: string;
+          year: number | null;
+          letterboxdRating: number | null;
+          mlRatingCount: number;
+        }> = [];
+
+        for (const [imdbId, stats] of ratingStats.entries()) {
+          if (stats.count < minMlVotes) continue;
+          const meta = imdbToCatalogMeta.get(imdbId);
+          if (!meta?.title) continue;
+          const avg = stats.count > 0 ? stats.sum / stats.count : null;
+          candidates.push({
+            imdbId,
+            title: meta.title,
+            year: meta.year,
+            letterboxdRating: avg,
+            mlRatingCount: stats.count,
+          });
+        }
+
+        candidates.sort((a, b) => b.mlRatingCount - a.mlRatingCount);
+        const toCreate = candidates.slice(0, maxMlMovies);
+
+        for (let i = 0; i < toCreate.length; i += BATCH_SIZE) {
+          const chunk = toCreate.slice(i, i + BATCH_SIZE);
+          await prisma.movie.createMany({
+            data: chunk.map((m) => ({
+              imdbId: m.imdbId,
+              isMlOnly: true,
+              title: m.title,
+              year: m.year ?? undefined,
+              era: m.year ? (m.year >= new Date().getFullYear() - 1 ? "new_release" : m.year >= 2000 ? "modern_classic" : "classic") : undefined,
+              letterboxdRating: m.letterboxdRating ?? undefined,
+              mlRatingCount: m.mlRatingCount,
+            })),
+            skipDuplicates: true,
+          });
+        }
+
+        // Count how many ML-only rows exist now (rough progress metric).
+        mlOnlyMoviesCreated = await prisma.movie.count({ where: { isMlOnly: true } });
+        console.log(`[MovieLens Import] ML-only Movie rows present: ${mlOnlyMoviesCreated}`);
+      }
     } else {
       console.log(`[MovieLens Import] Phase B skipped: ${existingMLRatingCount} ML ratings already exist`);
       mlRatingsStored = existingMLRatingCount;
@@ -354,6 +466,7 @@ export async function POST(req: NextRequest) {
       movieTagsBackfilled,
       mlRatingsStored,
       ratingsUpdated,
+      mlOnlyMoviesCreated,
       totalMLMovies: mlToImdb.size,
     });
   } catch (error) {

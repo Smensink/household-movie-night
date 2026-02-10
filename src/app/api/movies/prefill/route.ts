@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
   console.log("[Movie Prefill] Starting movie prefill...");
 
   // Check how many movies we already have
-  const existingCount = await prisma.movie.count();
+  const existingCount = await prisma.movie.count({ where: { isMlOnly: false } });
 
   // If we already have enough movies, skip prefill
   if (existingCount >= PREFILL_LIMIT) {
@@ -164,7 +164,7 @@ export async function GET(req: NextRequest) {
   }
   const count = await prisma.movie.count();
   const moviesWithPosters = await prisma.movie.count({
-    where: { posterUrl: { not: null } },
+    where: { isMlOnly: false, posterUrl: { not: null } },
   });
 
   return NextResponse.json({
@@ -184,6 +184,7 @@ export async function PATCH(req: NextRequest) {
   // 1. Upgrade low-res poster URLs
   const moviesWithLowResPosters = await prisma.movie.findMany({
     where: {
+      isMlOnly: false,
       posterUrl: {
         contains: "SX300",
       },
@@ -207,6 +208,7 @@ export async function PATCH(req: NextRequest) {
   // 2. Backfill ratings for movies missing them
   const moviesWithoutRatings = await prisma.movie.findMany({
     where: {
+      isMlOnly: false,
       imdbId: { not: null },
       imdbRating: null,
     },

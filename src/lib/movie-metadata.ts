@@ -243,6 +243,37 @@ export async function syncMovieMetadataFromTMDB(
   const actors: string[] = [];
   const directors: string[] = [];
 
+  // Sync genres (TMDB provides a normalized genre list).
+  if (tmdbMovie.genres) {
+    for (const g of tmdbMovie.genres.slice(0, 6)) {
+      if (!g.name) continue;
+      const genreName = normalizeGenreName(g.name);
+      const slug = slugify(genreName);
+      if (!slug) continue;
+
+      const genre = await prisma.genre.upsert({
+        where: { slug },
+        create: { name: genreName, slug },
+        update: { name: genreName },
+        select: { id: true },
+      });
+
+      await prisma.movieGenre.upsert({
+        where: {
+          movieId_genreId: {
+            movieId,
+            genreId: genre.id,
+          },
+        },
+        create: {
+          movieId,
+          genreId: genre.id,
+        },
+        update: {},
+      });
+    }
+  }
+
   // Sync production companies as studios
   if (tmdbMovie.production_companies) {
     for (const company of tmdbMovie.production_companies.slice(0, 3)) {

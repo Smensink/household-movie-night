@@ -235,6 +235,7 @@ export async function GET(req: NextRequest) {
     const fetchCandidateMovies = () =>
       prisma.movie.findMany({
         where: {
+          isMlOnly: false,
           id: { notIn: Array.from(excludedMovieIds) },
           OR: [
             { releaseDate: { gt: now } },
@@ -582,7 +583,6 @@ export async function POST(req: NextRequest) {
     );
   }
 }
-
 
 
 

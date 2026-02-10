@@ -113,6 +113,7 @@ export async function GET(req: NextRequest) {
         imdbId: movie.imdbId,
         tmdbId: movie.tmdbId ?? null,
         traktSlug: movie.traktSlug ?? null,
+        isMlOnly: false,
         title: movie.title,
         year: movie.year,
         posterUrl: movie.posterUrl || null,
@@ -142,6 +143,7 @@ export async function GET(req: NextRequest) {
           };
         })(),
         title: movie.title,
+        isMlOnly: false,
         ...(movie.tmdbId !== undefined && { tmdbId: movie.tmdbId }),
         ...(movie.traktSlug !== undefined && { traktSlug: movie.traktSlug }),
         ...(movie.year !== null && { year: movie.year }),

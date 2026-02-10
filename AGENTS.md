@@ -677,3 +677,10 @@ Core entities in `prisma/schema.prisma`:
     - MovieLens drift monitor: `mlNDCG@K`, `mlMAP@K`, `mlHit@K`, `mlAUC`
   - Metrics are computed on a deterministic sample of validation users with sampled unrated negatives (small candidate sets), so logs are comparable between retrains.
   - Controlled via `epochEval` options passed to `trainMatrixFactorization()` / `POST /api/mf/train` (enabled by default).
+- 2026-02-10 (MovieLens Catalog Lazy Hydration):
+  - Added `Movie.mlRatingCount` (MovieLens rating count) and updated `src/lib/ml-backfill.ts` to persist it alongside MovieLens average rating.
+  - Added `src/lib/movie-hydration.ts` (`ensureMovieReadyForTinder`) to hydrate full `TinderMovieCard` metadata (poster, overview, cast/directors, studios, genres, ratings) from OMDB + TMDB only when a movie is about to be shown.
+  - Updated `GET /api/movies/discover` to:
+    - Consider `isMlOnly` movies as additional candidates (gated by MF confidence and `mlRatingCount` threshold).
+    - Hydrate ML-only (and missing-metadata) movies in the final result set before returning them to the client.
+  - Updated `POST /api/movielens/import` to optionally create ML-only `Movie` rows (no bulk poster/metadata) via `?createMlMovies=true&minMlVotes=...&maxMlMovies=...`.

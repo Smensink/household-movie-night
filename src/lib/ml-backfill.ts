@@ -41,7 +41,16 @@ export async function backfillMLDataForMovie(
     if (agg._count.rating >= MIN_RATINGS_FOR_AVG && agg._avg.rating != null) {
       await prisma.movie.update({
         where: { id: movieId },
-        data: { letterboxdRating: agg._avg.rating },
+        data: {
+          letterboxdRating: agg._avg.rating,
+          mlRatingCount: agg._count.rating,
+        },
+      });
+    } else if (agg._count.rating > 0) {
+      // Still persist the count even if the average is too low-confidence to use.
+      await prisma.movie.update({
+        where: { id: movieId },
+        data: { mlRatingCount: agg._count.rating },
       });
     }
   } catch (error) {

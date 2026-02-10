@@ -14,6 +14,7 @@ import {
   getModelMetadata,
 } from "@/lib/matrix-factorization";
 import { maybeExpandPoolForUser } from "@/lib/movie-pool-expansion";
+import { ensureMovieReadyForTinder } from "@/lib/movie-hydration";
 
 const DEFAULT_LIMIT = 15;
 const MAX_LIMIT = 30;
@@ -28,6 +29,8 @@ const MIN_CANDIDATE_POOL = 250;
 const CANDIDATE_POOL_MULTIPLIER = 10;
 const POSTER_PREFETCH_AHEAD = 50;
 const POSTER_PREFETCH_CONCURRENCY = 5;
+const DEFAULT_MIN_ML_RATING_COUNT = 750;
+const METADATA_HYDRATION_CONCURRENCY = 3;
 
 function parseLimit(value: string | null): number {
   if (!value) return DEFAULT_LIMIT;
@@ -113,10 +116,10 @@ function computeSourceSignal(
 }
 
 function prefetchPostersInBackground(
-  movies: Array<{ id: string; imdbId: string | null; title: string; year: number | null; posterUrl: string | null }>
+  movies: Array<{ id: string; imdbId: string | null; title: string; year: number | null; posterUrl: string | null; isMlOnly?: boolean }>
 ): void {
   const missingPosterMovies = movies
-    .filter((movie) => !movie.posterUrl)
+    .filter((movie) => !movie.posterUrl && !movie.isMlOnly)
     .slice(0, POSTER_PREFETCH_AHEAD);
 
   if (missingPosterMovies.length === 0) {
@@ -169,6 +172,11 @@ export async function GET(req: NextRequest) {
     MIN_VOTE_COUNT_RECENT_FLOOR,
     Math.floor(minVoteCount * 0.2)
   );
+  const minMlRatingCountParam = req.nextUrl.searchParams.get("minMlRatingCount");
+  const minMlRatingCount =
+    minMlRatingCountParam && Number.isFinite(Number(minMlRatingCountParam))
+      ? Math.max(0, Math.floor(Number(minMlRatingCountParam)))
+      : DEFAULT_MIN_ML_RATING_COUNT;
 
   // Detect cold start users for special handling
   const userRatingCount = profile.userRatedMovieIds.size;
@@ -196,6 +204,7 @@ export async function GET(req: NextRequest) {
 
   const candidateMovies = await prisma.movie.findMany({
     where: {
+      isMlOnly: false,
       id: { notIn: Array.from(excludedMovieIds) },
       // Only show released movies
       OR: [
@@ -296,8 +305,81 @@ export async function GET(req: NextRequest) {
     take: Math.max(limit * CANDIDATE_POOL_MULTIPLIER, MIN_CANDIDATE_POOL), // Larger local pool for better MF + heuristic ranking
   });
 
+  // OPTIONAL: Add MovieLens-only catalog rows as candidates for collaborative filtering.
+  // These typically start without posters/overview; we hydrate lazily only for the final, shown items.
+  const mlOnlyCandidates =
+    mfConfidence > 0
+      ? await prisma.movie.findMany({
+          where: {
+            isMlOnly: true,
+            imdbId: { not: null },
+            mlRatingCount: { gte: minMlRatingCount },
+            id: { notIn: Array.from(excludedMovieIds) },
+            OR: [
+              { releaseDate: { lte: currentDate } },
+              { releaseDate: null, year: { lte: currentYear } },
+            ],
+          },
+          include: {
+            genres: {
+              select: {
+                genreId: true,
+                genre: { select: { name: true } },
+              },
+            },
+            cast: {
+              select: {
+                personId: true,
+                castOrder: true,
+                person: { select: { name: true } },
+              },
+              orderBy: { castOrder: "asc" },
+              take: 5,
+            },
+            crew: {
+              where: { job: "Director" },
+              select: {
+                personId: true,
+                job: true,
+                person: { select: { name: true } },
+              },
+              take: 3,
+            },
+            studios: {
+              select: {
+                studioId: true,
+                studio: { select: { name: true } },
+              },
+              take: 3,
+            },
+            ratings: {
+              where: { userId: { in: profile.householdUserIds } },
+              select: {
+                userId: true,
+                rating: true,
+                notHeardOf: true,
+                hasSeen: true,
+              },
+            },
+            plexAvailability: true,
+            radarrSync: true,
+          },
+          orderBy: [{ mlRatingCount: "desc" }, { letterboxdRating: "desc" }, { updatedAt: "desc" }],
+          take: 500,
+        })
+      : [];
+
+  // Merge candidates; keep order stable (non-ML first).
+  const seenCandidateIds = new Set<string>();
+  const allCandidateMovies = [];
+  for (const movie of [...candidateMovies, ...mlOnlyCandidates]) {
+    if (seenCandidateIds.has(movie.id)) continue;
+    seenCandidateIds.add(movie.id);
+    allCandidateMovies.push(movie);
+  }
+
   // Get MF predicted ratings for candidate movies (batch)
-  const candidateMovieIds = candidateMovies.map((m) => m.id);
+  const candidateMovieIds = allCandidateMovies.map((m) => m.id);
   const mfPredictions =
     mfConfidence > 0
       ? await getPredictedRatingsForUser(userId, candidateMovieIds)
@@ -307,7 +389,7 @@ export async function GET(req: NextRequest) {
   // Track genre distribution for diversity injection
   const genreDistribution = new Map<string, number>();
 
-  const scored = candidateMovies
+  const scored = allCandidateMovies
     .map((movie) => {
       const genreSignal = averageAffinityForIds(
         movie.genres.map((genre) => genre.genreId),
@@ -379,8 +461,10 @@ export async function GET(req: NextRequest) {
       // This ensures balanced profiles show mostly familiar movies
       const imdbRating = movie.imdbRating ?? 0;
       const tmdbRating = movie.voteAverage ?? 0;
-      const bestRating = Math.max(imdbRating, tmdbRating);
-      const voteCount = movie.voteCount ?? 0;
+      // MovieLens averages are on a 0-5 scale; convert to ~0-10 when used as a quality fallback.
+      const mlRating = movie.letterboxdRating != null ? movie.letterboxdRating * 2 : 0;
+      const bestRating = Math.max(imdbRating, tmdbRating, mlRating);
+      const voteCount = movie.isMlOnly ? movie.mlRatingCount ?? 0 : movie.voteCount ?? 0;
       const releaseYear = getReleaseYear(movie, currentYear - 10);
       const recentness = clamp((releaseYear - (currentYear - 20)) / 20, 0, 1);
       const mainstream = clamp((movie.popularity ?? 0) / 120, 0, 1);
@@ -521,6 +605,7 @@ export async function GET(req: NextRequest) {
       return {
         id: movie.id,
         imdbId: movie.imdbId,
+        isMlOnly: movie.isMlOnly,
         title: movie.title,
         year: movie.year,
         posterUrl: movie.posterUrl,
@@ -586,24 +671,82 @@ export async function GET(req: NextRequest) {
   // Pre-fetch posters for top-ranked missing-poster candidates so future queue items are ready.
   prefetchPostersInBackground(prioritizedResults);
 
-  const finalResults = prioritizedResults
-    .slice(0, limit)
-    .map((movie) => ({
-      id: movie.id,
-      imdbId: movie.imdbId,
-      title: movie.title,
-      year: movie.year,
-      posterUrl: getHighResPosterUrl(movie.posterUrl) || movie.posterUrl,
-      overview: movie.overview,
-      era: movie.era,
-      tmdbRating: movie.tmdbRating,
-      imdbRating: movie.imdbRating,
-      rottenTomatoesAudience: movie.rottenTomatoesAudience,
-      genres: movie.genres,
-      actors: movie.actors,
-      directors: movie.directors,
-      studios: movie.studios,
-    }));
+  const selected = prioritizedResults.slice(0, limit);
+
+  // Lazy hydration: if we're about to show ML-only movies (or missing-metadata movies),
+  // fetch and persist the full "TinderMovieCard" metadata (not just poster).
+  const toHydrate = selected
+    .filter((m) => Boolean(m.imdbId) && (m.isMlOnly || !m.posterUrl || !m.overview || m.actors.length === 0))
+    .map((m) => m.id);
+
+  for (let i = 0; i < toHydrate.length; i += METADATA_HYDRATION_CONCURRENCY) {
+    const batch = toHydrate.slice(i, i + METADATA_HYDRATION_CONCURRENCY);
+    await Promise.all(batch.map((movieId) => ensureMovieReadyForTinder(movieId).catch(() => undefined)));
+  }
+
+  // Re-query selected movies so the response contains newly hydrated metadata/relations.
+  const selectedIds = selected.map((m) => m.id);
+  const refreshed = await prisma.movie.findMany({
+    where: { id: { in: selectedIds } },
+    include: {
+      genres: { select: { genre: { select: { name: true } } } },
+      cast: {
+        select: { castOrder: true, person: { select: { name: true } } },
+        orderBy: { castOrder: "asc" },
+        take: 5,
+      },
+      crew: {
+        where: { job: "Director" },
+        select: { person: { select: { name: true } } },
+        take: 3,
+      },
+      studios: {
+        select: { studio: { select: { name: true } } },
+        take: 3,
+      },
+    },
+  });
+  const refreshedById = new Map(refreshed.map((m) => [m.id, m]));
+
+  const finalResults = selected.map((movie) => {
+    const m = refreshedById.get(movie.id);
+    if (!m) {
+      return {
+        id: movie.id,
+        imdbId: movie.imdbId,
+        title: movie.title,
+        year: movie.year,
+        posterUrl: getHighResPosterUrl(movie.posterUrl) || movie.posterUrl,
+        overview: movie.overview,
+        era: movie.era,
+        tmdbRating: movie.tmdbRating,
+        imdbRating: movie.imdbRating,
+        rottenTomatoesAudience: movie.rottenTomatoesAudience,
+        genres: movie.genres,
+        actors: movie.actors,
+        directors: movie.directors,
+        studios: movie.studios,
+        originalLanguage: movie.originalLanguage,
+      };
+    }
+    return {
+      id: m.id,
+      imdbId: m.imdbId,
+      title: m.title,
+      year: m.year,
+      posterUrl: getHighResPosterUrl(m.posterUrl) || m.posterUrl,
+      overview: m.overview,
+      era: m.era,
+      tmdbRating: m.voteAverage,
+      imdbRating: m.imdbRating,
+      rottenTomatoesAudience: m.rottenTomatoesAudience,
+      genres: (m.genres || []).map((g) => g.genre.name).filter(Boolean).slice(0, 3),
+      actors: (m.cast || []).map((c) => c.person.name).filter(Boolean).slice(0, 3),
+      directors: (m.crew || []).map((c) => c.person.name).filter(Boolean).slice(0, 2),
+      studios: (m.studios || []).map((s) => s.studio.name).filter(Boolean).slice(0, 2),
+      originalLanguage: m.originalLanguage,
+    };
+  });
 
   // Auto-expand movie pool if user is running low on unrated movies
   // This runs in the background and doesn't block the response
@@ -611,9 +754,6 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(finalResults);
 }
-
-
-
 
 
 
