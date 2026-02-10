@@ -19,9 +19,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // Check if we already have tags — skip if so (idempotent)
+  // Check if we already have a substantial number of tags — skip if so (idempotent)
   const existingTagCount = await prisma.movieTag.count();
-  if (existingTagCount > 0) {
+  if (existingTagCount > 100) {
     return NextResponse.json({
       message: "Tags already imported",
       existingTags: existingTagCount,
@@ -47,8 +47,12 @@ export async function POST(req: NextRequest) {
     const directory = await unzipper.Open.buffer(zipBuffer);
 
     const getFileContent = async (filename: string): Promise<string> => {
-      const entry = directory.files.find((f) => f.path.endsWith(filename));
-      if (!entry) throw new Error(`${filename} not found in ZIP`);
+      const entry = directory.files.find((f) => f.path.endsWith(`/${filename}`) || f.path === filename);
+      if (!entry) {
+        // Log available files for debugging
+        const available = directory.files.map((f) => f.path).slice(0, 20).join(", ");
+        throw new Error(`${filename} not found in ZIP. Available: ${available}`);
+      }
       const buf = await entry.buffer();
       return buf.toString("utf-8");
     };
