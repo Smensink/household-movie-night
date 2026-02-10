@@ -54,7 +54,7 @@ const DEFAULT_LATENT_DIMENSIONS = 50;
 const DEFAULT_FEATURE_DIMENSIONS = 16;
 const DEFAULT_LEARNING_RATE = 0.005;
 const DEFAULT_REGULARIZATION = 0.02;
-const DEFAULT_EPOCHS = 20;
+const DEFAULT_EPOCHS = 40;
 const MIN_RATINGS_TO_TRAIN = 20;
 const VALIDATION_SPLIT = 0.1;
 const ML_SAMPLE_USERS = 500000; // Sample up to 500K ML users (effectively all ~200K+)
@@ -1131,7 +1131,7 @@ export async function trainMatrixFactorization(
       const ADAM_BETA2 = 0.999;
       const ADAM_EPSILON = 1e-8;
       const adamLR = learningRate * 0.2; // Adam needs lower LR than SGD (0.005 * 0.2 = 0.001)
-      const weightDecay = regularization; // Decoupled weight decay for AdamW
+      const regLambda = regularization; // L2 reg applied per-entity in gradient (not as global weight decay)
       let adamStep = 0;
 
       // First moment (mean) and second moment (variance) estimates
@@ -1241,7 +1241,7 @@ export async function trainMatrixFactorization(
             const uBGrad = tf.div(tf.unsortedSegmentSum(userBiasGrads, userIdx, numUsers), tf.maximum(userCounts, 1));
             const mBGrad = tf.div(tf.unsortedSegmentSum(movieBiasGrads, movieIdx, numMovies), tf.maximum(movieCounts, 1));
 
-            // Keep these alive (not disposed by tidy) for AdamW update
+            // Keep these alive (not disposed by tidy) for Adam update
             return { errors: tf.keep(errors), uGrad: tf.keep(uGrad), mGrad: tf.keep(mGrad), uBGrad: tf.keep(uBGrad), mBGrad: tf.keep(mBGrad) };
           });
 
@@ -1356,7 +1356,7 @@ export async function trainMatrixFactorization(
       mTensor.dispose();
       uBiasTensor.dispose();
       mBiasTensor.dispose();
-      // Cleanup AdamW moment tensors
+      // Cleanup Adam moment tensors
       uVecM.dispose();
       uVecV.dispose();
       mVecM.dispose();
