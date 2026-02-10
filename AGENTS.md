@@ -688,3 +688,9 @@ Core entities in `prisma/schema.prisma`:
     - Consider `isMlOnly` movies as additional candidates (gated by MF confidence and `mlRatingCount` threshold).
     - Hydrate ML-only (and missing-metadata) movies in the final result set before returning them to the client.
   - Updated `POST /api/movielens/import` to optionally create ML-only `Movie` rows (no bulk poster/metadata) via `?createMlMovies=true&minMlVotes=...&maxMlMovies=...`.
+- 2026-02-10 (Viewer archetypes improvements):
+  - Archetype clustering now stores a soft similarity distribution per user as `UserFeatureCache.archetypeScores` (JSON `{ archetypeId: score }`).
+  - Profile API now returns (optional) `archetypeSimilarities` and Profile UI renders a "Similar To" section (top 3).
+  - Archetype naming now uses **genre lift** (cluster share minus global share) to avoid all archetypes being "Drama ...".
+  - MovieLens import now parses `movies.csv` genres and attaches them to ML-only movies so clustering has meaningful genre signal.
+  - Added `scripts/explore-archetypes.ts` to dump archetype descriptions and sample top/bottom movies for each centroid; intended for repeatable post-train cluster inspection.

@@ -812,6 +812,8 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
 	    };
 	    latentDimensions?: number;
 	    featureDimensions?: number;
+      // Viewer archetype clustering (ML user vectors) configuration
+      archetypeClusters?: number; // default 8
 	    earlyStopping?: {
 	      enabled?: boolean;
 	      patience?: number;
@@ -843,10 +845,11 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
 	  const legacyRegularization = options.regularization ?? DEFAULT_REGULARIZATION;
 	  const weightDecay = options.weightDecay ?? legacyRegularization;
 	  const featureRegularization = options.featureRegularization ?? legacyRegularization;
-	  const mlRatingWeight = options.mlRatingWeight ?? ML_RATING_WEIGHT;
-	  const mlSamplePerEpoch = options.mlSamplePerEpoch ?? ML_SAMPLE_PER_EPOCH;
-	  const latentDimensions = options.latentDimensions ?? DEFAULT_LATENT_DIMENSIONS;
-	  const featureDimensions = options.featureDimensions ?? DEFAULT_FEATURE_DIMENSIONS;
+  const mlRatingWeight = options.mlRatingWeight ?? ML_RATING_WEIGHT;
+  const mlSamplePerEpoch = options.mlSamplePerEpoch ?? ML_SAMPLE_PER_EPOCH;
+  const latentDimensions = options.latentDimensions ?? DEFAULT_LATENT_DIMENSIONS;
+  const featureDimensions = options.featureDimensions ?? DEFAULT_FEATURE_DIMENSIONS;
+  const archetypeClusters = Math.max(2, Math.floor(options.archetypeClusters ?? 8));
 
   const earlyStoppingEnabled = options.earlyStopping?.enabled === true;
   const earlyStoppingPatience = Math.max(1, Math.floor(options.earlyStopping?.patience ?? 3));
@@ -2475,7 +2478,13 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
 
     // Cluster ML users into viewer archetypes (before discarding ML vectors)
     if (mlRatings.length > 0) {
-      await clusterAndSaveArchetypes(userVectors, householdUserVectors, mlRatings, userFeatureCache);
+      await clusterAndSaveArchetypes(
+        userVectors,
+        householdUserVectors,
+        mlRatings,
+        userFeatureCache,
+        archetypeClusters
+      );
     }
 
     await saveLatentVectors({
@@ -3100,6 +3109,18 @@ function euclideanDistance(a: number[], b: number[]): number {
   return Math.sqrt(sum);
 }
 
+function softmaxNegDistances(distances: { id: string; dist: number }[]): Record<string, number> {
+  if (distances.length === 0) return {};
+  const avg = distances.reduce((s, d) => s + d.dist, 0) / distances.length;
+  const temp = Math.max(1e-6, avg); // scale to typical distance magnitude
+  const exps = distances.map((d) => ({ id: d.id, v: Math.exp(-d.dist / temp) }));
+  const sum = exps.reduce((s, e) => s + e.v, 0);
+  if (sum <= 0) return {};
+  const res: Record<string, number> = {};
+  for (const e of exps) res[e.id] = e.v / sum;
+  return res;
+}
+
 /**
  * K-means clustering on user latent vectors.
  * Returns cluster centroids and member assignments.
@@ -3114,8 +3135,8 @@ function kMeansClustering(
 
   const dims = vectors.get(ids[0])!.length;
 
-  // Initialize centroids by random selection (k-means++)
-  const shuffled = [...ids].sort(() => Math.random() - 0.5);
+  // Initialize centroids deterministically (stable between retrains).
+  const shuffled = [...ids].sort((a, b) => fnv1a32(`kmeans-init:${a}`) - fnv1a32(`kmeans-init:${b}`));
   const centroids: number[][] = shuffled.slice(0, k).map((id) => [...vectors.get(id)!]);
 
   const assignments = new Map<string, number>();
@@ -3177,7 +3198,8 @@ function analyzeCluster(
   cluster: ClusterResult,
   mlRatings: Rating[],
   userFeatureCache: Map<string, UserFeatures>,
-  genreIdToName: Map<string, string>
+  genreIdToName: Map<string, string>,
+  globalGenreShare: Map<string, number>
 ): ArchetypeAnalysis {
   const memberSet = new Set(cluster.memberIds);
 
@@ -3211,12 +3233,21 @@ function analyzeCluster(
     }
   }
 
+  // "Distinctive" genres: lift over global share rather than raw frequency.
+  // This avoids every archetype being "Drama ..." just because Drama is common globally.
   const topGenres = Array.from(genreCounts.entries())
-    .sort((a, b) => b[1] - a[1])
+    .map(([gid, count]) => {
+      const clusterShare = totalGenreHits > 0 ? count / totalGenreHits : 0;
+      const globalShare = globalGenreShare.get(gid) ?? 0;
+      const lift = clusterShare - globalShare;
+      return { gid, name: genreIdToName.get(gid) || "Unknown", lift, clusterShare };
+    })
+    .sort((a, b) => b.lift - a.lift)
     .slice(0, 5)
-    .map(([gid, count]) => ({
-      name: genreIdToName.get(gid) || "Unknown",
-      score: totalGenreHits > 0 ? count / totalGenreHits : 0,
+    .map((g) => ({
+      name: g.name,
+      // Keep a 0..1-ish number for UI. Lift can be negative; clamp at 0.
+      score: Math.max(0, g.lift),
     }));
 
   // Generate name and traits
@@ -3369,12 +3400,27 @@ async function clusterAndSaveArchetypes(
   const genres = await prisma.genre.findMany({ select: { id: true, name: true } });
   const genreIdToName = new Map(genres.map((g) => [g.id, g.name]));
 
+  // Global genre share across all above-mean ML ratings (for lift-based naming).
+  const globalGenreCounts = new Map<string, number>();
+  let globalHits = 0;
+  for (const r of mlRatings) {
+    if (r.rating < 0) continue;
+    for (const gid of r.movieFeatures.genreIds) {
+      globalGenreCounts.set(gid, (globalGenreCounts.get(gid) || 0) + 1);
+      globalHits++;
+    }
+  }
+  const globalGenreShare = new Map<string, number>();
+  for (const [gid, count] of globalGenreCounts.entries()) {
+    globalGenreShare.set(gid, globalHits > 0 ? count / globalHits : 0);
+  }
+
   // Analyze and save each cluster
   const savedNames = new Set<string>();
   const archetypeIds: { id: string; centroid: number[] }[] = [];
 
   for (const cluster of clusters) {
-    const analysis = analyzeCluster(cluster, mlRatings, userFeatureCache, genreIdToName);
+    const analysis = analyzeCluster(cluster, mlRatings, userFeatureCache, genreIdToName, globalGenreShare);
 
     // Deduplicate names
     let finalName = analysis.name;
@@ -3420,17 +3466,20 @@ async function clusterAndSaveArchetypes(
   for (const [userId, userVec] of householdUserVectors) {
     let minDist = Infinity;
     let bestId: string | null = null;
+    const dists: { id: string; dist: number }[] = [];
     for (const arch of archetypeIds) {
       const dist = euclideanDistance(userVec, arch.centroid);
+      dists.push({ id: arch.id, dist });
       if (dist < minDist) {
         minDist = dist;
         bestId = arch.id;
       }
     }
     if (bestId) {
+      const scores = softmaxNegDistances(dists);
       await prisma.userFeatureCache.updateMany({
         where: { userId },
-        data: { archetypeId: bestId },
+        data: { archetypeId: bestId, archetypeScores: JSON.stringify(scores) },
       });
       matched++;
     }

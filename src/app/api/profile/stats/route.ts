@@ -62,6 +62,7 @@ interface ProfileStats {
     dispositionLabel: string;
     dispositionExplanation: string;
     topGenres: { name: string; score: number }[];
+    archetypeSimilarities?: { name: string; score: number }[];
     ratingMean: number | null;
     ratingStdDev: number | null;
   } | null;
@@ -377,6 +378,28 @@ export async function GET(req: NextRequest) {
     const disp = userFeatureCache.ratingDisposition || "insufficient";
     const dispInfo = dispositionMap[disp] || dispositionMap.insufficient;
 
+    // Optional soft distribution over archetypes (top 3) for more differentiation.
+    let archetypeSimilarities: { name: string; score: number }[] | undefined = undefined;
+    if (userFeatureCache.archetypeScores) {
+      try {
+        const parsed = JSON.parse(userFeatureCache.archetypeScores) as Record<string, number>;
+        const ids = Object.keys(parsed || {});
+        if (ids.length > 0) {
+          const archetypes = await prisma.viewerArchetype.findMany({
+            where: { id: { in: ids } },
+            select: { id: true, name: true },
+          });
+          const nameById = new Map(archetypes.map((a) => [a.id, a.name]));
+          archetypeSimilarities = ids
+            .map((id) => ({ name: nameById.get(id) || "Unknown", score: Number(parsed[id]) || 0 }))
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 3);
+        }
+      } catch {
+        // ignore parse errors
+      }
+    }
+
     moviePersonality = {
       archetypeName: arch.name,
       description: arch.description,
@@ -385,6 +408,7 @@ export async function GET(req: NextRequest) {
       dispositionLabel: dispInfo.label,
       dispositionExplanation: dispInfo.explanation,
       topGenres: JSON.parse(arch.topGenres),
+      archetypeSimilarities,
       ratingMean: userFeatureCache.ratingMean,
       ratingStdDev: userFeatureCache.ratingStdDev,
     };
@@ -432,7 +456,6 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(stats);
 }
-
 
 
 

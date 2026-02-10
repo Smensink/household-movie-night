@@ -20,6 +20,30 @@ type ZipEntry = {
 };
 type ZipDirectory = { files: ZipEntry[] };
 
+function normalizeMlGenreName(name: string): string | null {
+  const n = name.trim();
+  if (!n || n === "(no genres listed)") return null;
+  switch (n.toLowerCase()) {
+    case "sci-fi":
+      return "Science Fiction";
+    case "children":
+      return "Family";
+    default:
+      // Title-case-ish for common ML genre strings (they are usually already proper case).
+      return n;
+  }
+}
+
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 60);
+}
+
 /**
  * POST /api/movielens/import
  * Import ALL MovieLens data cached by imdbId (no FK to Movie):
@@ -127,20 +151,30 @@ export async function POST(req: NextRequest) {
     }
 
     // Step 2b: Parse movies.csv so we can create ML-only Movie rows (title + year) without hitting external APIs.
-    const imdbToCatalogMeta = new Map<string, { title: string; year: number | null }>();
+    const imdbToCatalogMeta = new Map<string, { title: string; year: number | null; genres: string[] }>();
     if (d32m && createMlMovies) {
       console.log("[MovieLens Import] Parsing movies.csv (catalog metadata)...");
-      const mlMovieMeta = new Map<string, { title: string; year: number | null }>();
+      const mlMovieMeta = new Map<string, { title: string; year: number | null; genres: string[] }>();
 
       await parseCsvString(
         await getFileString(d32m, "movies.csv"),
-        (row: { movieId: string; title: string }) => {
+        (row: { movieId: string; title: string; genres: string }) => {
           const rawTitle = (row.title || "").trim();
           if (!row.movieId || !rawTitle) return;
           const match = rawTitle.match(/^(.*)\\s*\\((\\d{4})\\)\\s*$/);
           const title = match ? match[1].trim() : rawTitle;
           const year = match ? Number.parseInt(match[2], 10) : null;
-          mlMovieMeta.set(row.movieId, { title, year: Number.isFinite(year as number) ? year : null });
+
+          const genreNames = (row.genres || "")
+            .split("|")
+            .map((g) => normalizeMlGenreName(g))
+            .filter(Boolean) as string[];
+
+          mlMovieMeta.set(row.movieId, {
+            title,
+            year: Number.isFinite(year as number) ? year : null,
+            genres: Array.from(new Set(genreNames)).slice(0, 6),
+          });
         }
       );
 
@@ -412,6 +446,7 @@ export async function POST(req: NextRequest) {
           year: number | null;
           letterboxdRating: number | null;
           mlRatingCount: number;
+          genres: string[];
         }> = [];
 
         for (const [imdbId, stats] of ratingStats.entries()) {
@@ -423,6 +458,7 @@ export async function POST(req: NextRequest) {
             imdbId,
             title: meta.title,
             year: meta.year,
+            genres: meta.genres || [],
             letterboxdRating: avg,
             mlRatingCount: stats.count,
           });
@@ -430,6 +466,23 @@ export async function POST(req: NextRequest) {
 
         candidates.sort((a, b) => b.mlRatingCount - a.mlRatingCount);
         const toCreate = candidates.slice(0, maxMlMovies);
+
+        // Ensure genres exist up-front (small set).
+        const allGenres = new Set<string>();
+        for (const c of toCreate) for (const g of c.genres) allGenres.add(g);
+        const genreRows = Array.from(allGenres.values());
+        for (const name of genreRows) {
+          const slug = slugify(name);
+          if (!slug) continue;
+          await prisma.genre.upsert({
+            where: { slug },
+            create: { name, slug },
+            update: { name },
+          });
+        }
+        const genreByName = new Map(
+          (await prisma.genre.findMany({ select: { id: true, name: true } })).map((g) => [g.name, g.id])
+        );
 
         for (let i = 0; i < toCreate.length; i += BATCH_SIZE) {
           const chunk = toCreate.slice(i, i + BATCH_SIZE);
@@ -445,6 +498,27 @@ export async function POST(req: NextRequest) {
             })),
             skipDuplicates: true,
           });
+
+          // Attach MovieLens genres (no network calls; improves clustering and MF features).
+          const created = await prisma.movie.findMany({
+            where: { imdbId: { in: chunk.map((c) => c.imdbId) } },
+            select: { id: true, imdbId: true },
+          });
+          const idByImdb = new Map(created.map((m) => [m.imdbId as string, m.id]));
+
+          const movieGenreRows: { movieId: string; genreId: string }[] = [];
+          for (const m of chunk) {
+            const movieId = idByImdb.get(m.imdbId);
+            if (!movieId) continue;
+            for (const g of m.genres) {
+              const genreId = genreByName.get(g);
+              if (!genreId) continue;
+              movieGenreRows.push({ movieId, genreId });
+            }
+          }
+          if (movieGenreRows.length > 0) {
+            await prisma.movieGenre.createMany({ data: movieGenreRows, skipDuplicates: true });
+          }
         }
 
         // Count how many ML-only rows exist now (rough progress metric).

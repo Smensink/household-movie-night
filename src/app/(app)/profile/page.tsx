@@ -64,6 +64,7 @@ interface ProfileStats {
     dispositionLabel: string;
     dispositionExplanation: string;
     topGenres: { name: string; score: number }[];
+    archetypeSimilarities?: { name: string; score: number }[];
     ratingMean: number | null;
     ratingStdDev: number | null;
   } | null;
@@ -241,11 +242,11 @@ function MoviePersonalityCard({
           </div>
         </div>
 
-        {/* Signature Genres */}
+        {/* Distinctive Genres */}
         {personality.topGenres.length > 0 && (
           <div>
             <div className="text-xs text-muted uppercase tracking-wide mb-2">
-              Signature Genres
+              Distinctive Genres
             </div>
             <div className="flex flex-wrap gap-2">
               {personality.topGenres.map((genre, i) => (
@@ -255,6 +256,33 @@ function MoviePersonalityCard({
                 >
                   {genre.name}
                 </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Similarity distribution */}
+        {personality.archetypeSimilarities && personality.archetypeSimilarities.length > 0 && (
+          <div>
+            <div className="text-xs text-muted uppercase tracking-wide mb-2">
+              Similar To
+            </div>
+            <div className="space-y-2">
+              {personality.archetypeSimilarities.map((a, i) => (
+                <div key={i} className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium">{a.name}</div>
+                  <div className="flex items-center gap-2 min-w-[110px] justify-end">
+                    <div className="h-2 w-20 bg-white/10 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-accent"
+                        style={{ width: `${Math.round(Math.max(0, Math.min(1, a.score)) * 100)}%` }}
+                      />
+                    </div>
+                    <div className="text-xs text-muted tabular-nums">
+                      {Math.round(Math.max(0, Math.min(1, a.score)) * 100)}%
+                    </div>
+                  </div>
+                </div>
               ))}
             </div>
           </div>

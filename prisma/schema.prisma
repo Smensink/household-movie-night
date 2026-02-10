@@ -449,6 +449,7 @@ model UserFeatureCache {
   ratingDisposition String?  // e.g. "lenient_wide", "harsh_narrow", "balanced_wide"
   topGenreIds       String?  // JSON array of top 5 genre IDs
   archetypeId       String?
+  archetypeScores   String?  // JSON: { [archetypeId]: number } (soft similarity distribution)
   archetype         ViewerArchetype? @relation(fields: [archetypeId], references: [id], onDelete: SetNull)
   updatedAt         DateTime @updatedAt
 }
