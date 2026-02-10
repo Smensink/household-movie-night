@@ -93,6 +93,7 @@ model Movie {
   radarrSync       RadarrSync?
   plexAvailability PlexAvailability?
   movieTags        MovieTag[]
+  mlRatings        MLRating[]
 }
 
 model Genre {
@@ -461,11 +462,22 @@ model MovieTag {
   id        String @id @default(cuid())
   movieId   String
   tag       String
-  relevance Float  // 0-1 genome relevance score from MovieLens tag genome
+  relevance Float  // 0-1 relevance based on user tagging frequency
 
   movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
 
   @@unique([movieId, tag])
   @@index([movieId])
   @@index([tag])
+}
+
+model MLRating {
+  mlUserId String
+  movieId  String
+  rating   Float
+
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@id([mlUserId, movieId])
+  @@index([movieId])
 }

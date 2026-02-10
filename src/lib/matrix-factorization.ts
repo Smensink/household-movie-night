@@ -25,6 +25,9 @@ const DEFAULT_REGULARIZATION = 0.02;
 const DEFAULT_EPOCHS = 20;
 const MIN_RATINGS_TO_TRAIN = 20;
 const VALIDATION_SPLIT = 0.1;
+const ML_SAMPLE_USERS = 5000; // Number of ML users to sample per training run
+const ML_RATING_WEIGHT = 0.1; // Relative weight vs household ratings (1.0)
+const ML_SAMPLE_PER_EPOCH = 20000; // Max ML ratings per epoch to keep training fast
 
 // Feature types
 type FeatureType =
@@ -49,6 +52,7 @@ interface Rating {
   userId: string;
   movieId: string;
   rating: number;
+  weight: number; // 1.0 for household, ML_RATING_WEIGHT for ML community
   movieFeatures: MovieFeatures;
   userFeatures: UserFeatures;
   householdFeatures: HouseholdFeatures;
@@ -685,24 +689,160 @@ export async function trainMatrixFactorization(
         userId: r.userId,
         movieId: r.movieId,
         rating: normalizeRating(r.rating!, userFeatures.ratingMean, userFeatures.ratingStdDev),
+        weight: 1.0,
         movieFeatures,
         userFeatures,
         householdFeatures,
       };
     });
 
-    // Calculate global mean (of normalized ratings)
+    // ── Load ML community ratings for joint training ──
+    const mlRatingCount = await prisma.mLRating.count();
+    let mlRatings: Rating[] = [];
+
+    if (mlRatingCount > 0) {
+      console.log(`[MF Train] Loading ML community ratings (${mlRatingCount} total in DB)...`);
+
+      // Sample ML users to get complete preference profiles
+      const allMLUserIds: { mlUserId: string }[] = await prisma.$queryRaw`
+        SELECT DISTINCT "mlUserId" FROM "MLRating" ORDER BY random() LIMIT ${ML_SAMPLE_USERS}
+      `;
+      const sampledUserIds = allMLUserIds.map((u) => u.mlUserId);
+
+      // Load their complete ratings
+      const rawMLRatings = await prisma.mLRating.findMany({
+        where: { mlUserId: { in: sampledUserIds } },
+      });
+      console.log(`[MF Train] Loaded ${rawMLRatings.length} ratings from ${sampledUserIds.length} ML users`);
+
+      // Compute per-ML-user stats for normalization and features
+      const mlUserStats = new Map<string, { sum: number; sumSq: number; count: number }>();
+      for (const r of rawMLRatings) {
+        if (!mlUserStats.has(r.mlUserId)) mlUserStats.set(r.mlUserId, { sum: 0, sumSq: 0, count: 0 });
+        const stats = mlUserStats.get(r.mlUserId)!;
+        stats.sum += r.rating;
+        stats.sumSq += r.rating * r.rating;
+        stats.count++;
+      }
+
+      // Build ML user feature profiles
+      const mlUserFeatureCache = new Map<string, UserFeatures>();
+      for (const [mlUserId, stats] of mlUserStats) {
+        const mean = stats.sum / stats.count;
+        const variance = stats.count > 1 ? (stats.sumSq / stats.count - mean * mean) : 0;
+        mlUserFeatureCache.set(`ml_${mlUserId}`, {
+          explorationFactor: 0.5,
+          ratingMean: mean,
+          ratingStdDev: Math.sqrt(Math.max(0, variance)),
+          ratingCount: stats.count,
+          topGenreIds: [], // No genre preference data for ML users
+        });
+      }
+
+      // Load movie features for ML-rated movies not already loaded
+      const householdMovieIds = new Set(rawRatings.map((r) => r.movieId));
+      const mlOnlyMovieIds = [...new Set(rawMLRatings.map((r) => r.movieId))].filter(
+        (id) => !householdMovieIds.has(id)
+      );
+
+      const mlMovies =
+        mlOnlyMovieIds.length > 0
+          ? await prisma.movie.findMany({
+              where: { id: { in: mlOnlyMovieIds } },
+              select: {
+                id: true,
+                era: true,
+                originalLanguage: true,
+                originCountry: true,
+                surpriseFactor: true,
+                popularity: true,
+                runtime: true,
+                voteAverage: true,
+                voteCount: true,
+                genres: { select: { genreId: true } },
+                studios: { select: { studioId: true }, take: 3 },
+                cast: { select: { personId: true }, take: 5, orderBy: { castOrder: "asc" } },
+                crew: { where: { job: "Director" }, select: { personId: true }, take: 2 },
+                movieTags: { select: { tag: true, relevance: true }, take: 10, orderBy: { relevance: "desc" } },
+              },
+            })
+          : [];
+
+      // Build movie features map for ML movies + household movies
+      const movieFeaturesMap = new Map<string, MovieFeatures>();
+      // Add household movie features (already computed in ratings array)
+      for (const r of ratings) {
+        movieFeaturesMap.set(r.movieId, r.movieFeatures);
+      }
+      // Add ML-only movie features
+      for (const m of mlMovies) {
+        movieFeaturesMap.set(m.id, {
+          genreIds: m.genres.map((g) => g.genreId),
+          era: m.era,
+          language: m.originalLanguage,
+          originCountry: m.originCountry,
+          tags: (m.movieTags ?? []).map((t) => ({ tag: t.tag, relevance: t.relevance })),
+          studioIds: m.studios.map((s) => s.studioId),
+          actorIds: m.cast.map((c) => c.personId),
+          directorIds: m.crew.map((c) => c.personId),
+          popularityBin: binPopularity(m.popularity),
+          runtimeBin: binRuntime(m.runtime),
+          voteAvgBin: binVoteAverage(m.voteAverage),
+          voteCountBin: binVoteCount(m.voteCount),
+          surpriseFactorBin: binSurpriseFactor(m.surpriseFactor),
+        });
+      }
+
+      // Empty household features for ML users
+      const emptyHouseholdFeatures: HouseholdFeatures = {
+        otherUserRatings: new Map(),
+        consensusScore: 0,
+      };
+
+      // Build ML Rating objects
+      for (const r of rawMLRatings) {
+        const mf = movieFeaturesMap.get(r.movieId);
+        if (!mf) continue;
+        const uf = mlUserFeatureCache.get(`ml_${r.mlUserId}`);
+        if (!uf) continue;
+
+        mlRatings.push({
+          userId: `ml_${r.mlUserId}`,
+          movieId: r.movieId,
+          rating: normalizeRating(r.rating, uf.ratingMean, uf.ratingStdDev),
+          weight: ML_RATING_WEIGHT,
+          movieFeatures: mf,
+          userFeatures: uf,
+          householdFeatures: emptyHouseholdFeatures,
+        });
+      }
+
+      // Add ML user features to cache (for vector initialization)
+      for (const [mlUserId, features] of mlUserFeatureCache) {
+        userFeatureCache.set(mlUserId, features);
+      }
+
+      console.log(`[MF Train] Built ${mlRatings.length} ML training examples (weight: ${ML_RATING_WEIGHT})`);
+    }
+
+    // Combine household + ML ratings
+    const allRatings = [...ratings, ...mlRatings];
+
+    // Calculate global mean (of household normalized ratings only — ML has different scale)
     const globalMean = ratings.reduce((sum, r) => sum + r.rating, 0) / ratings.length;
 
-    // Split into training and validation
+    // Split HOUSEHOLD ratings into training and validation (validate on household only)
     const shuffled = [...ratings].sort(() => Math.random() - 0.5);
     const validationSize = Math.floor(shuffled.length * VALIDATION_SPLIT);
     const validationSet = shuffled.slice(0, validationSize);
-    const trainingSet = shuffled.slice(validationSize);
+    const householdTrainingSet = shuffled.slice(validationSize);
 
-    // Collect all unique features
+    // Combine household training + ML ratings for the full training set
+    const trainingSet = [...householdTrainingSet, ...mlRatings];
+
+    // Collect all unique features (from ALL ratings: household + ML)
     const allFeatures = new Set<string>();
-    for (const r of ratings) {
+    for (const r of allRatings) {
       for (const genreId of r.movieFeatures.genreIds) {
         allFeatures.add(getFeatureKey("genre", genreId));
       }
@@ -734,8 +874,8 @@ export async function trainMatrixFactorization(
       }
     }
 
-    // Get unique users and movies
-    const movieIds = new Set(ratings.map((r) => r.movieId));
+    // Get unique users and movies (from ALL ratings)
+    const movieIds = new Set(allRatings.map((r) => r.movieId));
 
     // Load existing vectors or initialize new ones
     const existing = await loadLatentVectors(featureDimensions);
@@ -746,10 +886,14 @@ export async function trainMatrixFactorization(
     const movieBiases = new Map<string, number>();
     const featureEmbeddings = new Map<string, { vector: number[]; bias: number }>();
 
-    // Initialize or reuse vectors
-    for (const userId of userIds) {
-      userVectors.set(userId, existing.userVectors.get(userId) ?? initializeVector(latentDimensions));
-      userBiases.set(userId, existing.userBiases.get(userId) ?? 0);
+    // Include ML user IDs
+    const allUserIds = new Set([...userIds, ...allRatings.filter((r) => r.userId.startsWith("ml_")).map((r) => r.userId)]);
+
+    // Initialize or reuse vectors (ML users always get fresh vectors — they're temporary)
+    for (const userId of allUserIds) {
+      const isMLUser = userId.startsWith("ml_");
+      userVectors.set(userId, isMLUser ? initializeVector(latentDimensions) : (existing.userVectors.get(userId) ?? initializeVector(latentDimensions)));
+      userBiases.set(userId, isMLUser ? 0 : (existing.userBiases.get(userId) ?? 0));
     }
 
     for (const movieId of movieIds) {
@@ -770,9 +914,19 @@ export async function trainMatrixFactorization(
     let validationRmse = 0;
 
     for (let epoch = 0; epoch < epochs; epoch++) {
+      // Subsample ML ratings per epoch (household always included in full)
+      let epochTraining: Rating[];
+      if (mlRatings.length > ML_SAMPLE_PER_EPOCH) {
+        const sampledML = [...mlRatings].sort(() => Math.random() - 0.5).slice(0, ML_SAMPLE_PER_EPOCH);
+        epochTraining = [...householdTrainingSet, ...sampledML];
+      } else {
+        epochTraining = trainingSet;
+      }
+
       // Shuffle training data
-      const shuffledTraining = [...trainingSet].sort(() => Math.random() - 0.5);
+      const shuffledTraining = epochTraining.sort(() => Math.random() - 0.5);
       let totalSquaredError = 0;
+      let householdCount = 0;
 
       for (const rating of shuffledTraining) {
         const userVector = userVectors.get(rating.userId)!;
@@ -794,18 +948,25 @@ export async function trainMatrixFactorization(
           featureDimensions
         );
         const error = rating.rating - predicted;
-        totalSquaredError += error * error;
+        // Weight the gradient: ML ratings have less influence per-example
+        const weightedError = error * rating.weight;
 
-        // Update biases
-        userBiases.set(rating.userId, userBias + learningRate * (error - regularization * userBias));
-        movieBiases.set(rating.movieId, movieBias + learningRate * (error - regularization * movieBias));
+        // Track RMSE from household ratings only (true performance metric)
+        if (rating.weight === 1.0) {
+          totalSquaredError += error * error;
+          householdCount++;
+        }
 
-        // Update latent vectors
+        // Update biases with weighted error
+        userBiases.set(rating.userId, userBias + learningRate * (weightedError - regularization * userBias));
+        movieBiases.set(rating.movieId, movieBias + learningRate * (weightedError - regularization * movieBias));
+
+        // Update latent vectors with weighted error
         for (let k = 0; k < latentDimensions; k++) {
           const userK = userVector[k];
           const movieK = movieVector[k];
-          userVector[k] += learningRate * (error * movieK - regularization * userK);
-          movieVector[k] += learningRate * (error * userK - regularization * movieK);
+          userVector[k] += learningRate * (weightedError * movieK - regularization * userK);
+          movieVector[k] += learningRate * (weightedError * userK - regularization * movieK);
         }
 
         // Update feature embeddings
@@ -839,15 +1000,15 @@ export async function trainMatrixFactorization(
         for (const key of featuresToUpdate) {
           const emb = featureEmbeddings.get(key);
           if (emb) {
-            emb.bias += learningRate * (error * 0.1 - regularization * emb.bias);
+            emb.bias += learningRate * (weightedError * 0.1 - regularization * emb.bias);
             for (let k = 0; k < featureDimensions; k++) {
-              emb.vector[k] += learningRate * (error * 0.05 - regularization * emb.vector[k]);
+              emb.vector[k] += learningRate * (weightedError * 0.05 - regularization * emb.vector[k]);
             }
           }
         }
       }
 
-      rmse = Math.sqrt(totalSquaredError / trainingSet.length);
+      rmse = householdCount > 0 ? Math.sqrt(totalSquaredError / householdCount) : 0;
 
       // Calculate validation RMSE
       let validationSquaredError = 0;
@@ -873,15 +1034,29 @@ export async function trainMatrixFactorization(
       validationRmse = validationSet.length > 0 ? Math.sqrt(validationSquaredError / validationSet.length) : rmse;
     }
 
-    // Save trained vectors
+    // Save trained vectors (exclude ML user vectors — they're temporary training aids)
+    const householdUserVectors = new Map<string, number[]>();
+    const householdUserBiases = new Map<string, number>();
+    for (const [userId, vec] of userVectors) {
+      if (!userId.startsWith("ml_")) {
+        householdUserVectors.set(userId, vec);
+        householdUserBiases.set(userId, userBiases.get(userId) ?? 0);
+      }
+    }
+
     await saveLatentVectors({
-      userVectors,
+      userVectors: householdUserVectors,
       movieVectors,
-      userBiases,
+      userBiases: householdUserBiases,
       movieBiases,
       featureEmbeddings,
       globalMean,
     });
+
+    console.log(
+      `[MF Train] Saved: ${householdUserVectors.size} household users, ${movieVectors.size} movies, ${featureEmbeddings.size} features` +
+        (mlRatings.length > 0 ? ` (trained with ${mlRatings.length} ML ratings from ${allUserIds.size - userIds.size} ML users)` : "")
+    );
 
     // Compute per-movie surprise factors (belief calibration)
     await computeSurpriseFactors(rawRatings, featureEmbeddings, globalMean, featureDimensions);
@@ -921,8 +1096,8 @@ export async function trainMatrixFactorization(
       rmse,
       validationRmse,
       epochs,
-      ratingsProcessed: ratings.length,
-      usersProcessed: userIds.size,
+      ratingsProcessed: allRatings.length,
+      usersProcessed: allUserIds.size,
       moviesProcessed: movieIds.size,
       featuresLearned: allFeatures.size,
     };
