@@ -1125,8 +1125,27 @@ export async function trainMatrixFactorization(
       const mTensor = tf.variable(tf.tensor2d(mVecData, [numMovies, latentDimensions]));
       const uBiasTensor = tf.variable(tf.tensor1d(uBiasData));
       const mBiasTensor = tf.variable(tf.tensor1d(mBiasData));
-      const lrScalar = tf.scalar(learningRate);
-      const regScalar = tf.scalar(regularization);
+
+      // AdamW optimizer state for GPU parameters
+      const ADAM_BETA1 = 0.9;
+      const ADAM_BETA2 = 0.999;
+      const ADAM_EPSILON = 1e-8;
+      const adamLR = learningRate * 0.2; // Adam needs lower LR than SGD (0.005 * 0.2 = 0.001)
+      const weightDecay = regularization; // Decoupled weight decay for AdamW
+      let adamStep = 0;
+
+      // First moment (mean) and second moment (variance) estimates
+      const uVecM = tf.variable(tf.zeros([numUsers, latentDimensions]));
+      const uVecV = tf.variable(tf.zeros([numUsers, latentDimensions]));
+      const mVecM = tf.variable(tf.zeros([numMovies, latentDimensions]));
+      const mVecV = tf.variable(tf.zeros([numMovies, latentDimensions]));
+      const uBiasM = tf.variable(tf.zeros([numUsers]));
+      const uBiasV = tf.variable(tf.zeros([numUsers]));
+      const mBiasM = tf.variable(tf.zeros([numMovies]));
+      const mBiasV = tf.variable(tf.zeros([numMovies]));
+
+      // Feature embedding learning rate (simple SGD with lower rate for CPU-side features)
+      let featureLR = learningRate * 0.2;
 
       for (let epoch = 0; epoch < epochs; epoch++) {
         let epochTraining: Rating[];
@@ -1175,8 +1194,14 @@ export async function trainMatrixFactorization(
             weightArr[i] = batch[i].weight;
           }
 
-          // GPU: batch MF prediction, error computation, and gradient updates
-          const rawErrors = tf.tidy(() => {
+          // GPU: batch MF prediction, error computation, and AdamW gradient updates
+          adamStep++;
+          const biasCorrection1 = 1 - Math.pow(ADAM_BETA1, adamStep);
+          const biasCorrection2 = 1 - Math.pow(ADAM_BETA2, adamStep);
+          const correctedLR = adamLR * Math.sqrt(biasCorrection2) / biasCorrection1;
+
+          // Step 1: Compute averaged gradients and errors (tidy cleans intermediates)
+          const { errors: rawErrors, uGrad, mGrad, uBGrad, mBGrad } = tf.tidy(() => {
             const userIdx = tf.tensor1d(userIdxArr, "int32");
             const movieIdx = tf.tensor1d(movieIdxArr, "int32");
             const targets = tf.tensor1d(targetArr);
@@ -1184,52 +1209,75 @@ export async function trainMatrixFactorization(
             const featC = tf.tensor1d(featContribs);
 
             // Gather vectors for this batch
-            const bUserVecs = tf.gather(uTensor, userIdx);     // [B, D]
-            const bMovieVecs = tf.gather(mTensor, movieIdx);    // [B, D]
-            const bUserBias = tf.gather(uBiasTensor, userIdx);  // [B]
-            const bMovieBias = tf.gather(mBiasTensor, movieIdx); // [B]
+            const bUserVecs = tf.gather(uTensor, userIdx);
+            const bMovieVecs = tf.gather(mTensor, movieIdx);
+            const bUserBias = tf.gather(uBiasTensor, userIdx);
+            const bMovieBias = tf.gather(mBiasTensor, movieIdx);
 
-            // Predict: dot(user, movie) + biases + globalMean + featureContribution
+            // Predict
             const dots = tf.sum(tf.mul(bUserVecs, bMovieVecs), 1);
             const preds = dots.add(bUserBias).add(bMovieBias).add(globalMean).add(featC);
 
-            // Errors
             const errors = targets.sub(preds);
             const wErrors = errors.mul(weights);
 
-            // MF gradients: grad_user = wError * movieVec - reg * userVec
-            const wErrorsExp = tf.expandDims(wErrors, 1); // [B, 1]
-            const userGrads = tf.sub(tf.mul(wErrorsExp, bMovieVecs), tf.mul(regScalar, bUserVecs));
-            const movieGrads = tf.sub(tf.mul(wErrorsExp, bUserVecs), tf.mul(regScalar, bMovieVecs));
-            const userBiasGrads = tf.sub(wErrors, tf.mul(regScalar, bUserBias));
-            const movieBiasGrads = tf.sub(wErrors, tf.mul(regScalar, bMovieBias));
+            // Gradients with per-entity L2 reg (matches SGD: error * other - reg * self)
+            // Only regularizes entities present in this batch (unlike global weight decay)
+            const wErrorsExp = tf.expandDims(wErrors, 1);
+            const userGrads = tf.sub(tf.mul(wErrorsExp, bMovieVecs), tf.mul(regLambda, bUserVecs));
+            const movieGrads = tf.sub(tf.mul(wErrorsExp, bUserVecs), tf.mul(regLambda, bMovieVecs));
+            const userBiasGrads = tf.sub(wErrors, tf.mul(regLambda, bUserBias));
+            const movieBiasGrads = tf.sub(wErrors, tf.mul(regLambda, bMovieBias));
 
-            // Accumulate gradients per entity via segment sum, then average by occurrence count
+            // Average gradients per entity
             const onesVec = tf.ones([B]);
             const userCounts = tf.unsortedSegmentSum(onesVec, userIdx, numUsers);
             const movieCounts = tf.unsortedSegmentSum(onesVec, movieIdx, numMovies);
-            const userCountsExp = tf.maximum(userCounts.expandDims(1), 1); // [numUsers, 1]
-            const movieCountsExp = tf.maximum(movieCounts.expandDims(1), 1); // [numMovies, 1]
+            const userCountsExp = tf.maximum(userCounts.expandDims(1), 1);
+            const movieCountsExp = tf.maximum(movieCounts.expandDims(1), 1);
 
-            const uGradAcc = tf.unsortedSegmentSum(userGrads, userIdx, numUsers);
-            const mGradAcc = tf.unsortedSegmentSum(movieGrads, movieIdx, numMovies);
-            const uBiasAcc = tf.unsortedSegmentSum(userBiasGrads, userIdx, numUsers);
-            const mBiasAcc = tf.unsortedSegmentSum(movieBiasGrads, movieIdx, numMovies);
+            const uGrad = tf.div(tf.unsortedSegmentSum(userGrads, userIdx, numUsers), userCountsExp);
+            const mGrad = tf.div(tf.unsortedSegmentSum(movieGrads, movieIdx, numMovies), movieCountsExp);
+            const uBGrad = tf.div(tf.unsortedSegmentSum(userBiasGrads, userIdx, numUsers), tf.maximum(userCounts, 1));
+            const mBGrad = tf.div(tf.unsortedSegmentSum(movieBiasGrads, movieIdx, numMovies), tf.maximum(movieCounts, 1));
 
-            // Average gradients by per-entity occurrence count (prevents divergence for frequent entities)
-            const uGradAvg = tf.div(uGradAcc, userCountsExp);
-            const mGradAvg = tf.div(mGradAcc, movieCountsExp);
-            const uBiasAvg = tf.div(uBiasAcc, tf.maximum(userCounts, 1));
-            const mBiasAvg = tf.div(mBiasAcc, tf.maximum(movieCounts, 1));
-
-            // Apply averaged gradient updates
-            uTensor.assign(uTensor.add(tf.mul(lrScalar, uGradAvg)));
-            mTensor.assign(mTensor.add(tf.mul(lrScalar, mGradAvg)));
-            uBiasTensor.assign(uBiasTensor.add(tf.mul(lrScalar, uBiasAvg)));
-            mBiasTensor.assign(mBiasTensor.add(tf.mul(lrScalar, mBiasAvg)));
-
-            return errors; // keep alive for CPU-side feature updates
+            // Keep these alive (not disposed by tidy) for AdamW update
+            return { errors: tf.keep(errors), uGrad: tf.keep(uGrad), mGrad: tf.keep(mGrad), uBGrad: tf.keep(uBGrad), mBGrad: tf.keep(mBGrad) };
           });
+
+          // Step 2: Adam update (L2 reg already in gradients — no separate weight decay)
+          tf.tidy(() => {
+            const beta1 = ADAM_BETA1;
+            const beta2 = ADAM_BETA2;
+            const eps = ADAM_EPSILON;
+            const lr = correctedLR;
+
+            // Update user vectors
+            uVecM.assign(uVecM.mul(beta1).add(uGrad.mul(1 - beta1)));
+            uVecV.assign(uVecV.mul(beta2).add(uGrad.square().mul(1 - beta2)));
+            uTensor.assign(uTensor.add(uVecM.div(uVecV.sqrt().add(eps)).mul(lr)));
+
+            // Update movie vectors
+            mVecM.assign(mVecM.mul(beta1).add(mGrad.mul(1 - beta1)));
+            mVecV.assign(mVecV.mul(beta2).add(mGrad.square().mul(1 - beta2)));
+            mTensor.assign(mTensor.add(mVecM.div(mVecV.sqrt().add(eps)).mul(lr)));
+
+            // Update user biases
+            uBiasM.assign(uBiasM.mul(beta1).add(uBGrad.mul(1 - beta1)));
+            uBiasV.assign(uBiasV.mul(beta2).add(uBGrad.square().mul(1 - beta2)));
+            uBiasTensor.assign(uBiasTensor.add(uBiasM.div(uBiasV.sqrt().add(eps)).mul(lr)));
+
+            // Update movie biases
+            mBiasM.assign(mBiasM.mul(beta1).add(mBGrad.mul(1 - beta1)));
+            mBiasV.assign(mBiasV.mul(beta2).add(mBGrad.square().mul(1 - beta2)));
+            mBiasTensor.assign(mBiasTensor.add(mBiasM.div(mBiasV.sqrt().add(eps)).mul(lr)));
+          });
+
+          // Dispose kept gradient tensors
+          uGrad.dispose();
+          mGrad.dispose();
+          uBGrad.dispose();
+          mBGrad.dispose();
 
           // Read errors back to CPU
           const errorArr = rawErrors.dataSync() as Float32Array;
@@ -1238,7 +1286,7 @@ export async function trainMatrixFactorization(
           // CPU: update feature embeddings using errors
           for (let i = 0; i < B; i++) {
             const wError = errorArr[i] * batch[i].weight;
-            updateFeatureEmbeddings(batch[i], wError, featureEmbeddings, learningRate, regularization, featureDimensions);
+            updateFeatureEmbeddings(batch[i], wError, featureEmbeddings, featureLR, regularization, featureDimensions);
 
             if (batch[i].weight === 1.0) {
               totalSquaredError += errorArr[i] * errorArr[i];
@@ -1276,8 +1324,12 @@ export async function trainMatrixFactorization(
             validationSquaredError += Math.pow(rating.rating - predicted, 2);
           }
           validationRmse = Math.sqrt(validationSquaredError / validationSet.length);
-          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} (${backend})`);
+          const effectiveLR = adamLR * Math.sqrt(1 - Math.pow(ADAM_BETA2, adamStep)) / (1 - Math.pow(ADAM_BETA1, adamStep));
+          console.log(`[MF Train] Epoch ${epoch + 1}/${epochs}: RMSE=${rmse.toFixed(4)} valRMSE=${validationRmse.toFixed(4)} adamLR=${effectiveLR.toFixed(6)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`);
         }
+
+        // Decay feature embedding LR (AdamW handles its own adaptive LR for GPU params)
+        featureLR *= 0.98;
       }
 
       // Read final tensors back to Maps
@@ -1304,8 +1356,15 @@ export async function trainMatrixFactorization(
       mTensor.dispose();
       uBiasTensor.dispose();
       mBiasTensor.dispose();
-      lrScalar.dispose();
-      regScalar.dispose();
+      // Cleanup AdamW moment tensors
+      uVecM.dispose();
+      uVecV.dispose();
+      mVecM.dispose();
+      mVecV.dispose();
+      uBiasM.dispose();
+      uBiasV.dispose();
+      mBiasM.dispose();
+      mBiasV.dispose();
 
       console.log(`[MF Train] GPU/BLAS training complete: ${epochs} epochs, RMSE=${rmse.toFixed(4)}`);
     } else {
