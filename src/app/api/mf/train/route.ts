@@ -117,7 +117,7 @@ export async function PATCH(req: NextRequest) {
     console.log("[MF Train] Starting model training...");
     // Auto-retrain should favor stability over absolute completion: early-stop on household validation.
     const result = await trainMatrixFactorization({
-      earlyStopping: { enabled: true, patience: 3, minDelta: 0.001 },
+      earlyStopping: { enabled: true, patience: 3, minDelta: 0.001, metric: "combined" },
     });
     console.log(`[MF Train] Training complete: ${result.ratingsProcessed} ratings, ${result.featuresLearned} features, RMSE=${result.rmse.toFixed(4)}`);
 

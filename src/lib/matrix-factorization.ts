@@ -816,6 +816,17 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
 	      enabled?: boolean;
 	      patience?: number;
       minDelta?: number;
+      // Which validation signal to optimize checkpoints/early-stop against.
+      // - "rmse": minimize household validation RMSE (classic CF objective)
+      // - "combined": maximize a blend of household valRMSE + ranking metrics (NDCG/MAP/Hit/AUC)
+      metric?: "rmse" | "combined";
+      combinedWeights?: {
+        rmse?: number; // weight for RMSE-derived score (0..1, larger = more RMSE-driven)
+        ndcg?: number;
+        map?: number;
+        hit?: number;
+        auc?: number;
+      };
     };
   } = {}
 ): Promise<{
@@ -849,6 +860,51 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
   const epochEvalNegPerPos = Math.max(1, Math.floor(options.epochEval?.negativesPerPositive ?? 20));
   const epochEvalMinNeg = Math.max(0, Math.floor(options.epochEval?.minNegatives ?? 50));
   const epochEvalMaxNeg = Math.max(epochEvalMinNeg, Math.floor(options.epochEval?.maxNegatives ?? 200));
+
+  const earlyStoppingMetric: "rmse" | "combined" =
+    options.earlyStopping?.metric ??
+    // If we have ranking metrics enabled, default early-stopping to combined, otherwise RMSE.
+    (epochEvalEnabled ? "combined" : "rmse");
+
+  const combinedWeights = {
+    rmse: options.earlyStopping?.combinedWeights?.rmse ?? 0.45,
+    ndcg: options.earlyStopping?.combinedWeights?.ndcg ?? 0.20,
+    map: options.earlyStopping?.combinedWeights?.map ?? 0.20,
+    hit: options.earlyStopping?.combinedWeights?.hit ?? 0.05,
+    auc: options.earlyStopping?.combinedWeights?.auc ?? 0.10,
+  };
+
+  function clamp01(value: number): number {
+    return Math.min(1, Math.max(0, value));
+  }
+
+  function combinedEarlyStopScore(input: {
+    validationRmse: number;
+    valNdcg: number;
+    valMap: number;
+    valHit: number;
+    valAuc: number;
+  }): number {
+    // Ranking metrics are already 0..1. RMSE is unbounded and depends on scale,
+    // so convert to a bounded score roughly aligned with typical ranges (~0.7..1.5).
+    // 0.0 -> 1.0, 2.0 -> 0.0 (clamped).
+    const rmseScore = clamp01(1 - input.validationRmse / 2);
+    const sumWeights =
+      combinedWeights.rmse +
+      combinedWeights.ndcg +
+      combinedWeights.map +
+      combinedWeights.hit +
+      combinedWeights.auc;
+    if (sumWeights <= 0) return rmseScore;
+
+    return (
+      rmseScore * combinedWeights.rmse +
+      input.valNdcg * combinedWeights.ndcg +
+      input.valMap * combinedWeights.map +
+      input.valHit * combinedWeights.hit +
+      input.valAuc * combinedWeights.auc
+    ) / sumWeights;
+  }
 
   // Atomically acquire training lock to prevent TOCTOU race
   const metadata = await prisma.mFModelMetadata.findFirst();
@@ -1382,7 +1438,7 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
       let featureLR = learningRate * 0.2;
 
       // Early stopping (best checkpoint in memory; restored before saving)
-      let bestVal = Number.POSITIVE_INFINITY;
+      let bestVal = earlyStoppingMetric === "combined" ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY;
       let bestEpoch = -1;
       let epochsWithoutImprove = 0;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1887,11 +1943,26 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
               ` adamLR=${effectiveLR.toFixed(6)} wd=${weightDecayLocal.toFixed(4)} featLR=${featureLR.toFixed(6)} step=${adamStep} (${backend})`
           );
 
-          // Early stopping uses household validation only.
+          // Early stopping uses household validation only (RMSE or a combined score that also includes ranking metrics).
           if (earlyStoppingEnabled) {
-            const improved = validationRmse + earlyStoppingMinDelta < bestVal;
+            const hasRanking = evalUsers > 0;
+            const useCombined = earlyStoppingMetric === "combined" && hasRanking;
+            const currentMetric = useCombined
+              ? combinedEarlyStopScore({
+                  validationRmse,
+                  valNdcg,
+                  valMap,
+                  valHit,
+                  valAuc,
+                })
+              : validationRmse;
+
+            const improved =
+              useCombined
+                ? currentMetric > bestVal + earlyStoppingMinDelta
+                : currentMetric + earlyStoppingMinDelta < bestVal;
             if (improved) {
-              bestVal = validationRmse;
+              bestVal = currentMetric;
               bestEpoch = epoch;
               epochsWithoutImprove = 0;
 
@@ -1913,13 +1984,17 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
               }
 
               console.log(
-                `[MF Train] EarlyStop checkpoint: best valRMSE=${bestVal.toFixed(4)} at epoch ${bestEpoch + 1}`
+                useCombined
+                  ? `[MF Train] EarlyStop checkpoint: best combined=${bestVal.toFixed(4)} at epoch ${bestEpoch + 1}`
+                  : `[MF Train] EarlyStop checkpoint: best valRMSE=${bestVal.toFixed(4)} at epoch ${bestEpoch + 1}`
               );
             } else {
               epochsWithoutImprove++;
               if (epochsWithoutImprove >= earlyStoppingPatience) {
                 console.log(
-                  `[MF Train] EarlyStop: no valRMSE improvement for ${earlyStoppingPatience} epoch(s). Stopping at epoch ${epoch + 1}/${epochs}; best was epoch ${bestEpoch + 1} (valRMSE=${bestVal.toFixed(4)}).`
+                  useCombined
+                    ? `[MF Train] EarlyStop: no combined improvement for ${earlyStoppingPatience} epoch(s). Stopping at epoch ${epoch + 1}/${epochs}; best was epoch ${bestEpoch + 1} (combined=${bestVal.toFixed(4)}).`
+                    : `[MF Train] EarlyStop: no valRMSE improvement for ${earlyStoppingPatience} epoch(s). Stopping at epoch ${epoch + 1}/${epochs}; best was epoch ${bestEpoch + 1} (valRMSE=${bestVal.toFixed(4)}).`
                 );
                 break;
               }
@@ -1992,7 +2067,7 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
       console.log(`[MF Train] Using pure JS training loop`);
 
       // Early stopping (best checkpoint in memory; restored before saving)
-      let bestVal = Number.POSITIVE_INFINITY;
+      let bestVal = earlyStoppingMetric === "combined" ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY;
       let bestEpoch = -1;
       let epochsWithoutImprove = 0;
       let bestUserVectors: Map<string, number[]> | null = null;
@@ -2324,9 +2399,24 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
         );
 
         if (earlyStoppingEnabled && validationSet.length > 0) {
-          const improved = validationRmse + earlyStoppingMinDelta < bestVal;
+          const hasRanking = evalUsers > 0;
+          const useCombined = earlyStoppingMetric === "combined" && hasRanking;
+          const currentMetric = useCombined
+            ? combinedEarlyStopScore({
+                validationRmse,
+                valNdcg,
+                valMap,
+                valHit,
+                valAuc,
+              })
+            : validationRmse;
+
+          const improved =
+            useCombined
+              ? currentMetric > bestVal + earlyStoppingMinDelta
+              : currentMetric + earlyStoppingMinDelta < bestVal;
           if (improved) {
-            bestVal = validationRmse;
+            bestVal = currentMetric;
             bestEpoch = epoch;
             epochsWithoutImprove = 0;
 
@@ -2341,13 +2431,17 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
             for (const [k, v] of featureEmbeddings.entries()) bestFeatureEmbeddings.set(k, { vector: [...v.vector], bias: v.bias });
 
             console.log(
-              `[MF Train] EarlyStop checkpoint: best valRMSE=${bestVal.toFixed(4)} at epoch ${bestEpoch + 1}`
+              useCombined
+                ? `[MF Train] EarlyStop checkpoint: best combined=${bestVal.toFixed(4)} at epoch ${bestEpoch + 1}`
+                : `[MF Train] EarlyStop checkpoint: best valRMSE=${bestVal.toFixed(4)} at epoch ${bestEpoch + 1}`
             );
           } else {
             epochsWithoutImprove++;
             if (epochsWithoutImprove >= earlyStoppingPatience) {
               console.log(
-                `[MF Train] EarlyStop: no valRMSE improvement for ${earlyStoppingPatience} epoch(s). Stopping at epoch ${epoch + 1}/${epochs}; best was epoch ${bestEpoch + 1} (valRMSE=${bestVal.toFixed(4)}).`
+                useCombined
+                  ? `[MF Train] EarlyStop: no combined improvement for ${earlyStoppingPatience} epoch(s). Stopping at epoch ${epoch + 1}/${epochs}; best was epoch ${bestEpoch + 1} (combined=${bestVal.toFixed(4)}).`
+                  : `[MF Train] EarlyStop: no valRMSE improvement for ${earlyStoppingPatience} epoch(s). Stopping at epoch ${epoch + 1}/${epochs}; best was epoch ${bestEpoch + 1} (valRMSE=${bestVal.toFixed(4)}).`
               );
               break;
             }

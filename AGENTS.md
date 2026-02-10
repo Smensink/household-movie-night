@@ -651,6 +651,10 @@ Core entities in `prisma/schema.prisma`:
   - Implemented in-memory weight checkpoints (best-so-far snapshots) so the saved model uses the best validation epoch even if later epochs degrade.
   - For the TF/GPU path, checkpoints are Tensor clones of `uTensor/mTensor/uBiasTensor/mBiasTensor` plus a deep copy of feature-embeddings; for JS fallback, checkpoints deep-copy the vector/bias Maps.
   - `/api/mf/train` POST now accepts `earlyStopping` in the JSON body and passes it through to training (default remains unchanged unless enabled).
+- 2026-02-10 (MF early stopping metric blend):
+  - Early stopping can now be based on a **combined** validation objective (household `valRMSE` plus ranking metrics `valNDCG@K`, `valMAP@K`, `valHit@K`, `valAUC`) instead of RMSE alone.
+  - Default behavior: if epoch ranking eval is enabled, early stopping defaults to `metric="combined"`, otherwise `metric="rmse"`.
+  - Auto-retrain (`PATCH /api/mf/train`) now uses `metric="combined"` so unattended retrains select checkpoints that align with the “best-next movie” ranking goal.
 - 2026-02-10 (MF validation split + regularization knobs):
   - Changed household validation split in MF training to be deterministic by `(userId, movieId)` hash instead of per-run random shuffle.
     - Motivation: stable metrics between retrains, no cross-run train/val swapping, and more reliable early-stopping behavior.
