@@ -26,14 +26,17 @@ async function getTF(): Promise<{ tf: any; backend: "gpu" | "cpu" } | null> {
   if (_tfBackend === "none") return null;
   if (_tf) return { tf: _tf, backend: _tfBackend as "gpu" | "cpu" };
 
+  // Use string indirection to prevent TypeScript from resolving the module at compile time
+  const gpuPkg = "@tensorflow/tfjs-node-gpu";
+  const cpuPkg = "@tensorflow/tfjs-node";
   try {
-    _tf = await import("@tensorflow/tfjs-node-gpu");
+    _tf = await import(/* webpackIgnore: true */ gpuPkg);
     _tfBackend = "gpu";
     console.log("[MF] TensorFlow.js GPU backend loaded");
     return { tf: _tf, backend: "gpu" };
   } catch {
     try {
-      _tf = await import("@tensorflow/tfjs-node");
+      _tf = await import(/* webpackIgnore: true */ cpuPkg);
       _tfBackend = "cpu";
       console.log("[MF] TensorFlow.js CPU (BLAS) backend loaded");
       return { tf: _tf, backend: "cpu" };
