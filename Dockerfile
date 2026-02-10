@@ -52,6 +52,7 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/src/generated ./src/generated
+COPY --from=builder /app/scripts ./scripts
 
 # Create and own the cache directory for image optimization
 RUN mkdir -p /app/.next/cache && chown -R nextjs:nodejs /app/.next

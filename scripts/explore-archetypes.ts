@@ -1,4 +1,16 @@
-import { prisma } from "../src/lib/prisma";
+import { PrismaClient } from "../src/generated/prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
+import pg from "pg";
+
+function createPrismaClient() {
+  const pool = new pg.Pool({
+    connectionString: process.env.DATABASE_URL,
+  });
+  const adapter = new PrismaPg(pool);
+  return new PrismaClient({ adapter });
+}
+
+const prisma = createPrismaClient();
 
 function dot(a: number[], b: number[]): number {
   let s = 0;
@@ -172,4 +184,3 @@ main()
   .finally(async () => {
     await prisma.$disconnect();
   });
-
