@@ -694,3 +694,5 @@ Core entities in `prisma/schema.prisma`:
   - Archetype naming now uses **genre lift** (cluster share minus global share) to avoid all archetypes being "Drama ...".
   - MovieLens import now parses `movies.csv` genres and attaches them to ML-only movies so clustering has meaningful genre signal.
   - Added `scripts/explore-archetypes.ts` to dump archetype descriptions and sample top/bottom movies for each centroid; intended for repeatable post-train cluster inspection.
+- 2026-02-10 (Archetype report in prod):
+  - Docker runtime image now copies `scripts/` so `scripts/explore-archetypes.ts` can be executed inside the running `app` container without needing a full source checkout.
