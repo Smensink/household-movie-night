@@ -38,7 +38,8 @@ export async function GET() {
  */
 export async function POST(req: NextRequest) {
   const session = await auth();
-  if (!session?.user?.id) {
+  const isInternal = await isInternalOrAdmin(req);
+  if (!session?.user?.id && !isInternal) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
