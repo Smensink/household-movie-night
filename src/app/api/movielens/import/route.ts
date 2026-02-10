@@ -83,7 +83,13 @@ export async function POST(req: NextRequest) {
 
     // ── Phase A: User-frequency tag relevance ──
     let tagsImported = 0;
-    if (existingTagCount <= 100) {
+    // If tags exist but ML ratings don't, the old tags are genome-based (ml-25m) — clear and re-import
+    if (existingTagCount > 0 && existingMLRatingCount <= 1000) {
+      console.log("[MovieLens Import] Clearing old genome-based tags for user-frequency re-import...");
+      await prisma.movieTag.deleteMany();
+    }
+    const currentTagCount = await prisma.movieTag.count();
+    if (currentTagCount <= 100) {
       console.log("[MovieLens Import] Phase A: Parsing tags.csv for user-frequency tag relevance...");
       const movieTagUsers = new Map<string, Map<string, Set<string>>>();
       await parseCsv(
@@ -127,8 +133,8 @@ export async function POST(req: NextRequest) {
       tagsImported = await prisma.movieTag.count();
       console.log(`[MovieLens Import] Phase A done: ${tagsImported} tags imported`);
     } else {
-      console.log(`[MovieLens Import] Phase A skipped: ${existingTagCount} tags already exist`);
-      tagsImported = existingTagCount;
+      console.log(`[MovieLens Import] Phase A skipped: ${currentTagCount} tags already exist`);
+      tagsImported = currentTagCount;
     }
 
     // ── Phase B: ALL individual ML ratings + per-movie averages ──
