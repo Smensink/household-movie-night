@@ -663,3 +663,9 @@ Core entities in `prisma/schema.prisma`:
 - 2026-02-10 (ML drift-monitor validation RMSE):
   - Added a deterministic ML-only holdout split (1%) and epoch log metric `mlValRMSE` (capped to 50k examples) for domain-drift monitoring.
   - ML holdout is never used for training (training uses the remaining 99% ML examples), preventing leakage while keeping ML-vs-household domain shifts visible during training.
+- 2026-02-10 (Reduce ML-domain dominance by default):
+  - Changed MF defaults to reduce ML overpowering household behavior:
+    - `ML_RATING_WEIGHT`: `0.1` -> `0.05`
+    - `ML_SAMPLE_PER_EPOCH`: `Infinity` -> `1_000_000`
+  - Added `mlRatingWeight` and `mlSamplePerEpoch` overrides to `trainMatrixFactorization()` and `POST /api/mf/train`.
+  - ML sampling and epoch shuffles are now seeded/deterministic (repeatable retrains for debugging).

@@ -63,6 +63,8 @@ export async function POST(req: NextRequest) {
       regularization: body.regularization,
       weightDecay: body.weightDecay,
       featureRegularization: body.featureRegularization,
+      mlRatingWeight: body.mlRatingWeight,
+      mlSamplePerEpoch: body.mlSamplePerEpoch,
       earlyStopping: body.earlyStopping,
     });
 

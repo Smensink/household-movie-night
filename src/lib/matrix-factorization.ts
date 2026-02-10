@@ -59,8 +59,8 @@ const DEFAULT_EPOCHS = 20;
 const MIN_RATINGS_TO_TRAIN = 20;
 const VALIDATION_SPLIT = 0.1;
 const ML_SAMPLE_USERS = 500000; // Sample up to 500K ML users (effectively all ~200K+)
-const ML_RATING_WEIGHT = 0.1; // Relative weight vs household ratings (1.0)
-const ML_SAMPLE_PER_EPOCH = Infinity; // Use ALL mapped ML ratings every epoch
+const ML_RATING_WEIGHT = 0.05; // Relative weight vs household ratings (1.0). Lower reduces ML-domain dominance.
+const ML_SAMPLE_PER_EPOCH = 1_000_000; // Cap ML examples per epoch to reduce ML-domain overfitting + speed training.
 const ML_VALIDATION_SPLIT = 0.01; // Small deterministic holdout for ML-domain drift monitoring
 const ML_VALIDATION_MAX = 50000; // Cap ML validation evaluation set for performance
 
@@ -77,6 +77,36 @@ function fnv1a32(input: string): number {
 function isInValidationSplit(userId: string, movieId: string, splitFraction: number): boolean {
   const pct = Math.max(1, Math.min(99, Math.floor(splitFraction * 100)));
   return fnv1a32(`${userId}:${movieId}`) % 100 < pct;
+}
+
+function mulberry32(seed: number): () => number {
+  // Small deterministic PRNG for reproducible sampling/shuffles between retrains.
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6d2b79f5;
+    let x = t;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function reservoirSample<T>(arr: T[], n: number, rand: () => number): T[] {
+  if (n <= 0) return [];
+  if (arr.length <= n) return [...arr];
+  const out = arr.slice(0, n);
+  for (let i = n; i < arr.length; i++) {
+    const j = Math.floor(rand() * (i + 1));
+    if (j < n) out[j] = arr[i];
+  }
+  return out;
+}
+
+function shuffleInPlace<T>(arr: T[], rand: () => number): void {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
 }
 
 // Feature types
@@ -671,20 +701,23 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
 /**
  * Train the hybrid factorization machine using SGD
  */
-export async function trainMatrixFactorization(
-  options: {
-    epochs?: number;
-    learningRate?: number;
-    // Back-compat: regularization used to mean L2 reg. In GPU training this is treated as AdamW weight decay.
-    // Prefer passing weightDecay/featureRegularization explicitly going forward.
-    regularization?: number;
-    weightDecay?: number;
-    featureRegularization?: number;
-    latentDimensions?: number;
-    featureDimensions?: number;
-    earlyStopping?: {
-      enabled?: boolean;
-      patience?: number;
+	export async function trainMatrixFactorization(
+	  options: {
+	    epochs?: number;
+	    learningRate?: number;
+	    // Back-compat: regularization used to mean L2 reg. In GPU training this is treated as AdamW weight decay.
+	    // Prefer passing weightDecay/featureRegularization explicitly going forward.
+	    regularization?: number;
+	    weightDecay?: number;
+	    featureRegularization?: number;
+	    // MovieLens joint-training controls (default caps avoid ML-domain dominating household validation)
+	    mlRatingWeight?: number; // scales ML example loss contributions (household is 1.0)
+	    mlSamplePerEpoch?: number; // max number of ML examples included per epoch (Infinity = all mapped ML)
+	    latentDimensions?: number;
+	    featureDimensions?: number;
+	    earlyStopping?: {
+	      enabled?: boolean;
+	      patience?: number;
       minDelta?: number;
     };
   } = {}
@@ -698,12 +731,14 @@ export async function trainMatrixFactorization(
   featuresLearned: number;
 }> {
   const epochs = options.epochs ?? DEFAULT_EPOCHS;
-  const learningRate = options.learningRate ?? DEFAULT_LEARNING_RATE;
-  const legacyRegularization = options.regularization ?? DEFAULT_REGULARIZATION;
-  const weightDecay = options.weightDecay ?? legacyRegularization;
-  const featureRegularization = options.featureRegularization ?? legacyRegularization;
-  const latentDimensions = options.latentDimensions ?? DEFAULT_LATENT_DIMENSIONS;
-  const featureDimensions = options.featureDimensions ?? DEFAULT_FEATURE_DIMENSIONS;
+	  const learningRate = options.learningRate ?? DEFAULT_LEARNING_RATE;
+	  const legacyRegularization = options.regularization ?? DEFAULT_REGULARIZATION;
+	  const weightDecay = options.weightDecay ?? legacyRegularization;
+	  const featureRegularization = options.featureRegularization ?? legacyRegularization;
+	  const mlRatingWeight = options.mlRatingWeight ?? ML_RATING_WEIGHT;
+	  const mlSamplePerEpoch = options.mlSamplePerEpoch ?? ML_SAMPLE_PER_EPOCH;
+	  const latentDimensions = options.latentDimensions ?? DEFAULT_LATENT_DIMENSIONS;
+	  const featureDimensions = options.featureDimensions ?? DEFAULT_FEATURE_DIMENSIONS;
 
   const earlyStoppingEnabled = options.earlyStopping?.enabled === true;
   const earlyStoppingPatience = Math.max(1, Math.floor(options.earlyStopping?.patience ?? 3));
@@ -1018,24 +1053,24 @@ export async function trainMatrixFactorization(
         const uf = mlUserFeatureCache.get(`ml_${r.mlUserId}`);
         if (!uf) continue;
 
-        mlRatings.push({
-          userId: `ml_${r.mlUserId}`,
-          movieId: r.movieId,
-          rating: normalizeRating(r.rating, uf.ratingMean, uf.ratingStdDev),
-          weight: ML_RATING_WEIGHT,
-          movieFeatures: mf,
-          userFeatures: uf,
-          householdFeatures: emptyHouseholdFeatures,
-        });
-      }
+	        mlRatings.push({
+	          userId: `ml_${r.mlUserId}`,
+	          movieId: r.movieId,
+	          rating: normalizeRating(r.rating, uf.ratingMean, uf.ratingStdDev),
+	          weight: mlRatingWeight,
+	          movieFeatures: mf,
+	          userFeatures: uf,
+	          householdFeatures: emptyHouseholdFeatures,
+	        });
+	      }
 
       // Add ML user features to cache (for vector initialization)
       for (const [mlUserId, features] of mlUserFeatureCache) {
         userFeatureCache.set(mlUserId, features);
       }
 
-      console.log(`[MF Train] Built ${mlRatings.length} ML training examples (weight: ${ML_RATING_WEIGHT})`);
-    }
+	      console.log(`[MF Train] Built ${mlRatings.length} ML training examples (weight: ${mlRatingWeight})`);
+	    }
 
     // Deterministic ML split: train vs validation (for drift monitoring)
     const mlTrainingRatings: Rating[] = [];
@@ -1216,19 +1251,17 @@ export async function trainMatrixFactorization(
       let bestFeatureEmbeddings: Map<string, { vector: number[]; bias: number }> | null = null;
 
       for (let epoch = 0; epoch < epochs; epoch++) {
-        let epochTraining: Rating[];
-        if (mlTrainingRatings.length > ML_SAMPLE_PER_EPOCH) {
-          const sampledML = [...mlTrainingRatings].sort(() => Math.random() - 0.5).slice(0, ML_SAMPLE_PER_EPOCH);
-          epochTraining = [...householdTrainingSet, ...sampledML];
-        } else {
-          epochTraining = trainingSet;
-        }
+	        let epochTraining: Rating[];
+	        if (mlTrainingRatings.length > mlSamplePerEpoch) {
+	          const rand = mulberry32(fnv1a32(`ml-sample:${epoch}`));
+	          const sampledML = reservoirSample(mlTrainingRatings, mlSamplePerEpoch, rand);
+	          epochTraining = [...householdTrainingSet, ...sampledML];
+	        } else {
+	          epochTraining = trainingSet;
+	        }
 
-        // Shuffle
-        for (let i = epochTraining.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [epochTraining[i], epochTraining[j]] = [epochTraining[j], epochTraining[i]];
-        }
+	        // Shuffle (seeded for reproducibility between retrains)
+	        shuffleInPlace(epochTraining, mulberry32(fnv1a32(`epoch-shuffle:${epoch}`)));
 
         let totalSquaredError = 0;
         let householdCount = 0;
