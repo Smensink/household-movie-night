@@ -51,6 +51,7 @@ type EvalMovie = {
   popularity: number | null;
   voteAverage: number | null;
   voteCount: number | null;
+  mlRatingCount: number | null;
   imdbRating: number | null;
   letterboxdRating: number | null;
   genres: Array<{ genreId: string }>;
