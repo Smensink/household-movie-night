@@ -12,6 +12,15 @@ interface AffinityItem {
   ratingCount: number;
 }
 
+interface ArchetypeMovieExample {
+  id: string;
+  title: string;
+  year: number | null;
+  posterUrl: string | null;
+  uniqueness: number;
+  similarity: number;
+}
+
 interface ProfileStats {
   user: {
     id: string;
@@ -65,6 +74,8 @@ interface ProfileStats {
     dispositionExplanation: string;
     topGenres: { name: string; score: number }[];
     archetypeSimilarities?: { name: string; score: number }[];
+    archetypeLovedMovies?: ArchetypeMovieExample[];
+    archetypeHatedMovies?: ArchetypeMovieExample[];
     ratingMean: number | null;
     ratingStdDev: number | null;
   } | null;
@@ -287,6 +298,72 @@ function MoviePersonalityCard({
             </div>
           </div>
         )}
+
+        {/* Archetype example movies */}
+        {(personality.archetypeLovedMovies?.length || personality.archetypeHatedMovies?.length) ? (
+          <div>
+            <div className="text-xs text-muted uppercase tracking-wide mb-2">
+              Archetype Examples
+            </div>
+            <div className="text-xs text-muted mb-3">
+              Movies the model thinks this archetype is unusually likely to love or avoid (compared to other archetypes).
+            </div>
+
+            {personality.archetypeLovedMovies && personality.archetypeLovedMovies.length > 0 && (
+              <div className="mb-4">
+                <div className="text-sm font-medium mb-2">Uniquely Loved</div>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                  {personality.archetypeLovedMovies.slice(0, 12).map((m) => (
+                    <div key={m.id} className="space-y-1">
+                      {m.posterUrl ? (
+                        <img
+                          src={m.posterUrl}
+                          alt={m.title}
+                          title={`${m.title}${m.year ? ` (${m.year})` : ""}`}
+                          className="w-full aspect-[2/3] object-cover rounded-lg"
+                        />
+                      ) : (
+                        <div className="w-full aspect-[2/3] bg-border rounded-lg flex items-center justify-center">
+                          <span className="text-xs text-muted">No poster</span>
+                        </div>
+                      )}
+                      <div className="text-[11px] font-medium truncate">
+                        {m.title}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {personality.archetypeHatedMovies && personality.archetypeHatedMovies.length > 0 && (
+              <div>
+                <div className="text-sm font-medium mb-2">Uniquely Avoided</div>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                  {personality.archetypeHatedMovies.slice(0, 12).map((m) => (
+                    <div key={m.id} className="space-y-1">
+                      {m.posterUrl ? (
+                        <img
+                          src={m.posterUrl}
+                          alt={m.title}
+                          title={`${m.title}${m.year ? ` (${m.year})` : ""}`}
+                          className="w-full aspect-[2/3] object-cover rounded-lg"
+                        />
+                      ) : (
+                        <div className="w-full aspect-[2/3] bg-border rounded-lg flex items-center justify-center">
+                          <span className="text-xs text-muted">No poster</span>
+                        </div>
+                      )}
+                      <div className="text-[11px] font-medium truncate">
+                        {m.title}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : null}
 
         {/* Viewing Traits */}
         {personality.traits.length > 0 && (

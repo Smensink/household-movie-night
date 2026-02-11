@@ -31,11 +31,87 @@ type TopMovie = {
   movieId: string;
   title: string;
   year: number | null;
+  runtime: number | null;
   score: number;
   imdbRating: number | null;
   voteCount: number | null;
   genres: string[];
+  directors: string[];
+  studios: string[];
+  tags: string[];
+  originalLanguage: string | null;
+  era: string | null;
 };
+
+function topEntries(map: Map<string, number>, n: number): Array<{ key: string; value: number }> {
+  return Array.from(map.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([key, value]) => ({ key, value }));
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid];
+  return (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function decadeLabel(year: number): string {
+  const d = Math.floor(year / 10) * 10;
+  return `${d}s`;
+}
+
+function summarizeMovies(movies: TopMovie[]) {
+  const genreCounts = new Map<string, number>();
+  const directorCounts = new Map<string, number>();
+  const studioCounts = new Map<string, number>();
+  const tagScores = new Map<string, number>();
+  const eraCounts = new Map<string, number>();
+  const langCounts = new Map<string, number>();
+  const decadeCounts = new Map<string, number>();
+
+  const runtimes: number[] = [];
+  const years: number[] = [];
+  const imdbRatings: number[] = [];
+  const voteCounts: number[] = [];
+
+  for (const m of movies) {
+    for (const g of m.genres) genreCounts.set(g, (genreCounts.get(g) || 0) + 1);
+    for (const d of m.directors) directorCounts.set(d, (directorCounts.get(d) || 0) + 1);
+    for (const s of m.studios) studioCounts.set(s, (studioCounts.get(s) || 0) + 1);
+    for (const t of m.tags) tagScores.set(t, (tagScores.get(t) || 0) + 1);
+    if (m.era) eraCounts.set(m.era, (eraCounts.get(m.era) || 0) + 1);
+    if (m.originalLanguage) langCounts.set(m.originalLanguage, (langCounts.get(m.originalLanguage) || 0) + 1);
+    if (m.runtime != null) runtimes.push(m.runtime);
+    if (m.year != null) {
+      years.push(m.year);
+      decadeCounts.set(decadeLabel(m.year), (decadeCounts.get(decadeLabel(m.year)) || 0) + 1);
+    }
+    if (m.imdbRating != null) imdbRatings.push(m.imdbRating);
+    if (m.voteCount != null) voteCounts.push(m.voteCount);
+  }
+
+  const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+
+  return {
+    topGenres: topEntries(genreCounts, 6),
+    topDirectors: topEntries(directorCounts, 5),
+    topStudios: topEntries(studioCounts, 5),
+    topTags: topEntries(tagScores, 8),
+    topEras: topEntries(eraCounts, 3),
+    topLangs: topEntries(langCounts, 3),
+    topDecades: topEntries(decadeCounts, 5),
+    runtimeAvg: avg(runtimes),
+    runtimeMedian: median(runtimes),
+    yearMin: years.length ? Math.min(...years) : null,
+    yearMax: years.length ? Math.max(...years) : null,
+    yearMedian: median(years),
+    imdbAvg: avg(imdbRatings),
+    voteCountAvg: avg(voteCounts),
+  };
+}
 
 async function main() {
   const metadata = await prisma.mFModelMetadata.findFirst({
@@ -66,9 +142,19 @@ async function main() {
       id: true,
       title: true,
       year: true,
+      runtime: true,
+      originalLanguage: true,
+      era: true,
       imdbRating: true,
       voteCount: true,
       genres: { select: { genre: { select: { name: true } } } },
+      crew: {
+        where: { job: "Director" },
+        select: { person: { select: { name: true } } },
+        take: 2,
+      },
+      studios: { select: { studio: { select: { name: true } } }, take: 2 },
+      movieTags: { select: { tag: true, relevance: true }, orderBy: { relevance: "desc" }, take: 6 },
     },
   });
   const candidateIds = candidateMovies.map((m) => m.id);
@@ -96,9 +182,15 @@ async function main() {
       {
         title: m.title,
         year: m.year ?? null,
+        runtime: m.runtime ?? null,
+        originalLanguage: m.originalLanguage ?? null,
+        era: m.era ?? null,
         imdbRating: m.imdbRating ?? null,
         voteCount: m.voteCount ?? null,
         genres: (m.genres || []).map((g) => g.genre.name).filter(Boolean).slice(0, 3),
+        directors: (m.crew || []).map((c) => c.person.name).filter(Boolean).slice(0, 2),
+        studios: (m.studios || []).map((s) => s.studio.name).filter(Boolean).slice(0, 2),
+        tags: (m.movieTags || []).map((t) => t.tag).filter(Boolean).slice(0, 4),
       },
     ])
   );
@@ -122,10 +214,16 @@ async function main() {
         movieId,
         title: meta.title,
         year: meta.year,
+        runtime: meta.runtime,
         score,
         imdbRating: meta.imdbRating,
         voteCount: meta.voteCount,
         genres: meta.genres,
+        directors: meta.directors,
+        studios: meta.studios,
+        tags: meta.tags,
+        originalLanguage: meta.originalLanguage,
+        era: meta.era,
       };
 
       // maintain top-10
@@ -161,8 +259,50 @@ async function main() {
     console.log("Top movies (by centroid score):");
     for (const m of top) {
       console.log(
-        `- ${m.title}${m.year ? ` (${m.year})` : ""} score=${m.score.toFixed(2)} genres=${m.genres.join("/") || "?"} imdb=${m.imdbRating ?? "?"} votes=${m.voteCount ?? "?"}`
+        `- ${m.title}${m.year ? ` (${m.year})` : ""} score=${m.score.toFixed(2)} ` +
+          `genres=${m.genres.join("/") || "?"} ` +
+          `dir=${m.directors.join(", ") || "?"} ` +
+          `rt=${m.runtime ?? "?"}m ` +
+          `studio=${m.studios.join(", ") || "?"} ` +
+          `tags=${m.tags.join(", ") || "?"} ` +
+          `imdb=${m.imdbRating ?? "?"} votes=${m.voteCount ?? "?"}`
       );
+    }
+    console.log("");
+
+    // Summarize what this archetype "looks like" based on its top-scoring movies.
+    const signature = summarizeMovies(top.slice(0, 10));
+    console.log("Signature (from top movies):");
+    if (signature.yearMin != null && signature.yearMax != null) {
+      console.log(
+        `- Year: ${signature.yearMin}..${signature.yearMax} (median ${signature.yearMedian ?? "?"})`
+      );
+    }
+    if (signature.runtimeAvg != null) {
+      console.log(
+        `- Runtime: avg ${signature.runtimeAvg.toFixed(0)}m (median ${signature.runtimeMedian?.toFixed(0) ?? "?"}m)`
+      );
+    }
+    if (signature.imdbAvg != null) {
+      console.log(`- IMDb: avg ${signature.imdbAvg.toFixed(1)} (votes avg ${signature.voteCountAvg?.toFixed(0) ?? "?"})`);
+    }
+    if (signature.topDecades.length > 0) {
+      console.log(`- Decades: ${signature.topDecades.map((d) => d.key).join(", ")}`);
+    }
+    if (signature.topEras.length > 0) {
+      console.log(`- Era: ${signature.topEras.map((e) => `${e.key}(${e.value})`).join(", ")}`);
+    }
+    if (signature.topLangs.length > 0) {
+      console.log(`- Languages: ${signature.topLangs.map((l) => `${l.key}(${l.value})`).join(", ")}`);
+    }
+    if (signature.topDirectors.length > 0) {
+      console.log(`- Recurring directors: ${signature.topDirectors.map((d) => `${d.key}(${d.value})`).join(", ")}`);
+    }
+    if (signature.topStudios.length > 0) {
+      console.log(`- Recurring studios: ${signature.topStudios.map((s) => `${s.key}(${s.value})`).join(", ")}`);
+    }
+    if (signature.topTags.length > 0) {
+      console.log(`- Common tags: ${signature.topTags.map((t) => `${t.key}(${t.value})`).join(", ")}`);
     }
     console.log("");
 

@@ -812,8 +812,9 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
 	    };
 	    latentDimensions?: number;
 	    featureDimensions?: number;
-      // Viewer archetype clustering (ML user vectors) configuration
-      archetypeClusters?: number; // default 8
+	    // Viewer archetype clustering (ML user vectors) configuration
+	    archetypeClusters?: number; // default 8
+      archetypeDistance?: "euclidean" | "cosine"; // default cosine
 	    earlyStopping?: {
 	      enabled?: boolean;
 	      patience?: number;
@@ -850,6 +851,7 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
   const latentDimensions = options.latentDimensions ?? DEFAULT_LATENT_DIMENSIONS;
   const featureDimensions = options.featureDimensions ?? DEFAULT_FEATURE_DIMENSIONS;
   const archetypeClusters = Math.max(2, Math.floor(options.archetypeClusters ?? 8));
+  const archetypeDistance: "euclidean" | "cosine" = options.archetypeDistance ?? "cosine";
 
   const earlyStoppingEnabled = options.earlyStopping?.enabled === true;
   const earlyStoppingPatience = Math.max(1, Math.floor(options.earlyStopping?.patience ?? 3));
@@ -2483,7 +2485,8 @@ async function buildUserFeatureCache(userId: string): Promise<UserFeatures> {
         householdUserVectors,
         mlRatings,
         userFeatureCache,
-        archetypeClusters
+        archetypeClusters,
+        archetypeDistance
       );
     }
 
@@ -3109,6 +3112,26 @@ function euclideanDistance(a: number[], b: number[]): number {
   return Math.sqrt(sum);
 }
 
+function vectorNorm(a: number[]): number {
+  let sumSq = 0;
+  for (let i = 0; i < a.length; i++) sumSq += a[i] * a[i];
+  return Math.sqrt(sumSq);
+}
+
+function normalizeVector(a: number[]): number[] {
+  const n = vectorNorm(a);
+  if (!Number.isFinite(n) || n <= 0) return a;
+  return a.map((v) => v / n);
+}
+
+function cosineDistanceUnit(aUnit: number[], bUnit: number[]): number {
+  // Assumes both vectors are already unit-normalized.
+  const sim = dotProduct(aUnit, bUnit);
+  // Numerical guard: sim can drift outside [-1,1] slightly.
+  const clamped = Math.max(-1, Math.min(1, sim));
+  return 1 - clamped;
+}
+
 function softmaxNegDistances(distances: { id: string; dist: number }[]): Record<string, number> {
   if (distances.length === 0) return {};
   const avg = distances.reduce((s, d) => s + d.dist, 0) / distances.length;
@@ -3128,54 +3151,133 @@ function softmaxNegDistances(distances: { id: string; dist: number }[]): Record<
 function kMeansClustering(
   vectors: Map<string, number[]>,
   k: number,
-  iterations: number = 20
+  iterations: number = 20,
+  distanceMetric: "euclidean" | "cosine" = "euclidean",
+  seedKey: string = "kmeans"
 ): ClusterResult[] {
   const ids = Array.from(vectors.keys());
-  if (ids.length < k) return [];
+  const n = ids.length;
+  if (n < k) return [];
 
   const dims = vectors.get(ids[0])!.length;
 
-  // Initialize centroids deterministically (stable between retrains).
-  const shuffled = [...ids].sort((a, b) => fnv1a32(`kmeans-init:${a}`) - fnv1a32(`kmeans-init:${b}`));
-  const centroids: number[][] = shuffled.slice(0, k).map((id) => [...vectors.get(id)!]);
+  // Convert to arrays for performance.
+  const vecs: number[][] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = vectors.get(ids[i])!;
+    vecs[i] = distanceMetric === "cosine" ? normalizeVector(v) : v;
+  }
 
-  const assignments = new Map<string, number>();
+  const distFn = (a: number[], b: number[]) =>
+    distanceMetric === "cosine" ? cosineDistanceUnit(a, b) : euclideanDistance(a, b);
+
+  // Deterministic RNG.
+  const rand = mulberry32(fnv1a32(`kmeans++:${seedKey}:${k}:${distanceMetric}`));
+
+  // k-means++ initialization (deterministic, seeded)
+  const centroids: number[][] = [];
+
+  // Choose first centroid as the id with minimum stable hash (avoids needing a full sort).
+  let firstIdx = 0;
+  let bestHash = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < n; i++) {
+    const h = fnv1a32(`kmeans++:first:${seedKey}:${ids[i]}`);
+    if (h < bestHash) {
+      bestHash = h;
+      firstIdx = i;
+    }
+  }
+  centroids.push([...vecs[firstIdx]]);
+
+  const minDistSq = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const d = distFn(vecs[i], centroids[0]);
+    minDistSq[i] = Math.max(1e-12, d * d);
+  }
+
+  while (centroids.length < k) {
+    let total = 0;
+    for (let i = 0; i < n; i++) total += minDistSq[i];
+    if (!Number.isFinite(total) || total <= 0) break;
+
+    const pick = rand() * total;
+    let acc = 0;
+    let chosen = 0;
+    for (let i = 0; i < n; i++) {
+      acc += minDistSq[i];
+      if (acc >= pick) {
+        chosen = i;
+        break;
+      }
+    }
+    centroids.push([...vecs[chosen]]);
+
+    // Update min distance to closest centroid.
+    const newC = centroids[centroids.length - 1];
+    for (let i = 0; i < n; i++) {
+      const d = distFn(vecs[i], newC);
+      const dsq = Math.max(1e-12, d * d);
+      if (dsq < minDistSq[i]) minDistSq[i] = dsq;
+    }
+  }
+
+  // Main k-means iterations.
+  const assignments = new Int32Array(n);
+  assignments.fill(-1);
 
   for (let iter = 0; iter < iterations; iter++) {
     // Assignment step
-    for (const id of ids) {
-      const vec = vectors.get(id)!;
-      let minDist = Infinity;
+    for (let i = 0; i < n; i++) {
+      const v = vecs[i];
+      let minDist = Number.POSITIVE_INFINITY;
       let best = 0;
-      for (let c = 0; c < k; c++) {
-        const dist = euclideanDistance(vec, centroids[c]);
-        if (dist < minDist) {
-          minDist = dist;
+      for (let c = 0; c < centroids.length; c++) {
+        const d = distFn(v, centroids[c]);
+        if (d < minDist) {
+          minDist = d;
           best = c;
         }
       }
-      assignments.set(id, best);
+      assignments[i] = best;
     }
 
-    // Update step
-    for (let c = 0; c < k; c++) {
-      const members = ids.filter((id) => assignments.get(id) === c);
-      if (members.length === 0) continue;
-      const newCentroid = new Array(dims).fill(0);
-      for (const id of members) {
-        const vec = vectors.get(id)!;
-        for (let d = 0; d < dims; d++) {
-          newCentroid[d] += vec[d] / members.length;
-        }
+    // Update step (accumulate sums for each cluster)
+    const sums: number[][] = new Array(centroids.length);
+    const counts = new Int32Array(centroids.length);
+    for (let c = 0; c < centroids.length; c++) {
+      sums[c] = new Array(dims).fill(0);
+    }
+
+    for (let i = 0; i < n; i++) {
+      const c = assignments[i];
+      counts[c] += 1;
+      const v = vecs[i];
+      const s = sums[c];
+      for (let d = 0; d < dims; d++) {
+        s[d] += v[d];
       }
-      centroids[c] = newCentroid;
+    }
+
+    for (let c = 0; c < centroids.length; c++) {
+      const count = counts[c];
+      if (count <= 0) continue;
+      const s = sums[c];
+      for (let d = 0; d < dims; d++) s[d] /= count;
+      centroids[c] = distanceMetric === "cosine" ? normalizeVector(s) : s;
     }
   }
 
   // Build results, filter tiny clusters
+  const membersByCluster: string[][] = new Array(centroids.length);
+  for (let c = 0; c < centroids.length; c++) membersByCluster[c] = [];
+  for (let i = 0; i < n; i++) {
+    const c = assignments[i];
+    if (c >= 0 && c < membersByCluster.length) membersByCluster[c].push(ids[i]);
+  }
+
   const results: ClusterResult[] = [];
-  for (let c = 0; c < k; c++) {
-    const members = ids.filter((id) => assignments.get(id) === c);
+  for (let c = 0; c < centroids.length; c++) {
+    const members = membersByCluster[c];
     if (members.length >= 50) {
       results.push({ centroid: centroids[c], memberIds: members });
     }
@@ -3375,7 +3477,8 @@ async function clusterAndSaveArchetypes(
   householdUserVectors: Map<string, number[]>,
   mlRatings: Rating[],
   userFeatureCache: Map<string, UserFeatures>,
-  k: number = 8
+  k: number = 8,
+  distanceMetric: "euclidean" | "cosine" = "cosine"
 ): Promise<void> {
   // Extract ML user vectors
   const mlVectors = new Map<string, number[]>();
@@ -3391,7 +3494,7 @@ async function clusterAndSaveArchetypes(
   }
 
   console.log(`[MF Train] Clustering ${mlVectors.size} ML users into ${k} archetypes...`);
-  const clusters = kMeansClustering(mlVectors, k);
+  const clusters = kMeansClustering(mlVectors, k, 20, distanceMetric, "ml-users");
   console.log(`[MF Train] Found ${clusters.length} valid clusters`);
 
   if (clusters.length === 0) return;
@@ -3463,12 +3566,21 @@ async function clusterAndSaveArchetypes(
 
   // Match household users to nearest archetype
   let matched = 0;
+  const archetypeCentroidsForDistance =
+    distanceMetric === "cosine"
+      ? archetypeIds.map((a) => ({ ...a, centroid: normalizeVector(a.centroid) }))
+      : archetypeIds;
+
   for (const [userId, userVec] of householdUserVectors) {
+    const userVecForDistance = distanceMetric === "cosine" ? normalizeVector(userVec) : userVec;
     let minDist = Infinity;
     let bestId: string | null = null;
     const dists: { id: string; dist: number }[] = [];
-    for (const arch of archetypeIds) {
-      const dist = euclideanDistance(userVec, arch.centroid);
+    for (const arch of archetypeCentroidsForDistance) {
+      const dist =
+        distanceMetric === "cosine"
+          ? cosineDistanceUnit(userVecForDistance, arch.centroid)
+          : euclideanDistance(userVecForDistance, arch.centroid);
       dists.push({ id: arch.id, dist });
       if (dist < minDist) {
         minDist = dist;

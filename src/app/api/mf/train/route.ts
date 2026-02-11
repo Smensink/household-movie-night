@@ -66,6 +66,7 @@ export async function POST(req: NextRequest) {
       mlRatingWeight: body.mlRatingWeight,
       mlSamplePerEpoch: body.mlSamplePerEpoch,
       archetypeClusters: body.archetypeClusters,
+      archetypeDistance: body.archetypeDistance,
       epochEval: body.epochEval,
       earlyStopping: body.earlyStopping,
     });

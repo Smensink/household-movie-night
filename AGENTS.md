@@ -696,3 +696,9 @@ Core entities in `prisma/schema.prisma`:
   - Added `scripts/explore-archetypes.ts` to dump archetype descriptions and sample top/bottom movies for each centroid; intended for repeatable post-train cluster inspection.
 - 2026-02-10 (Archetype report in prod):
   - Docker runtime image now copies `scripts/` so `scripts/explore-archetypes.ts` can be executed inside the running `app` container without needing a full source checkout.
+  - `scripts/explore-archetypes.ts` now prints richer archetype signatures from top-scoring movies (directors, studios, tags, runtime, year/decades, language, era), not just genres.
+- 2026-02-11 (Archetype separation + profile examples):
+  - Updated viewer archetype clustering to support deterministic k-means++ centroid seeding and cosine distance, improving cluster separation and repeatability across retrains (`src/lib/matrix-factorization.ts`).
+  - Wired `archetypeDistance` through `POST /api/mf/train` so retrains can explicitly choose `"cosine"` vs `"euclidean"` (`src/app/api/mf/train/route.ts`).
+  - Profile stats now includes "uniquely loved" and "uniquely avoided" movie examples for the user’s archetype, based on cosine similarity margin vs other archetypes; Profile UI renders these as poster grids (`src/app/api/profile/stats/route.ts`, `src/app/(app)/profile/page.tsx`).
+  - Learned product preference: archetype outputs should be interpretable with concrete movie examples, and clustering should be more diverse than genre-only naming.

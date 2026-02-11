@@ -10,6 +10,15 @@ interface AffinityItem {
   ratingCount: number;
 }
 
+interface ArchetypeMovieExample {
+  id: string;
+  title: string;
+  year: number | null;
+  posterUrl: string | null;
+  uniqueness: number; // margin vs other archetypes (cosine similarity)
+  similarity: number; // cosine similarity
+}
+
 interface ProfileStats {
   user: {
     id: string;
@@ -63,6 +72,8 @@ interface ProfileStats {
     dispositionExplanation: string;
     topGenres: { name: string; score: number }[];
     archetypeSimilarities?: { name: string; score: number }[];
+    archetypeLovedMovies?: ArchetypeMovieExample[];
+    archetypeHatedMovies?: ArchetypeMovieExample[];
     ratingMean: number | null;
     ratingStdDev: number | null;
   } | null;
@@ -70,6 +81,42 @@ interface ProfileStats {
 
 function normalizeRating(rating: number): number {
   return (rating - 3) / 2; // Convert 1-5 to -1 to 1
+}
+
+function parseVector(json: string, expectedDims?: number): number[] | null {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    const vec: number[] = [];
+    for (const v of parsed) {
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n)) return null;
+      vec.push(n);
+    }
+    if (expectedDims != null && vec.length !== expectedDims) return null;
+    return vec;
+  } catch {
+    return null;
+  }
+}
+
+function dot(a: number[], b: number[]): number {
+  let sum = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) sum += a[i] * b[i];
+  return sum;
+}
+
+function norm(a: number[]): number {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * a[i];
+  return Math.sqrt(s);
+}
+
+function normalizeUnit(a: number[]): number[] | null {
+  const n = norm(a);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return a.map((v) => v / n);
 }
 
 // Weight for direct ratings vs inferred from movies
@@ -141,7 +188,7 @@ export async function GET(req: NextRequest) {
     }),
     prisma.userSettings.findUnique({
       where: { userId },
-      select: { explorationFactor: true, discoverySourcePref: true },
+      select: { explorationFactor: true, discoverySourcePref: true, minVoteCount: true },
     }),
     prisma.genre.count(),
     prisma.genreRanking.findMany({
@@ -412,6 +459,110 @@ export async function GET(req: NextRequest) {
       ratingMean: userFeatureCache.ratingMean,
       ratingStdDev: userFeatureCache.ratingStdDev,
     };
+
+    // Provide concrete movie examples that are "uniquely" high/low for this archetype.
+    // This is based on archetype centroid similarity to movie latent vectors (cosine similarity),
+    // and the margin versus other archetypes.
+    try {
+      const archetypes = await prisma.viewerArchetype.findMany({
+        select: { id: true, centroid: true },
+      });
+
+      const target = archetypes.find((a) => a.id === arch.id);
+      if (target && archetypes.length >= 2) {
+        const targetVec = parseVector(target.centroid);
+        if (targetVec) {
+          const dims = targetVec.length;
+          const targetUnit = normalizeUnit(targetVec);
+          const otherUnits = archetypes
+            .filter((a) => a.id !== arch.id)
+            .map((a) => {
+              const v = parseVector(a.centroid, dims);
+              const u = v ? normalizeUnit(v) : null;
+              return u ? { id: a.id, unit: u } : null;
+            })
+            .filter(Boolean) as Array<{ id: string; unit: number[] }>;
+
+          if (targetUnit && otherUnits.length > 0) {
+            const minVoteCount = Math.max(0, Math.floor(settings?.minVoteCount ?? 500));
+            const candidates = await prisma.movie.findMany({
+              where: {
+                posterUrl: { not: null },
+                OR: [
+                  { voteCount: { gte: minVoteCount } },
+                  { imdbVotes: { gte: Math.max(1000, minVoteCount * 2) } },
+                  { mlRatingCount: { gte: 500 } },
+                ],
+              },
+              select: { id: true, title: true, year: true, posterUrl: true },
+              orderBy: [{ voteCount: "desc" }, { imdbVotes: "desc" }, { updatedAt: "desc" }],
+              take: 2000,
+            });
+
+            const ids = candidates.map((m) => m.id);
+            const vectors = await prisma.latentVector.findMany({
+              where: { entityType: "movie", entityId: { in: ids } },
+              select: { entityId: true, vector: true },
+            });
+            const vecById = new Map(vectors.map((v) => [v.entityId, v.vector]));
+
+            const loved: ArchetypeMovieExample[] = [];
+            const hated: ArchetypeMovieExample[] = [];
+
+            for (const m of candidates) {
+              const raw = vecById.get(m.id);
+              if (!raw) continue;
+              const mv = parseVector(raw, dims);
+              if (!mv) continue;
+              const mvUnit = normalizeUnit(mv);
+              if (!mvUnit) continue;
+
+              const tSim = dot(targetUnit, mvUnit);
+              let maxOther = -Infinity;
+              let minOther = Infinity;
+              for (const o of otherUnits) {
+                const s = dot(o.unit, mvUnit);
+                if (s > maxOther) maxOther = s;
+                if (s < minOther) minOther = s;
+              }
+
+              const loveMargin = tSim - maxOther;
+              const hateMargin = minOther - tSim;
+
+              // Avoid noisy picks: require both margin and absolute position.
+              if (Number.isFinite(loveMargin) && loveMargin > 0.06 && tSim > 0.08) {
+                loved.push({
+                  id: m.id,
+                  title: m.title,
+                  year: m.year ?? null,
+                  posterUrl: m.posterUrl ?? null,
+                  uniqueness: loveMargin,
+                  similarity: tSim,
+                });
+              }
+              if (Number.isFinite(hateMargin) && hateMargin > 0.06 && tSim < 0.02) {
+                hated.push({
+                  id: m.id,
+                  title: m.title,
+                  year: m.year ?? null,
+                  posterUrl: m.posterUrl ?? null,
+                  uniqueness: hateMargin,
+                  similarity: tSim,
+                });
+              }
+            }
+
+            loved.sort((a, b) => b.uniqueness - a.uniqueness);
+            hated.sort((a, b) => b.uniqueness - a.uniqueness);
+
+            moviePersonality.archetypeLovedMovies = loved.slice(0, 12);
+            moviePersonality.archetypeHatedMovies = hated.slice(0, 12);
+          }
+        }
+      }
+    } catch {
+      // Best-effort: profile should still render even if archetype examples fail.
+    }
   }
 
   const stats: ProfileStats = {
@@ -456,8 +607,6 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(stats);
 }
-
-
 
 
 
