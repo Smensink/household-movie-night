@@ -3024,6 +3024,196 @@ export async function isSystemInactive(durationMinutes: number): Promise<boolean
   return !recentActivity;
 }
 
+function parseStoredVector(vectorJson: string): number[] | null {
+  try {
+    const parsed = JSON.parse(vectorJson) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    const vector: number[] = [];
+    for (const value of parsed) {
+      const numeric = typeof value === "number" ? value : Number(value);
+      if (!Number.isFinite(numeric)) return null;
+      vector.push(numeric);
+    }
+    return vector.length > 0 ? vector : null;
+  } catch {
+    return null;
+  }
+}
+
+function inferUserVectorFromMovieRatings(
+  ratings: Array<{ movieId: string; rating: number }>,
+  movieVectors: Map<string, number[]>
+): number[] | null {
+  let dims = 0;
+  for (const vector of movieVectors.values()) {
+    dims = vector.length;
+    break;
+  }
+  if (dims <= 0) return null;
+
+  const weighted = new Array(dims).fill(0);
+  const unweighted = new Array(dims).fill(0);
+  let absWeightSum = 0;
+  let count = 0;
+
+  for (const row of ratings) {
+    const vector = movieVectors.get(row.movieId);
+    if (!vector || vector.length !== dims) continue;
+    const centered = (row.rating - 3) / 2; // 1..5 -> -1..1
+    const w = Math.abs(centered) >= 0.05 ? centered : 0;
+    for (let i = 0; i < dims; i++) {
+      unweighted[i] += vector[i];
+      if (w !== 0) {
+        weighted[i] += vector[i] * w;
+      }
+    }
+    absWeightSum += Math.abs(w);
+    count++;
+  }
+
+  if (count === 0) return null;
+
+  if (absWeightSum > 0) {
+    return weighted.map((v) => v / absWeightSum);
+  }
+  return unweighted.map((v) => v / count);
+}
+
+/**
+ * Refresh cached user summary fields and (re)assign the user to existing archetypes.
+ * This does NOT run k-means; it only compares the user's vector to stored centroids.
+ */
+export async function refreshUserFeatureCacheAndArchetype(
+  userId: string
+): Promise<{ assigned: boolean; reason: string; archetypeId?: string }> {
+  const [settings, genreRankings, movieRatings] = await Promise.all([
+    prisma.userSettings.findUnique({
+      where: { userId },
+      select: { explorationFactor: true },
+    }),
+    prisma.genreRanking.findMany({
+      where: { userId },
+      orderBy: { rank: "asc" },
+      take: 5,
+      select: { genreId: true },
+    }),
+    prisma.movieRating.findMany({
+      where: { userId, rating: { not: null }, notHeardOf: false },
+      select: { movieId: true, rating: true },
+    }),
+  ]);
+
+  const ratings = movieRatings.map((r) => r.rating as number);
+  const ratingCount = ratings.length;
+  const ratingMean = ratingCount > 0 ? ratings.reduce((a, b) => a + b, 0) / ratingCount : 3.0;
+  const ratingVariance =
+    ratingCount > 1
+      ? ratings.reduce((sum, r) => sum + Math.pow(r - ratingMean, 2), 0) / (ratingCount - 1)
+      : 0;
+  const ratingStdDev = Math.sqrt(Math.max(0, ratingVariance));
+  const ratingDisposition = classifyRatingDisposition(ratingMean, ratingStdDev, ratingCount);
+
+  await prisma.userFeatureCache.upsert({
+    where: { userId },
+    create: {
+      userId,
+      explorationFactor: settings?.explorationFactor ?? 0.5,
+      ratingMean,
+      ratingStdDev,
+      ratingCount,
+      ratingDisposition,
+      topGenreIds: JSON.stringify(genreRankings.map((g) => g.genreId)),
+    },
+    update: {
+      explorationFactor: settings?.explorationFactor ?? 0.5,
+      ratingMean,
+      ratingStdDev,
+      ratingCount,
+      ratingDisposition,
+      topGenreIds: JSON.stringify(genreRankings.map((g) => g.genreId)),
+    },
+  });
+
+  const archetypesRaw = await prisma.viewerArchetype.findMany({
+    select: { id: true, centroid: true },
+  });
+  if (archetypesRaw.length === 0) {
+    return { assigned: false, reason: "no_archetypes" };
+  }
+
+  const archetypes = archetypesRaw
+    .map((a) => ({ id: a.id, centroid: parseStoredVector(a.centroid) }))
+    .filter((a): a is { id: string; centroid: number[] } => Array.isArray(a.centroid) && a.centroid.length > 0);
+  if (archetypes.length === 0) {
+    return { assigned: false, reason: "invalid_archetype_centroids" };
+  }
+
+  const userVectorRow = await prisma.latentVector.findUnique({
+    where: { entityType_entityId: { entityType: "user", entityId: userId } },
+    select: { vector: true },
+  });
+
+  let userVector = userVectorRow?.vector ? parseStoredVector(userVectorRow.vector) : null;
+
+  if (!userVector && movieRatings.length > 0) {
+    const movieVectorRows = await prisma.latentVector.findMany({
+      where: {
+        entityType: "movie",
+        entityId: { in: movieRatings.map((r) => r.movieId) },
+      },
+      select: { entityId: true, vector: true },
+    });
+
+    const movieVectorMap = new Map<string, number[]>();
+    for (const row of movieVectorRows) {
+      const parsed = parseStoredVector(row.vector);
+      if (parsed) {
+        movieVectorMap.set(row.entityId, parsed);
+      }
+    }
+
+    userVector = inferUserVectorFromMovieRatings(
+      movieRatings.map((r) => ({ movieId: r.movieId, rating: r.rating as number })),
+      movieVectorMap
+    );
+  }
+
+  if (!userVector || vectorNorm(userVector) <= 0) {
+    return { assigned: false, reason: "insufficient_user_vector" };
+  }
+
+  const userUnit = normalizeVector(userVector);
+  const archetypeUnits = archetypes
+    .map((a) => ({ id: a.id, centroid: normalizeVector(a.centroid) }))
+    .filter((a) => vectorNorm(a.centroid) > 0);
+
+  if (archetypeUnits.length === 0) {
+    return { assigned: false, reason: "invalid_archetype_unit_vectors" };
+  }
+
+  const distances = archetypeUnits.map((a) => ({
+    id: a.id,
+    dist: cosineDistanceUnit(userUnit, a.centroid),
+  }));
+  distances.sort((a, b) => a.dist - b.dist);
+
+  const best = distances[0];
+  if (!best) {
+    return { assigned: false, reason: "no_distance_match" };
+  }
+
+  const scores = softmaxNegDistances(distances);
+  await prisma.userFeatureCache.updateMany({
+    where: { userId },
+    data: {
+      archetypeId: best.id,
+      archetypeScores: JSON.stringify(scores),
+    },
+  });
+
+  return { assigned: true, reason: "matched_existing_archetypes", archetypeId: best.id };
+}
+
 /**
  * Compute per-movie surprise factors (belief calibration).
  * Compares average satisfaction (hasSeen=true ratings) vs average willingness (hasSeen=false ratings).
@@ -3538,41 +3728,88 @@ async function clusterAndSaveArchetypes(
   }
 
   // Analyze and save each cluster
-  const savedNames = new Set<string>();
+  const existingArchetypes = await prisma.viewerArchetype.findMany({
+    select: { id: true, name: true, centroid: true },
+  });
+
+  const existingForMatching = existingArchetypes
+    .map((a) => ({ id: a.id, name: a.name, centroid: parseStoredVector(a.centroid) }))
+    .filter(
+      (a): a is { id: string; name: string; centroid: number[] } =>
+        Array.isArray(a.centroid) && a.centroid.length === clusters[0]?.centroid.length
+    );
+
+  // Greedy one-to-one cluster matching so manual/curated labels remain stable between retrains.
+  const clusterMatches = new Map<number, { id: string; name: string }>();
+  const usedExistingIds = new Set<string>();
+  for (let clusterIndex = 0; clusterIndex < clusters.length; clusterIndex++) {
+    const cluster = clusters[clusterIndex];
+    const clusterCentroid =
+      distanceMetric === "cosine" ? normalizeVector(cluster.centroid) : cluster.centroid;
+
+    let best: { id: string; name: string; dist: number } | null = null;
+    for (const existing of existingForMatching) {
+      if (usedExistingIds.has(existing.id)) continue;
+      const existingCentroid =
+        distanceMetric === "cosine" ? normalizeVector(existing.centroid) : existing.centroid;
+      if (existingCentroid.length !== clusterCentroid.length) continue;
+      const dist =
+        distanceMetric === "cosine"
+          ? cosineDistanceUnit(clusterCentroid, existingCentroid)
+          : euclideanDistance(clusterCentroid, existingCentroid);
+      if (!Number.isFinite(dist)) continue;
+      if (!best || dist < best.dist) {
+        best = { id: existing.id, name: existing.name, dist };
+      }
+    }
+
+    if (best) {
+      clusterMatches.set(clusterIndex, { id: best.id, name: best.name });
+      usedExistingIds.add(best.id);
+    }
+  }
+
+  const savedNames = new Set<string>(existingArchetypes.map((a) => a.name));
   const archetypeIds: { id: string; centroid: number[] }[] = [];
 
-  for (const cluster of clusters) {
+  for (let clusterIndex = 0; clusterIndex < clusters.length; clusterIndex++) {
+    const cluster = clusters[clusterIndex];
     const analysis = analyzeCluster(cluster, mlRatings, userFeatureCache, genreIdToName, globalGenreShare);
 
-    // Deduplicate names
-    let finalName = analysis.name;
-    let suffix = 2;
-    while (savedNames.has(finalName)) {
-      finalName = `${analysis.name} ${suffix}`;
-      suffix++;
-    }
-    savedNames.add(finalName);
-
-    const archetype = await prisma.viewerArchetype.upsert({
-      where: { name: finalName },
-      create: {
-        name: finalName,
-        description: analysis.description,
-        centroid: JSON.stringify(cluster.centroid),
-        clusterSize: cluster.memberIds.length,
-        topGenres: JSON.stringify(analysis.topGenres),
-        disposition: analysis.disposition,
-        traits: JSON.stringify(analysis.traits),
-      },
-      update: {
-        description: analysis.description,
-        centroid: JSON.stringify(cluster.centroid),
-        clusterSize: cluster.memberIds.length,
-        topGenres: JSON.stringify(analysis.topGenres),
-        disposition: analysis.disposition,
-        traits: JSON.stringify(analysis.traits),
-      },
-    });
+    const matched = clusterMatches.get(clusterIndex);
+    const archetype = matched
+      ? await prisma.viewerArchetype.update({
+          where: { id: matched.id },
+          data: {
+            // Keep stable/manual labels when cluster identity is matched.
+            description: analysis.description,
+            centroid: JSON.stringify(cluster.centroid),
+            clusterSize: cluster.memberIds.length,
+            topGenres: JSON.stringify(analysis.topGenres),
+            disposition: analysis.disposition,
+            traits: JSON.stringify(analysis.traits),
+          },
+        })
+      : await (async () => {
+          let finalName = analysis.name;
+          let suffix = 2;
+          while (savedNames.has(finalName)) {
+            finalName = `${analysis.name} ${suffix}`;
+            suffix++;
+          }
+          savedNames.add(finalName);
+          return prisma.viewerArchetype.create({
+            data: {
+              name: finalName,
+              description: analysis.description,
+              centroid: JSON.stringify(cluster.centroid),
+              clusterSize: cluster.memberIds.length,
+              topGenres: JSON.stringify(analysis.topGenres),
+              disposition: analysis.disposition,
+              traits: JSON.stringify(analysis.traits),
+            },
+          });
+        })();
 
     archetypeIds.push({ id: archetype.id, centroid: cluster.centroid });
   }

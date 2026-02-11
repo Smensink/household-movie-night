@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { getModelMetadata } from "@/lib/matrix-factorization";
+import {
+  getModelMetadata,
+  refreshUserFeatureCacheAndArchetype,
+} from "@/lib/matrix-factorization";
 
 interface AffinityItem {
   id: string;
@@ -218,6 +221,9 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
   }
+
+  // Best-effort refresh: keep user cache/archetype current without requiring full re-clustering.
+  await refreshUserFeatureCacheAndArchetype(userId).catch(() => {});
 
   // Fetch all user data in parallel
   const [

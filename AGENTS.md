@@ -744,3 +744,8 @@ Core entities in `prisma/schema.prisma`:
   - Updated Profile UI affinity percent formatting to truncate to one decimal place (for example `+99.6%` instead of rounding to `+100%`) in `src/app/(app)/profile/page.tsx`.
   - Increased affinity percent label width and enabled tabular numerals so decimal percentages render cleanly on mobile and desktop.
   - Learned product preference: avoid coarse rounded percentages that visually imply certainty (`100%`) when values are only near-max.
+- 2026-02-11 (Retrain/clustering decoupling for new-user archetypes):
+  - Added `refreshUserFeatureCacheAndArchetype(userId)` in `src/lib/matrix-factorization.ts` to refresh per-user cache fields and assign archetypes by comparing user vectors to existing archetype centroids (no k-means rerun required).
+  - Wired this lightweight assignment into movie rating writes (`POST/DELETE /api/ratings`) and profile loads (`GET /api/profile/stats`) so new or recently active users get archetype updates without waiting for full MF retraining.
+  - Updated clustering save flow to preserve existing archetype names across retrains by centroid matching (greedy one-to-one), reducing label churn and preventing manual/curated names from being overwritten on each MF retrain.
+  - Learned product preference: retraining and clustering should remain heavy background jobs, while per-user archetype assignment must be fast and incremental.

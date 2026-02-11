@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { logActivity } from "@/lib/matrix-factorization";
+import {
+  logActivity,
+  refreshUserFeatureCacheAndArchetype,
+} from "@/lib/matrix-factorization";
 
 export async function GET() {
   const session = await auth();
@@ -67,6 +70,7 @@ export async function POST(req: NextRequest) {
 
   // Log activity for MF retraining trigger
   await logActivity(session.user.id, "rating", "movie", movieId);
+  void refreshUserFeatureCacheAndArchetype(session.user.id).catch(() => {});
 
   return NextResponse.json(movieRating);
 }
@@ -88,6 +92,8 @@ export async function DELETE(req: NextRequest) {
       movieId,
     },
   });
+
+  void refreshUserFeatureCacheAndArchetype(session.user.id).catch(() => {});
 
   return NextResponse.json({ success: true });
 }
