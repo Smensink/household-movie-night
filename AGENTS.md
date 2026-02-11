@@ -779,3 +779,7 @@ Core entities in `prisma/schema.prisma`:
     - Unseen: willingness to watch.
     - Seen: how much the user liked it.
   - Learned product preference: watched-state must be explicit and user-controlled anywhere movie ratings are submitted.
+- 2026-02-11 (Near-threshold queue excludes already-rated titles):
+  - Updated `GET /api/radarr/near-threshold/mine` to exclude any movie the requesting user has already rated (including seen/unseen/not-heard states), so the page is always an unrated action queue.
+  - Added defensive client-side filtering on `/preferences/radarr-threshold` to render only unrated candidates and updated summary copy to explicitly describe “unrated near-threshold titles”.
+  - Learned product preference: this queue should function as a pure “next items to rate” surface, not a review/edit list of already-rated movies.

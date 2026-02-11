@@ -42,6 +42,10 @@ interface NearThresholdResponse {
   minAvgRating: number;
 }
 
+function getUnratedCandidates(candidates: Candidate[]): Candidate[] {
+  return candidates.filter((candidate) => !candidate.userRating);
+}
+
 export default function RadarrThresholdPage() {
   const { status } = useSession();
   const router = useRouter();
@@ -173,7 +177,8 @@ export default function RadarrThresholdPage() {
   const totalNearCount = useMemo(
     () =>
       (data?.households || []).reduce(
-        (sum, household) => sum + household.nearThreshold.length,
+        (sum, household) =>
+          sum + getUnratedCandidates(household.nearThreshold).length,
         0
       ),
     [data]
@@ -198,7 +203,7 @@ export default function RadarrThresholdPage() {
           </p>
           {data && (
             <p className="text-xs text-muted mt-2">
-              {totalNearCount} near-threshold title
+              {totalNearCount} unrated near-threshold title
               {totalNearCount === 1 ? "" : "s"} found.
             </p>
           )}
@@ -220,7 +225,11 @@ export default function RadarrThresholdPage() {
         </div>
       ) : (
         <div className="space-y-6">
-          {data.households.map((household) => (
+          {data.households.map((household) => {
+            const unratedMovies = getUnratedCandidates(household.nearThreshold);
+            if (unratedMovies.length === 0) return null;
+
+            return (
             <section key={household.householdId} className="space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <div>
@@ -230,12 +239,12 @@ export default function RadarrThresholdPage() {
                   </p>
                 </div>
                 <span className="text-xs bg-accent-soft text-accent px-2 py-1 rounded-full">
-                  {household.nearThreshold.length} near
+                  {unratedMovies.length} near
                 </span>
               </div>
 
               <div className="space-y-3">
-                {household.nearThreshold.map((movie) => {
+                {unratedMovies.map((movie) => {
                   const rating = movie.userRating?.notHeardOf
                     ? null
                     : movie.userRating?.rating ?? null;
@@ -395,7 +404,7 @@ export default function RadarrThresholdPage() {
                 })}
               </div>
             </section>
-          ))}
+          )})}
         </div>
       )}
     </div>

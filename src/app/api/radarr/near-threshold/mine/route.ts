@@ -84,7 +84,6 @@ export async function GET() {
       ratings: {
         where: {
           userId: { in: allMemberIds },
-          hasSeen: false,
         },
         select: {
           userId: true,
@@ -111,9 +110,13 @@ export async function GET() {
       const nearThreshold: HouseholdCandidate[] = [];
 
       for (const movie of movies) {
+        const userHasAnyRating = movie.ratings.some((rating) => rating.userId === userId);
+        if (userHasAnyRating) continue;
+
         const householdRatings = movie.ratings.filter(
           (rating) =>
             memberIds.has(rating.userId) &&
+            !rating.hasSeen &&
             !rating.notHeardOf &&
             typeof rating.rating === "number"
         );
@@ -137,7 +140,6 @@ export async function GET() {
 
         if (!readyForRadarr && !isNearThreshold) continue;
 
-        const userRating = movie.ratings.find((rating) => rating.userId === userId) || null;
         const voters = householdRatings
           .map((rating) => memberNameById.get(rating.userId) || "Unknown")
           .filter(Boolean);
@@ -155,13 +157,7 @@ export async function GET() {
           ratingGap: Math.round(ratingGap * 100) / 100,
           ready: readyForRadarr,
           voters,
-          userRating: userRating
-            ? {
-                rating: userRating.rating,
-                hasSeen: userRating.hasSeen,
-                notHeardOf: userRating.notHeardOf,
-              }
-            : null,
+          userRating: null,
         };
 
         if (readyForRadarr) {
@@ -172,11 +168,6 @@ export async function GET() {
       }
 
       const sortCandidates = (a: HouseholdCandidate, b: HouseholdCandidate) => {
-        const aRatedByUser = a.userRating && !a.userRating.notHeardOf;
-        const bRatedByUser = b.userRating && !b.userRating.notHeardOf;
-        if (Boolean(aRatedByUser) !== Boolean(bRatedByUser)) {
-          return aRatedByUser ? 1 : -1;
-        }
         if (a.votesNeeded !== b.votesNeeded) return a.votesNeeded - b.votesNeeded;
         if (a.ratingGap !== b.ratingGap) return a.ratingGap - b.ratingGap;
         return b.avgRating - a.avgRating;
@@ -194,7 +185,7 @@ export async function GET() {
         ready,
       };
     })
-    .filter((household) => household.nearThreshold.length > 0 || household.ready.length > 0);
+    .filter((household) => household.nearThreshold.length > 0);
 
   return NextResponse.json({
     households: householdSections,
@@ -203,4 +194,3 @@ export async function GET() {
     nearRatingGap: NEAR_RATING_GAP,
   });
 }
-
