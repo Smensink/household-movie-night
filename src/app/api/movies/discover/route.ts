@@ -69,6 +69,24 @@ function mergeUnique(values: string[], extras: string[], limit: number): string[
   return Array.from(new Set([...values, ...extras])).slice(0, limit);
 }
 
+function computeAdaptiveMfWeight(params: {
+  mfConfidence: number;
+  hasPrediction: boolean;
+  coldStartUser: boolean;
+  heuristicEvidence: number;
+  explorationFactor: number;
+}): number {
+  const { mfConfidence, hasPrediction, coldStartUser, heuristicEvidence, explorationFactor } = params;
+  if (!hasPrediction || mfConfidence <= 0) return 0;
+
+  const minWeight = coldStartUser ? 0.18 : 0.04;
+  const maxWeight = coldStartUser ? 0.75 : 0.6;
+  const heuristicNeed = clamp(1 - heuristicEvidence, 0, 1);
+  const explorationLift = clamp(explorationFactor, 0, 1) * 0.12;
+  const targetWeight = minWeight + (maxWeight - minWeight) * heuristicNeed + explorationLift;
+  return clamp(targetWeight * clamp(mfConfidence, 0, 1), minWeight * 0.5, maxWeight);
+}
+
 function getReleaseYear(movie: { releaseDate: Date | null; year: number | null }, fallbackYear: number): number {
   if (movie.releaseDate) return movie.releaseDate.getFullYear();
   if (movie.year) return movie.year;
@@ -413,6 +431,10 @@ export async function GET(req: NextRequest) {
       const explicitRatings = movie.ratings
         .filter((rating) => !rating.notHeardOf && rating.rating !== null)
         .map((rating) => normalizeRating(rating.rating as number));
+      const explicitRatingCoverage =
+        profile.householdUserIds.length > 0
+          ? explicitRatings.length / profile.householdUserIds.length
+          : 0;
       const householdRatingSignal =
         explicitRatings.length > 0
           ? explicitRatings.reduce((sum, value) => sum + value, 0) / explicitRatings.length
@@ -542,10 +564,54 @@ export async function GET(req: NextRequest) {
       const mfSignal = mfPredictedRating !== undefined
         ? (mfPredictedRating - 3) / 2 // Convert 1-5 to -1 to 1
         : 0;
+      const genreAffinityCoverage =
+        movie.genres.length > 0
+          ? movie.genres.filter((genre) => profile.genreAffinity.has(genre.genreId)).length /
+            movie.genres.length
+          : 0;
+      const actorAffinityCoverage =
+        movie.cast.length > 0
+          ? movie.cast.filter((castMember) => profile.actorAffinity.has(castMember.personId)).length /
+            movie.cast.length
+          : 0;
+      const directorAffinityCoverage =
+        movie.crew.length > 0
+          ? movie.crew.filter((crewMember) => profile.directorAffinity.has(crewMember.personId)).length /
+            movie.crew.length
+          : 0;
+      const studioAffinityCoverage =
+        movie.studios.length > 0
+          ? movie.studios.filter((studio) => profile.studioAffinity.has(studio.studioId)).length /
+            movie.studios.length
+          : 0;
+      const movieAffinityKnown = Math.abs(movieSignal) > 0.01 ? 1 : 0;
+      const affinityEvidence = clamp(
+        genreAffinityCoverage * 0.35 +
+          actorAffinityCoverage * 0.2 +
+          directorAffinityCoverage * 0.15 +
+          studioAffinityCoverage * 0.15 +
+          movieAffinityKnown * 0.15,
+        0,
+        1
+      );
+      const explicitEvidence = clamp(
+        explicitRatingCoverage * 0.85 +
+          (userRating && !userRating.notHeardOf && userRating.rating !== null ? 0.15 : 0),
+        0,
+        1
+      );
+      const heuristicEvidence = clamp(explicitEvidence * 0.55 + affinityEvidence * 0.45, 0, 1);
 
-      // Blend MF with heuristic scoring based on model confidence
-      // As confidence increases, MF gets more weight (up to 40% at full confidence)
-      const mfWeight = mfConfidence * 0.4; // 0% to 40% based on confidence
+      // Adaptive hybrid blend:
+      // - More MF when explicit/affinity evidence is weak or user is cold-start.
+      // - Less MF when we already have strong direct heuristic evidence.
+      const mfWeight = computeAdaptiveMfWeight({
+        mfConfidence,
+        hasPrediction: mfPredictedRating !== undefined,
+        coldStartUser,
+        heuristicEvidence,
+        explorationFactor: effectiveExplorationFactor,
+      });
       const heuristicWeight = 1 - mfWeight;
 
       // Scale mainstream bonus inversely with exploration factor
@@ -755,7 +821,6 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(finalResults);
 }
-
 
 
 

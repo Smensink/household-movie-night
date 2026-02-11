@@ -813,3 +813,14 @@ Core entities in `prisma/schema.prisma`:
     - 20% holdout: MF lower RMSE (`0.780` vs `0.877`), heuristic slightly lower MAE (`0.674` vs `0.701`).
     - 10% and 30% holdout reruns showed the same pattern: MF better RMSE, MAE near parity.
   - Learned workflow preference: user wants direct empirical checks of heuristic vs MF behavior on prior ratings, not only model-training logs.
+- 2026-02-11 (Adaptive hybrid mix in discovery):
+  - Replaced fixed movie-discovery MF blending cap (`mfConfidence * 0.4`) with an adaptive per-movie mix in `GET /api/movies/discover`.
+  - New blend weight now responds to:
+    - MF confidence + prediction availability.
+    - Explicit evidence strength (household rating coverage for the movie).
+    - Affinity evidence strength (genre/actor/director/studio/movie-affinity coverage for that movie).
+    - Cold-start status and exploration factor.
+  - Behavior intent:
+    - Increase MF weight when user/movie evidence is sparse (especially cold-start).
+    - Decrease MF weight when explicit heuristic evidence is strong.
+  - Learned product preference: hybrid recommendation should use an intelligent dynamic mix instead of a hard static MF cap.
