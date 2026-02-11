@@ -755,3 +755,20 @@ Core entities in `prisma/schema.prisma`:
   - During the 03:00 retrain window, routine backfill jobs are skipped to avoid resource contention.
   - Added external GPU-load gating via `nvidia-smi` before triggering `/api/mf/train`; retrain is deferred only when GPU load is significant (`max utilization > 25%` or `max VRAM used > 5120MB`), or when `nvidia-smi` is unavailable.
   - Learned workflow preference: expensive GPU training should run overnight in a predictable window and avoid overlap with other heavy jobs.
+- 2026-02-11 (Movie-night continuous queue + adaptive MF weighting):
+  - Reworked session movie-night flow (`/session/[id]`) to continuous voting instead of fixed 10-movie batches:
+    - Voting now uses a live queue from `GET /api/sessions/[id]/movies?mode=queue`.
+    - Rating the current movie immediately submits a vote, removes it from the queue, and pulls the next ranked movie.
+    - Queue replenishment runs continuously so participants can keep rating beyond the initial batch.
+  - Added leaderboard unlock gating based on processed vote volume (session-wide + per-user minimum), with ability to open leaderboard, edit ratings, and return to continuous rating.
+  - Updated session recommendation scoring (`src/lib/recommendation.ts`) to make MF weighting adaptive:
+    - MF is strongest when explicit participant history is sparse.
+    - If session participants (or active voter) already rated a movie, explicit historical ratings are upweighted and MF influence is automatically downweighted.
+    - Live session momentum remains in scoring for movies receiving strong ratings from other participants not yet rated by the active voter.
+  - Learned product preference: movie-night ranking should not be rigidly MF-first; explicit household/session ratings should take priority when available.
+- 2026-02-11 (Near-threshold Radarr rating surface for members):
+  - Added a member-facing API endpoint `GET /api/radarr/near-threshold/mine` that computes per-household movies close to Radarr auto-sync thresholds using household quorum + average willingness rating logic.
+  - Endpoint returns actionable movie records (including `movieId`, poster/title metadata, current votes/avg, votes-needed/rating-gap, and the requesting user’s current rating state) so users can rate immediately.
+  - Added a new page at `/preferences/radarr-threshold` with inline 1-5 star rating controls, “Haven’t heard of it,” and clear actions for near-threshold titles.
+  - Added navigation entry in Preferences hub (`/preferences`) for “Near Radarr Threshold”.
+  - Learned product preference: non-admin household members should be able to directly help push borderline titles over the Radarr threshold from a focused rating queue, rather than relying on admin/internal-only tools.

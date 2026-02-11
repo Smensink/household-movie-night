@@ -224,6 +224,26 @@ export default function PreferencesPage() {
         </Link>
 
         <Link
+          href="/preferences/radarr-threshold"
+          className="flex items-center justify-between bg-card border border-border rounded-xl p-4 hover:border-accent/30 transition-all"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-accent-soft rounded-xl flex items-center justify-center">
+              <svg className="w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7h8M7 11h10M10 15h4M4 6a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2H8l-4 3V6z" />
+              </svg>
+            </div>
+            <div>
+              <div className="text-sm font-semibold">Near Radarr Threshold</div>
+              <div className="text-[11px] text-muted">Rate titles close to auto-sync</div>
+            </div>
+          </div>
+          <svg className="w-5 h-5 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
+        <Link
           href="/profile"
           className="flex items-center justify-between bg-card border border-border rounded-xl p-4 hover:border-accent/30 transition-all"
         >

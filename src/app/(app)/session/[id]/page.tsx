@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter, useParams } from "next/navigation";
+import Image from "next/image";
 import GenreRanker from "@/components/GenreRanker";
 import SessionVoteCard from "@/components/SessionVoteCard";
+import StarRating from "@/components/StarRating";
 import Button from "@/components/ui/Button";
 
 interface Genre {
@@ -55,7 +57,10 @@ interface SessionData {
 
 type Step = "preferences" | "voting" | "reviewing" | "decided";
 
-const VOTES_BEFORE_LEADERBOARD = 8; // Show leaderboard after rating all movies
+const QUEUE_MIN_ITEMS = 6;
+const QUEUE_REPLENISH_BATCH = 8;
+const QUEUE_REFRESH_MS = 8000;
+const LEADERBOARD_MIN_VOTES_BASE = 8;
 
 function calculateDecisionScore(votes: SessionMovie["votes"]): number {
   if (votes.length === 0) return 0;
@@ -64,9 +69,31 @@ function calculateDecisionScore(votes: SessionMovie["votes"]): number {
   return avgRating * 0.6 + minRating * 0.4;
 }
 
+function extractMovieMeta(movie: SessionMovie["movie"]) {
+  const directors = Array.from(
+    new Set(
+      (movie.crew || [])
+        .filter((member) => member.job.toLowerCase() === "director")
+        .map((member) => member.person.name)
+        .filter(Boolean)
+    )
+  ).slice(0, 2);
+
+  const actors = Array.from(
+    new Set((movie.cast || []).map((member) => member.person.name).filter(Boolean))
+  ).slice(0, 3);
+
+  const studios = Array.from(
+    new Set((movie.studios || []).map((member) => member.studio.name).filter(Boolean))
+  ).slice(0, 2);
+
+  return { directors, actors, studios };
+}
+
 export default function SessionPage() {
   const YEAR_MIN = 1950;
   const YEAR_MAX = new Date().getFullYear() + 1;
+
   const { data: session, status: authStatus } = useSession();
   const router = useRouter();
   const params = useParams();
@@ -74,7 +101,8 @@ export default function SessionPage() {
 
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
   const [genres, setGenres] = useState<Genre[]>([]);
-  const [sessionMovies, setSessionMovies] = useState<SessionMovie[]>([]);
+  const [allSessionMovies, setAllSessionMovies] = useState<SessionMovie[]>([]);
+  const [queueMovies, setQueueMovies] = useState<SessionMovie[]>([]);
   const [step, setStep] = useState<Step>("preferences");
   const [minReleaseYear, setMinReleaseYear] = useState(1990);
   const [maxReleaseYear, setMaxReleaseYear] = useState(new Date().getFullYear());
@@ -82,10 +110,15 @@ export default function SessionPage() {
   const [votes, setVotes] = useState<
     Map<string, { rating: number; willingToRewatch: boolean }>
   >(new Map());
+  const [rewatchDrafts, setRewatchDrafts] = useState<Map<string, boolean>>(
+    new Map()
+  );
   const [explorationFactor, setExplorationFactor] = useState(0.5);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [deciding, setDeciding] = useState(false);
+  const [submittingVoteFor, setSubmittingVoteFor] = useState<string | null>(null);
+  const [voteError, setVoteError] = useState<string | null>(null);
   const [decidedMovie, setDecidedMovie] = useState<{
     title: string;
     year?: number | null;
@@ -94,7 +127,7 @@ export default function SessionPage() {
   } | null>(null);
   const [copied, setCopied] = useState(false);
   const [endingSession, setEndingSession] = useState(false);
-  const [editingRatings, setEditingRatings] = useState(false);
+
   const guestAuth = useMemo(() => {
     if (typeof window === "undefined") {
       return { ready: false, token: null as string | null, userId: null as string | null };
@@ -110,117 +143,251 @@ export default function SessionPage() {
 
     return { ready: true, token: null as string | null, userId: null as string | null };
   }, [sessionId]);
+
   const guestToken = guestAuth.token;
   const guestUserId = guestAuth.userId;
   const guestReady = guestAuth.ready;
+  const activeUserId = session?.user?.id || guestUserId || null;
+  const activeUserName =
+    session?.user?.name ||
+    (activeUserId
+      ? sessionData?.participants.find((participant) => participant.userId === activeUserId)
+          ?.user.name
+      : null) ||
+    "Guest";
 
-  useEffect(() => {
-    if (authStatus === "unauthenticated" && guestReady && !guestToken) {
-      router.push("/login");
-    }
-  }, [authStatus, guestReady, guestToken, router]);
-
-  // Load session data
-  useEffect(() => {
-    if (authStatus === "loading") return;
-    if (authStatus === "unauthenticated" && !guestReady) return;
-    if (authStatus === "unauthenticated" && !guestToken) return;
-
-    const guestHeader = guestToken ? { "x-guest-token": guestToken } : undefined;
-
-    Promise.all([
-      fetch(`/api/sessions/${sessionId}`, {
-        headers: guestHeader,
-      }).then((r) => r.json()),
-      fetch("/api/genres", {
-        headers: guestHeader,
-      }).then((r) => r.json()),
-      fetch(`/api/sessions/${sessionId}/movies`, {
-        headers: guestHeader,
-      }).then((r) => r.json()),
-      authStatus === "authenticated"
-        ? fetch("/api/settings").then((r) => r.json())
-        : Promise.resolve(null),
-    ]).then(([sess, genreData, movies, settingsData]) => {
-      const parsedMovies: SessionMovie[] = Array.isArray(movies) ? movies : [];
-      const activeUserId = session?.user?.id || guestUserId;
-
-      if (settingsData?.explorationFactor !== undefined) {
-        setExplorationFactor(settingsData.explorationFactor);
+  const buildHeaders = useCallback(
+    (json = false): Record<string, string> => {
+      const headers: Record<string, string> = {};
+      if (guestToken) {
+        headers["x-guest-token"] = guestToken;
       }
-      setSessionData(sess?.id ? sess : null);
-      setGenres(genreData.genres || []);
-      setSessionMovies(parsedMovies);
-      if (activeUserId) {
-        const participant = sess?.participants?.find(
-          (candidate: { userId: string }) => candidate.userId === activeUserId
-        );
-        if (
-          participant &&
-          typeof participant.minReleaseYear === "number" &&
-          typeof participant.maxReleaseYear === "number"
-        ) {
-          setMinReleaseYear(participant.minReleaseYear);
-          setMaxReleaseYear(participant.maxReleaseYear);
-        }
-        if (participant && typeof participant.okWithRewatch === "boolean") {
-          setOkWithRewatch(participant.okWithRewatch);
-        }
-
-        const existingVotes = new Map<
-          string,
-          { rating: number; willingToRewatch: boolean }
-        >();
-        for (const sessionMovie of parsedMovies) {
-          const userVote = sessionMovie.votes.find(
-            (vote) => vote.userId === activeUserId
-          );
-          if (userVote) {
-            existingVotes.set(sessionMovie.id, {
-              rating: userVote.rating,
-              willingToRewatch: userVote.willingToRewatch,
-            });
-          }
-        }
-        setVotes(existingVotes);
+      if (json) {
+        headers["Content-Type"] = "application/json";
       }
+      return headers;
+    },
+    [guestToken]
+  );
 
-      if (sess?.status === "decided") {
-        setStep("decided");
-        const decidedSessionMovie = parsedMovies.find(
-          (sessionMovie) => sessionMovie.movieId === sess.decidedMovieId
-        );
-        if (decidedSessionMovie) {
-          setDecidedMovie({
-            title: decidedSessionMovie.movie.title,
-            year: decidedSessionMovie.movie.year,
-            posterUrl: decidedSessionMovie.movie.posterUrl,
-            score: calculateDecisionScore(decidedSessionMovie.votes),
+  const hydrateVotesFromMovies = useCallback(
+    (movies: SessionMovie[]) => {
+      if (!activeUserId) return;
+      const next = new Map<string, { rating: number; willingToRewatch: boolean }>();
+      for (const sessionMovie of movies) {
+        const userVote = sessionMovie.votes.find((vote) => vote.userId === activeUserId);
+        if (userVote) {
+          next.set(sessionMovie.id, {
+            rating: userVote.rating,
+            willingToRewatch: userVote.willingToRewatch,
           });
         }
-      } else if (sess?.status === "voting" || parsedMovies.length > 0) {
-        setStep("voting");
-        setDecidedMovie(null);
       }
-      setLoading(false);
-    }).catch(() => {
-      setLoading(false);
-    });
-  }, [authStatus, guestReady, guestToken, guestUserId, sessionId, session?.user?.id]);
+      setVotes(next);
+    },
+    [activeUserId]
+  );
 
-  const savePreferences = async (
-    genreRankings: { genreId: string; rank: number }[]
-  ) => {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (guestToken) {
-      headers["x-guest-token"] = guestToken;
+  const refreshSessionMovies = useCallback(async () => {
+    const res = await fetch(`/api/sessions/${sessionId}/movies`, {
+      headers: buildHeaders(),
+    });
+    if (!res.ok) return;
+
+    const movies = await res.json();
+    const parsedMovies: SessionMovie[] = Array.isArray(movies) ? movies : [];
+    setAllSessionMovies(parsedMovies);
+    hydrateVotesFromMovies(parsedMovies);
+  }, [buildHeaders, hydrateVotesFromMovies, sessionId]);
+
+  const refreshQueue = useCallback(async () => {
+    const searchParams = new URLSearchParams({
+      mode: "queue",
+      minQueue: String(QUEUE_MIN_ITEMS),
+      replenishBatch: String(QUEUE_REPLENISH_BATCH),
+    });
+
+    const res = await fetch(`/api/sessions/${sessionId}/movies?${searchParams.toString()}`, {
+      headers: buildHeaders(),
+    });
+    if (!res.ok) return;
+
+    const movies = await res.json();
+    setQueueMovies(Array.isArray(movies) ? movies : []);
+  }, [buildHeaders, sessionId]);
+
+  const applyVoteLocally = useCallback(
+    (sessionMovieId: string, rating: number, willingToRewatch: boolean) => {
+      if (!activeUserId) return;
+
+      setVotes((prev) => {
+        const next = new Map(prev);
+        next.set(sessionMovieId, { rating, willingToRewatch });
+        return next;
+      });
+
+      const applyToCollection = (movies: SessionMovie[]) =>
+        movies.map((movie) => {
+          if (movie.id !== sessionMovieId) return movie;
+
+          const otherVotes = movie.votes.filter((vote) => vote.userId !== activeUserId);
+          return {
+            ...movie,
+            votes: [
+              ...otherVotes,
+              {
+                userId: activeUserId,
+                rating,
+                willingToRewatch,
+                user: { name: activeUserName },
+              },
+            ],
+          };
+        });
+
+      setAllSessionMovies((prev) => applyToCollection(prev));
+      setQueueMovies((prev) => applyToCollection(prev));
+    },
+    [activeUserId, activeUserName]
+  );
+
+  const persistVote = useCallback(
+    async (sessionMovieId: string, rating: number, willingToRewatch: boolean) => {
+      const res = await fetch(`/api/sessions/${sessionId}/vote`, {
+        method: "POST",
+        headers: buildHeaders(true),
+        body: JSON.stringify({
+          votes: [
+            {
+              sessionMovieId,
+              rating,
+              willingToRewatch,
+            },
+          ],
+        }),
+      });
+
+      return res.ok;
+    },
+    [buildHeaders, sessionId]
+  );
+
+  const handleQueueVote = useCallback(
+    async (sessionMovieId: string, rating: number) => {
+      if (submittingVoteFor === sessionMovieId) return;
+
+      setVoteError(null);
+      const willingToRewatch =
+        votes.get(sessionMovieId)?.willingToRewatch ??
+        rewatchDrafts.get(sessionMovieId) ??
+        false;
+      applyVoteLocally(sessionMovieId, rating, willingToRewatch);
+      setRewatchDrafts((prev) => {
+        const next = new Map(prev);
+        next.delete(sessionMovieId);
+        return next;
+      });
+      setQueueMovies((prev) => prev.filter((movie) => movie.id !== sessionMovieId));
+      setSubmittingVoteFor(sessionMovieId);
+
+      const success = await persistVote(sessionMovieId, rating, willingToRewatch);
+      await Promise.all([refreshSessionMovies(), refreshQueue()]);
+      if (!success) {
+        setVoteError("Could not save your vote. Please try again.");
+      }
+
+      setSubmittingVoteFor(null);
+    },
+    [
+      applyVoteLocally,
+      persistVote,
+      refreshQueue,
+      refreshSessionMovies,
+      rewatchDrafts,
+      submittingVoteFor,
+      votes,
+    ]
+  );
+
+  const handleRewatchToggle = useCallback(
+    async (sessionMovieId: string, willing: boolean) => {
+      const existing = votes.get(sessionMovieId);
+      const existingRating = existing?.rating ?? null;
+
+      if (!existingRating || existingRating < 1) {
+        setRewatchDrafts((prev) => {
+          const next = new Map(prev);
+          next.set(sessionMovieId, willing);
+          return next;
+        });
+        return;
+      }
+
+      setVotes((prev) => {
+        const next = new Map(prev);
+        next.set(sessionMovieId, {
+          rating: existingRating,
+          willingToRewatch: willing,
+        });
+        return next;
+      });
+
+      if (submittingVoteFor === sessionMovieId) return;
+      setVoteError(null);
+      applyVoteLocally(sessionMovieId, existingRating, willing);
+      setSubmittingVoteFor(sessionMovieId);
+      const success = await persistVote(sessionMovieId, existingRating, willing);
+      await Promise.all([refreshSessionMovies(), refreshQueue()]);
+      if (!success) {
+        setVoteError("Could not update rewatch preference. Please try again.");
+      }
+      setSubmittingVoteFor(null);
+    },
+    [
+      applyVoteLocally,
+      persistVote,
+      refreshQueue,
+      refreshSessionMovies,
+      submittingVoteFor,
+      votes,
+    ]
+  );
+
+  const generateMovies = useCallback(async () => {
+    setGenerating(true);
+
+    if (authStatus === "authenticated") {
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ explorationFactor }),
+      });
     }
 
+    const res = await fetch(`/api/sessions/${sessionId}/movies`, {
+      method: "POST",
+      headers: buildHeaders(true),
+      body: JSON.stringify({
+        count: QUEUE_MIN_ITEMS + QUEUE_REPLENISH_BATCH,
+        minQueue: QUEUE_MIN_ITEMS,
+        replenishBatch: QUEUE_REPLENISH_BATCH,
+      }),
+    });
+
+    if (res.ok) {
+      const queue = await res.json();
+      setQueueMovies(Array.isArray(queue) ? queue : []);
+      setStep("voting");
+      await refreshSessionMovies();
+    }
+
+    setGenerating(false);
+  }, [authStatus, buildHeaders, explorationFactor, refreshSessionMovies, sessionId]);
+
+  const savePreferences = async (genreRankings: { genreId: string; rank: number }[]) => {
     await fetch(`/api/sessions/${sessionId}/preferences`, {
       method: "POST",
-      headers,
+      headers: buildHeaders(true),
       body: JSON.stringify({
         minReleaseYear,
         maxReleaseYear,
@@ -230,127 +397,24 @@ export default function SessionPage() {
     });
   };
 
-  const generateMovies = async () => {
-    setGenerating(true);
-    const headers: Record<string, string> = {};
-    if (guestToken) {
-      headers["x-guest-token"] = guestToken;
-    }
-
-    // Save current exploration factor before generating
-    if (authStatus === "authenticated") {
-      await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ explorationFactor }),
-      });
-    }
-    const res = await fetch(`/api/sessions/${sessionId}/movies`, {
-      method: "POST",
-      headers,
-    });
-    if (res.ok) {
-      const movies = await res.json();
-      setSessionMovies(movies);
-      setStep("voting");
-    }
-    setGenerating(false);
-  };
-
-  const handleVote = useCallback(
-    (sessionMovieId: string, rating: number) => {
-      setVotes((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(sessionMovieId) || {
-          rating: 0,
-          willingToRewatch: false,
-        };
-        next.set(sessionMovieId, { ...existing, rating });
-        return next;
-      });
-    },
-    []
-  );
-
-  const handleRewatchToggle = useCallback(
-    (sessionMovieId: string, willing: boolean) => {
-      setVotes((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(sessionMovieId) || {
-          rating: 0,
-          willingToRewatch: false,
-        };
-        next.set(sessionMovieId, { ...existing, willingToRewatch: willing });
-        return next;
-      });
-    },
-    []
-  );
-
-  const submitVotes = async () => {
-    const voteArray = Array.from(votes.entries()).map(([sessionMovieId, v]) => ({
-      sessionMovieId,
-      rating: v.rating,
-      willingToRewatch: v.willingToRewatch,
-    }));
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (guestToken) {
-      headers["x-guest-token"] = guestToken;
-    }
-
-    await fetch(`/api/sessions/${sessionId}/vote`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ votes: voteArray }),
-    });
-  };
-
-  const refreshMovies = async () => {
-    const headers: Record<string, string> = {};
-    if (guestToken) {
-      headers["x-guest-token"] = guestToken;
-    }
-
-    const res = await fetch(`/api/sessions/${sessionId}/movies`, {
-      headers,
-    });
-    if (res.ok) {
-      const movies = await res.json();
-      setSessionMovies(Array.isArray(movies) ? movies : []);
-    }
-  };
-
-  const goToReview = async () => {
-    await submitVotes();
-    await refreshMovies();
+  const goToReview = useCallback(async () => {
+    await refreshSessionMovies();
     setStep("reviewing");
-  };
+  }, [refreshSessionMovies]);
 
-  const goBackToVoting = () => {
-    setEditingRatings(true);
+  const goBackToVoting = useCallback(async () => {
+    await Promise.all([refreshQueue(), refreshSessionMovies()]);
     setStep("voting");
-  };
+  }, [refreshQueue, refreshSessionMovies]);
 
   const decideMovie = async () => {
     setDeciding(true);
 
-    // Only submit votes if we haven't already (coming from voting step)
-    if (step === "voting") {
-      await submitVotes();
-    }
-
-    const headers: Record<string, string> = {};
-    if (guestToken) {
-      headers["x-guest-token"] = guestToken;
-    }
-
     const res = await fetch(`/api/sessions/${sessionId}/decide`, {
       method: "POST",
-      headers,
+      headers: buildHeaders(),
     });
+
     if (res.ok) {
       const result = await res.json();
       setDecidedMovie({
@@ -361,6 +425,7 @@ export default function SessionPage() {
       });
       setStep("decided");
     }
+
     setDeciding(false);
   };
 
@@ -380,18 +445,13 @@ export default function SessionPage() {
     if (!confirmed) return;
 
     setEndingSession(true);
-    
-    const headers: Record<string, string> = {};
-    if (guestToken) {
-      headers["x-guest-token"] = guestToken;
-    }
-    
+
     try {
       const response = await fetch(`/api/sessions/${sessionId}`, {
         method: "DELETE",
-        headers,
+        headers: buildHeaders(),
       });
-      
+
       if (response.ok) {
         router.push("/dashboard");
       } else {
@@ -404,6 +464,150 @@ export default function SessionPage() {
       setEndingSession(false);
     }
   };
+
+  useEffect(() => {
+    if (authStatus === "unauthenticated" && guestReady && !guestToken) {
+      router.push("/login");
+    }
+  }, [authStatus, guestReady, guestToken, router]);
+
+  useEffect(() => {
+    if (authStatus === "loading") return;
+    if (authStatus === "unauthenticated" && !guestReady) return;
+    if (authStatus === "unauthenticated" && !guestToken) return;
+
+    Promise.all([
+      fetch(`/api/sessions/${sessionId}`, { headers: buildHeaders() }).then((response) =>
+        response.json()
+      ),
+      fetch("/api/genres", { headers: buildHeaders() }).then((response) => response.json()),
+      fetch(`/api/sessions/${sessionId}/movies`, { headers: buildHeaders() }).then((response) =>
+        response.json()
+      ),
+      authStatus === "authenticated"
+        ? fetch("/api/settings").then((response) => response.json())
+        : Promise.resolve(null),
+    ])
+      .then(([sess, genreData, movies, settingsData]) => {
+        const parsedMovies: SessionMovie[] = Array.isArray(movies) ? movies : [];
+
+        if (settingsData?.explorationFactor !== undefined) {
+          setExplorationFactor(settingsData.explorationFactor);
+        }
+
+        setSessionData(sess?.id ? sess : null);
+        setGenres(Array.isArray(genreData?.genres) ? genreData.genres : []);
+        setAllSessionMovies(parsedMovies);
+
+        if (activeUserId) {
+          const participant = sess?.participants?.find(
+            (candidate: { userId: string }) => candidate.userId === activeUserId
+          );
+
+          if (
+            participant &&
+            typeof participant.minReleaseYear === "number" &&
+            typeof participant.maxReleaseYear === "number"
+          ) {
+            setMinReleaseYear(participant.minReleaseYear);
+            setMaxReleaseYear(participant.maxReleaseYear);
+          }
+
+          if (participant && typeof participant.okWithRewatch === "boolean") {
+            setOkWithRewatch(participant.okWithRewatch);
+          }
+        }
+
+        hydrateVotesFromMovies(parsedMovies);
+
+        if (sess?.status === "decided") {
+          setStep("decided");
+          const decidedSessionMovie = parsedMovies.find(
+            (sessionMovie) => sessionMovie.movieId === sess.decidedMovieId
+          );
+          if (decidedSessionMovie) {
+            setDecidedMovie({
+              title: decidedSessionMovie.movie.title,
+              year: decidedSessionMovie.movie.year,
+              posterUrl: decidedSessionMovie.movie.posterUrl,
+              score: calculateDecisionScore(decidedSessionMovie.votes),
+            });
+          }
+        } else if (sess?.status === "voting" || parsedMovies.length > 0) {
+          setStep("voting");
+          setDecidedMovie(null);
+        }
+
+        setLoading(false);
+      })
+      .catch(() => {
+        setLoading(false);
+      });
+  }, [
+    activeUserId,
+    authStatus,
+    buildHeaders,
+    guestReady,
+    guestToken,
+    hydrateVotesFromMovies,
+    sessionId,
+  ]);
+
+  useEffect(() => {
+    if (step !== "voting" || loading) return;
+    void refreshQueue();
+  }, [loading, refreshQueue, step]);
+
+  useEffect(() => {
+    if (step !== "voting") return;
+
+    const interval = window.setInterval(() => {
+      void refreshQueue();
+      void refreshSessionMovies();
+    }, QUEUE_REFRESH_MS);
+
+    return () => window.clearInterval(interval);
+  }, [refreshQueue, refreshSessionMovies, step]);
+
+  const currentQueueMovie = queueMovies[0] ?? null;
+  const queuePreview = queueMovies.slice(1, 4);
+
+  const participantCount = sessionData?.participants.length ?? 1;
+  const leaderboardMinTotalVotes = Math.max(
+    LEADERBOARD_MIN_VOTES_BASE,
+    participantCount * 4
+  );
+  const leaderboardMinUserVotes = Math.max(
+    4,
+    Math.ceil(leaderboardMinTotalVotes / Math.max(participantCount, 1))
+  );
+
+  const totalVotesCast = useMemo(
+    () => allSessionMovies.reduce((sum, movie) => sum + movie.votes.length, 0),
+    [allSessionMovies]
+  );
+
+  const userVotesCast = useMemo(() => {
+    if (!activeUserId) return 0;
+    return allSessionMovies.filter((movie) =>
+      movie.votes.some((vote) => vote.userId === activeUserId)
+    ).length;
+  }, [activeUserId, allSessionMovies]);
+
+  const canOpenLeaderboard =
+    totalVotesCast >= leaderboardMinTotalVotes &&
+    userVotesCast >= leaderboardMinUserVotes;
+
+  const leaderboardRows = useMemo(
+    () =>
+      [...allSessionMovies]
+        .map((movie) => ({
+          ...movie,
+          score: calculateDecisionScore(movie.votes),
+        }))
+        .sort((a, b) => b.score - a.score),
+    [allSessionMovies]
+  );
 
   if (authStatus === "loading" || loading) {
     return (
@@ -437,17 +641,16 @@ export default function SessionPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Movie Night</h1>
           <div className="flex items-center gap-2 mt-1">
-            {sessionData.participants.map((p) => (
+            {sessionData.participants.map((participant) => (
               <span
-                key={p.userId}
+                key={participant.userId}
                 className="text-[11px] bg-accent-soft text-accent px-2 py-0.5 rounded-full"
               >
-                {p.user.name}
+                {participant.user.name}
               </span>
             ))}
           </div>
@@ -459,10 +662,7 @@ export default function SessionPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={copyGuestLink}
-            className="text-xs text-accent hover:underline"
-          >
+          <button onClick={copyGuestLink} className="text-xs text-accent hover:underline">
             {copied ? "Copied!" : "Invite Guest"}
           </button>
           {sessionData.canManage && (
@@ -478,11 +678,16 @@ export default function SessionPage() {
         </div>
       </div>
 
-      {/* Steps indicator */}
       <div className="flex items-center gap-2">
         {(["preferences", "voting", "reviewing", "decided"] as Step[]).map((s, i) => {
-          const stepLabels = { preferences: "Preferences", voting: "Rate", reviewing: "Leaderboard", decided: "Watch" };
+          const stepLabels = {
+            preferences: "Preferences",
+            voting: "Rate",
+            reviewing: "Leaderboard",
+            decided: "Watch",
+          };
           const allSteps = ["preferences", "voting", "reviewing", "decided"];
+
           return (
             <div key={s} className="flex items-center gap-2 flex-1">
               <div
@@ -496,21 +701,15 @@ export default function SessionPage() {
               >
                 {i + 1}
               </div>
-              <span className="text-[11px] text-muted hidden sm:block">
-                {stepLabels[s]}
-              </span>
-              {i < 3 && (
-                <div className="flex-1 h-px bg-border" />
-              )}
+              <span className="text-[11px] text-muted hidden sm:block">{stepLabels[s]}</span>
+              {i < 3 && <div className="flex-1 h-px bg-border" />}
             </div>
           );
         })}
       </div>
 
-      {/* Step: Preferences */}
       {step === "preferences" && (
         <div className="space-y-6 animate-slide-up">
-          {/* Release year preference */}
           <div>
             <h3 className="text-sm font-semibold mb-2">Choose your release year range</h3>
             <div className="bg-card border border-border rounded-xl p-4 space-y-4">
@@ -519,53 +718,47 @@ export default function SessionPage() {
                 <span className="text-muted">-</span>
                 <span className="font-semibold text-accent text-lg">{maxReleaseYear}</span>
               </div>
-              
-              {/* Dual handle range slider */}
+
               <div
                 className="relative h-10 touch-none select-none"
-                onPointerDown={(e) => {
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const percent = (e.clientX - rect.left) / rect.width;
+                onPointerDown={(event) => {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const percent = (event.clientX - rect.left) / rect.width;
                   const yearAtClick = Math.round(YEAR_MIN + percent * (YEAR_MAX - YEAR_MIN));
 
-                  // Determine which handle is closer
                   const distToMin = Math.abs(yearAtClick - minReleaseYear);
                   const distToMax = Math.abs(yearAtClick - maxReleaseYear);
-                  const targetHandle = distToMin <= distToMax ? 'min' : 'max';
+                  const targetHandle = distToMin <= distToMax ? "min" : "max";
 
                   const updateValue = (clientX: number) => {
                     const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
                     const year = Math.round(YEAR_MIN + pct * (YEAR_MAX - YEAR_MIN));
 
-                    if (targetHandle === 'min') {
+                    if (targetHandle === "min") {
                       if (year <= maxReleaseYear - 5 && year >= YEAR_MIN) {
                         setMinReleaseYear(year);
                       }
-                    } else {
-                      if (year >= minReleaseYear + 5 && year <= YEAR_MAX) {
-                        setMaxReleaseYear(year);
-                      }
+                    } else if (year >= minReleaseYear + 5 && year <= YEAR_MAX) {
+                      setMaxReleaseYear(year);
                     }
                   };
 
-                  updateValue(e.clientX);
+                  updateValue(event.clientX);
 
                   const onMove = (moveEvent: PointerEvent) => {
                     updateValue(moveEvent.clientX);
                   };
 
                   const onUp = () => {
-                    window.removeEventListener('pointermove', onMove);
-                    window.removeEventListener('pointerup', onUp);
+                    window.removeEventListener("pointermove", onMove);
+                    window.removeEventListener("pointerup", onUp);
                   };
 
-                  window.addEventListener('pointermove', onMove);
-                  window.addEventListener('pointerup', onUp);
+                  window.addEventListener("pointermove", onMove);
+                  window.addEventListener("pointerup", onUp);
                 }}
               >
-                {/* Track background */}
                 <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-2 bg-border rounded-full" />
-                {/* Active range */}
                 <div
                   className="absolute top-1/2 -translate-y-1/2 h-2 bg-accent rounded-full"
                   style={{
@@ -573,30 +766,32 @@ export default function SessionPage() {
                     right: `${100 - ((maxReleaseYear - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)) * 100}%`,
                   }}
                 />
-                {/* Min handle */}
                 <div
                   className="absolute top-1/2 -translate-y-1/2 w-6 h-6 bg-accent rounded-full shadow-lg border-2 border-background cursor-grab active:cursor-grabbing transition-transform hover:scale-110"
-                  style={{ left: `calc(${((minReleaseYear - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)) * 100}% - 12px)` }}
+                  style={{
+                    left: `calc(${((minReleaseYear - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)) * 100}% - 12px)`,
+                  }}
                 />
-                {/* Max handle */}
                 <div
                   className="absolute top-1/2 -translate-y-1/2 w-6 h-6 bg-accent rounded-full shadow-lg border-2 border-background cursor-grab active:cursor-grabbing transition-transform hover:scale-110"
-                  style={{ left: `calc(${((maxReleaseYear - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)) * 100}% - 12px)` }}
+                  style={{
+                    left: `calc(${((maxReleaseYear - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)) * 100}% - 12px)`,
+                  }}
                 />
               </div>
-              
+
               <div className="flex justify-between text-[10px] text-muted px-1">
                 <span>{YEAR_MIN}</span>
                 <span>{YEAR_MAX}</span>
               </div>
-              
+
               <p className="text-[11px] text-muted">
-                Drag either handle to adjust your preferred release year range. Movies outside this range are less likely to be suggested.
+                Drag either handle to adjust your preferred release year range. Movies outside
+                this range are down-ranked.
               </p>
             </div>
           </div>
 
-          {/* Rewatch preference */}
           <div>
             <h3 className="text-sm font-semibold mb-2">Rewatch preference</h3>
             <div className="bg-card border border-border rounded-xl p-4">
@@ -604,7 +799,7 @@ export default function SessionPage() {
                 <div>
                   <p className="text-sm font-medium">Open to rewatching movies</p>
                   <p className="text-[11px] text-muted mt-0.5">
-                    Would you be okay watching a movie you&apos;ve already seen?
+                    If off, movies you&apos;ve already seen are heavily deprioritized.
                   </p>
                 </div>
                 <button
@@ -626,7 +821,6 @@ export default function SessionPage() {
             </div>
           </div>
 
-          {/* Genre ranking for tonight */}
           {genres.length > 0 && (
             <GenreRanker
               genres={genres}
@@ -641,24 +835,22 @@ export default function SessionPage() {
 
           {genres.length === 0 && (
             <Button onClick={generateMovies} loading={generating} className="w-full" size="lg">
-              Generate Movie Picks
+              Start Movie Queue
             </Button>
           )}
         </div>
       )}
 
-      {/* Step: Voting */}
       {step === "voting" && (
         <div className="space-y-4 animate-slide-up">
           <div>
-            <h3 className="text-lg font-semibold">Vote on Movies</h3>
+            <h3 className="text-lg font-semibold">Continuous Movie Queue</h3>
             <p className="text-xs text-muted">
-              Rate each movie for how willing you are to watch it tonight.
-              {session?.user?.name && ` (Voting as ${session.user.name})`}
+              The next movie is ranked by MF expected household rating, your tonight preferences,
+              and live session momentum from other voters.
             </p>
           </div>
 
-          {/* Inline exploration slider */}
           <div className="bg-card border border-border rounded-xl p-3 space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[11px] text-muted">Familiar</span>
@@ -677,9 +869,7 @@ export default function SessionPage() {
               max="1"
               step="0.1"
               value={explorationFactor}
-              onChange={(e) =>
-                setExplorationFactor(parseFloat(e.target.value))
-              }
+              onChange={(event) => setExplorationFactor(parseFloat(event.target.value))}
               className="w-full h-1.5 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
             />
             <button
@@ -687,262 +877,303 @@ export default function SessionPage() {
               disabled={generating}
               className="text-[11px] text-accent hover:underline"
             >
-              {generating ? "Regenerating..." : "Regenerate picks with new setting"}
+              {generating ? "Refreshing queue..." : "Refresh queue with this setting"}
             </button>
           </div>
 
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {sessionMovies.map((sm) => {
-              const vote = votes.get(sm.id);
-              const available =
-                sm.movie.plexAvailability?.available ||
-                sm.movie.radarrSync?.available ||
-                false;
-              const directors = Array.from(
-                new Set(
-                  (sm.movie.crew || [])
-                    .filter((member) => member.job.toLowerCase() === "director")
-                    .map((member) => member.person.name)
-                    .filter(Boolean)
-                )
-              ).slice(0, 2);
-              const actors = Array.from(
-                new Set(
-                  (sm.movie.cast || [])
-                    .map((member) => member.person.name)
-                    .filter(Boolean)
-                )
-              ).slice(0, 3);
-              const studios = Array.from(
-                new Set(
-                  (sm.movie.studios || [])
-                    .map((member) => member.studio.name)
-                    .filter(Boolean)
-                )
-              ).slice(0, 2);
-              const userHasSeen = Boolean(sm.movie.ratings?.[0]?.hasSeen);
-
-              return (
-                <SessionVoteCard
-                  key={sm.id}
-                  movie={{
-                    ...sm.movie,
-                    directors,
-                    actors,
-                    studios,
-                  }}
-                  sessionMovieId={sm.id}
-                  userHasSeen={userHasSeen}
-                  rating={vote?.rating ?? null}
-                  willingToRewatch={vote?.willingToRewatch ?? false}
-                  onRate={(rating) => handleVote(sm.id, rating)}
-                  onRewatchToggle={(willing) =>
-                    handleRewatchToggle(sm.id, willing)
-                  }
-                  available={available}
-                />
-              );
-            })}
+          <div className="bg-card border border-border rounded-xl p-3 text-xs text-muted flex flex-wrap items-center gap-3">
+            <span>
+              Session votes processed: <span className="text-foreground font-semibold">{totalVotesCast}</span>
+              /{leaderboardMinTotalVotes}
+            </span>
+            <span>
+              Your votes: <span className="text-foreground font-semibold">{userVotesCast}</span>
+              /{leaderboardMinUserVotes}
+            </span>
+            <span>
+              Queue ready: <span className="text-foreground font-semibold">{queueMovies.length}</span>
+            </span>
           </div>
 
-          <Button
-            size="lg"
-            className="w-full"
-            onClick={goToReview}
-            disabled={votes.size < sessionMovies.length}
-          >
-            {votes.size < sessionMovies.length
-              ? `Rate all ${sessionMovies.length} movies to continue`
-              : "View Leaderboard"
-            }
-          </Button>
-          {editingRatings && (
-            <Button
-              variant="secondary"
-              size="lg"
-              className="w-full"
-              onClick={goToReview}
-            >
-              Done Editing
+          {voteError && (
+            <div className="bg-danger/10 text-danger border border-danger/30 rounded-xl px-3 py-2 text-xs">
+              {voteError}
+            </div>
+          )}
+
+          {currentQueueMovie ? (
+            <div className="relative max-w-4xl mx-auto">
+              <SessionVoteCard
+                key={currentQueueMovie.id}
+                movie={{
+                  ...currentQueueMovie.movie,
+                  ...extractMovieMeta(currentQueueMovie.movie),
+                }}
+                sessionMovieId={currentQueueMovie.id}
+                userHasSeen={Boolean(currentQueueMovie.movie.ratings?.[0]?.hasSeen)}
+                rating={votes.get(currentQueueMovie.id)?.rating ?? null}
+                willingToRewatch={
+                  votes.get(currentQueueMovie.id)?.willingToRewatch ??
+                  rewatchDrafts.get(currentQueueMovie.id) ??
+                  false
+                }
+                onRate={(rating) => {
+                  void handleQueueVote(currentQueueMovie.id, rating);
+                }}
+                onRewatchToggle={(willing) => {
+                  void handleRewatchToggle(currentQueueMovie.id, willing);
+                }}
+                available={Boolean(
+                  currentQueueMovie.movie.plexAvailability?.available ||
+                    currentQueueMovie.movie.radarrSync?.available
+                )}
+              />
+
+              {submittingVoteFor === currentQueueMovie.id && (
+                <div className="absolute inset-0 bg-background/60 rounded-2xl flex items-center justify-center">
+                  <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="bg-card border border-border rounded-xl p-6 text-center">
+              <p className="text-sm text-muted">Fetching the next best movies for you...</p>
+              <Button variant="secondary" className="mt-3" onClick={refreshQueue}>
+                Refresh Queue
+              </Button>
+            </div>
+          )}
+
+          {queuePreview.length > 0 && (
+            <div className="bg-card border border-border rounded-xl p-3">
+              <p className="text-[11px] text-muted mb-2">Up next (ranked for you):</p>
+              <div className="space-y-1">
+                {queuePreview.map((movie, index) => (
+                  <p key={movie.id} className="text-xs text-foreground/85 truncate">
+                    {index + 1}. {movie.movie.title}
+                    {movie.movie.year ? ` (${movie.movie.year})` : ""}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {canOpenLeaderboard ? (
+            <Button size="lg" className="w-full" onClick={goToReview}>
+              Open Leaderboard
             </Button>
+          ) : (
+            <p className="text-[11px] text-muted text-center">
+              Leaderboard unlocks after enough signal is collected from everyone.
+            </p>
           )}
         </div>
       )}
 
-      {/* Step: Reviewing (Leaderboard) */}
       {step === "reviewing" && (
         <div className="space-y-6 animate-slide-up">
           <div>
             <h3 className="text-lg font-semibold">Leaderboard</h3>
             <p className="text-xs text-muted">
-              See how everyone voted. You can edit your ratings before the final decision.
+              Edit your ratings here, then continue rating more movies or finalize the winner.
             </p>
           </div>
 
-          {/* Participant legend */}
           <div className="flex flex-wrap gap-2">
-            {sessionData.participants.map((p) => (
+            {sessionData.participants.map((participant) => (
               <div
-                key={p.userId}
+                key={participant.userId}
                 className="flex items-center gap-1.5 text-xs bg-card border border-border rounded-full px-2.5 py-1"
               >
                 <span className="w-2 h-2 rounded-full bg-accent" />
-                <span>{p.user.name}</span>
+                <span>{participant.user.name}</span>
               </div>
             ))}
           </div>
 
-          {/* Leaderboard */}
           <div className="space-y-3">
-            {sessionMovies
-              .map((sm) => ({
-                ...sm,
-                score: calculateDecisionScore(sm.votes),
-                avgRating: sm.votes.length > 0
-                  ? sm.votes.reduce((sum, v) => sum + v.rating, 0) / sm.votes.length
-                  : 0,
-                minRating: sm.votes.length > 0
-                  ? Math.min(...sm.votes.map((v) => v.rating))
-                  : 0,
-              }))
-              .sort((a, b) => b.score - a.score)
-              .map((sm, rank) => {
-                const available =
-                  sm.movie.plexAvailability?.available ||
-                  sm.movie.radarrSync?.available ||
-                  false;
-                const activeUserId = session?.user?.id || guestUserId;
-                const userVote = sm.votes.find((v) => v.userId === activeUserId);
+            {leaderboardRows.map((sessionMovie, rank) => {
+              const available =
+                sessionMovie.movie.plexAvailability?.available ||
+                sessionMovie.movie.radarrSync?.available ||
+                false;
+              const userVote = activeUserId
+                ? sessionMovie.votes.find((vote) => vote.userId === activeUserId)
+                : undefined;
+              const trackedVote = votes.get(sessionMovie.id);
+              const effectiveRating = trackedVote?.rating ?? userVote?.rating ?? null;
+              const effectiveWilling =
+                trackedVote?.willingToRewatch ?? userVote?.willingToRewatch ?? false;
+              const userHasSeen = Boolean(sessionMovie.movie.ratings?.[0]?.hasSeen);
 
-                return (
-                  <div
-                    key={sm.id}
-                    className={`bg-card border rounded-xl p-4 ${
-                      rank === 0 ? "border-accent ring-1 ring-accent/30" : "border-border"
-                    }`}
-                  >
-                    <div className="flex gap-4">
-                      {/* Rank badge */}
-                      <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold ${
-                        rank === 0 ? "bg-accent text-white" :
-                        rank === 1 ? "bg-card-hover text-foreground" :
-                        rank === 2 ? "bg-card-hover text-muted" :
-                        "bg-card-hover text-muted"
-                      }`}>
-                        {rank === 0 ? "🏆" : `#${rank + 1}`}
-                      </div>
+              return (
+                <div
+                  key={sessionMovie.id}
+                  className={`bg-card border rounded-xl p-4 ${
+                    rank === 0 ? "border-accent ring-1 ring-accent/30" : "border-border"
+                  }`}
+                >
+                  <div className="flex gap-4">
+                    <div
+                      className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold ${
+                        rank === 0
+                          ? "bg-accent text-white"
+                          : "bg-card-hover text-muted"
+                      }`}
+                    >
+                      {rank === 0 ? "🏆" : `#${rank + 1}`}
+                    </div>
 
-                      {/* Poster */}
-                      <div className="flex-shrink-0 w-16 h-24 rounded-lg overflow-hidden bg-card-hover">
-                        {sm.movie.posterUrl ? (
-                          <img
-                            src={sm.movie.posterUrl}
-                            alt={sm.movie.title}
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-muted text-xs">
-                            No poster
-                          </div>
-                        )}
-                      </div>
+                    <div className="flex-shrink-0 w-16 h-24 rounded-lg overflow-hidden bg-card-hover">
+                      {sessionMovie.movie.posterUrl ? (
+                        <Image
+                          src={sessionMovie.movie.posterUrl}
+                          alt={sessionMovie.movie.title}
+                          fill
+                          sizes="64px"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-muted text-xs">
+                          No poster
+                        </div>
+                      )}
+                    </div>
 
-                      {/* Info */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <h4 className="font-semibold text-sm truncate">
-                              {sm.movie.title}
-                              {sm.movie.year && (
-                                <span className="text-muted font-normal ml-1">
-                                  ({sm.movie.year})
-                                </span>
-                              )}
-                            </h4>
-                            <div className="flex items-center gap-2 mt-1">
-                              {available && (
-                                <span className="text-[10px] bg-success/15 text-success px-1.5 py-0.5 rounded-full">
-                                  Available
-                                </span>
-                              )}
-                              <span className="text-xs text-muted">
-                                Score: <span className="font-semibold text-accent">{sm.score.toFixed(1)}</span>
+                    <div className="flex-1 min-w-0 space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <h4 className="font-semibold text-sm truncate">
+                            {sessionMovie.movie.title}
+                            {sessionMovie.movie.year && (
+                              <span className="text-muted font-normal ml-1">
+                                ({sessionMovie.movie.year})
                               </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Participant votes */}
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {sessionData.participants.map((p) => {
-                            const vote = sm.votes.find((v) => v.userId === p.userId);
-                            return (
-                              <div
-                                key={p.userId}
-                                className="flex items-center gap-1 text-xs bg-card-hover rounded-full px-2 py-1"
-                              >
-                                <span className="text-muted">{p.user.name}:</span>
-                                {vote ? (
-                                  <span className="font-semibold">
-                                    {"★".repeat(vote.rating)}
-                                    <span className="text-muted">{"★".repeat(5 - vote.rating)}</span>
-                                  </span>
-                                ) : (
-                                  <span className="text-muted italic">pending</span>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-
-                        {/* Your vote highlight */}
-                        {userVote && (
-                          <div className="mt-2 text-xs text-muted">
-                            Your vote: <span className="text-accent font-semibold">{userVote.rating}/5</span>
-                            {userVote.willingToRewatch && (
-                              <span className="ml-2 text-success">✓ Would rewatch</span>
                             )}
+                          </h4>
+                          <div className="flex items-center gap-2 mt-1">
+                            {available && (
+                              <span className="text-[10px] bg-success/15 text-success px-1.5 py-0.5 rounded-full">
+                                Available
+                              </span>
+                            )}
+                            <span className="text-xs text-muted">
+                              Score:{" "}
+                              <span className="font-semibold text-accent">
+                                {sessionMovie.score.toFixed(1)}
+                              </span>
+                            </span>
                           </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-2">
+                        <p className="text-[11px] text-muted mb-1">Your rating</p>
+                        <StarRating
+                          size="sm"
+                          rating={effectiveRating}
+                          onChange={(rating) => {
+                            const willing =
+                              votes.get(sessionMovie.id)?.willingToRewatch ??
+                              userVote?.willingToRewatch ??
+                              false;
+                            void (async () => {
+                              if (submittingVoteFor === sessionMovie.id) return;
+                              setVoteError(null);
+                              applyVoteLocally(sessionMovie.id, rating, willing);
+                              setSubmittingVoteFor(sessionMovie.id);
+                              const success = await persistVote(sessionMovie.id, rating, willing);
+                              await Promise.all([refreshSessionMovies(), refreshQueue()]);
+                              if (!success) {
+                                setVoteError("Could not save your rating update.");
+                              }
+                              setSubmittingVoteFor(null);
+                            })();
+                          }}
+                        />
+                        {userHasSeen && effectiveRating !== null && (
+                          <button
+                            onClick={() => {
+                              void handleRewatchToggle(
+                                sessionMovie.id,
+                                !effectiveWilling
+                              );
+                            }}
+                            className={`mt-2 text-[11px] px-2 py-1 rounded-lg transition-all ${
+                              effectiveWilling
+                                ? "bg-accent-soft text-accent border border-accent/30"
+                                : "bg-card-hover text-muted border border-border"
+                            }`}
+                          >
+                            {effectiveWilling
+                              ? "Willing to rewatch"
+                              : "Seen it. Tap if willing to rewatch"}
+                          </button>
                         )}
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {sessionData.participants.map((participant) => {
+                          const vote = sessionMovie.votes.find(
+                            (existingVote) => existingVote.userId === participant.userId
+                          );
+                          return (
+                            <div
+                              key={participant.userId}
+                              className="flex items-center gap-1 text-xs bg-card-hover rounded-full px-2 py-1"
+                            >
+                              <span className="text-muted">{participant.user.name}:</span>
+                              {vote ? (
+                                <span className="font-semibold">
+                                  {"★".repeat(Math.round(vote.rating))}
+                                  <span className="text-muted">
+                                    {"★".repeat(5 - Math.round(vote.rating))}
+                                  </span>
+                                </span>
+                              ) : (
+                                <span className="text-muted italic">pending</span>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   </div>
-                );
-              })}
+                </div>
+              );
+            })}
           </div>
 
-          {/* Action buttons */}
           <div className="flex gap-3">
-            <Button
-              variant="secondary"
-              size="lg"
-              className="flex-1"
-              onClick={goBackToVoting}
-            >
-              Edit My Ratings
+            <Button variant="secondary" size="lg" className="flex-1" onClick={goBackToVoting}>
+              Continue Rating
             </Button>
-            <Button
-              size="lg"
-              className="flex-1"
-              onClick={decideMovie}
-              loading={deciding}
-            >
+            <Button size="lg" className="flex-1" onClick={decideMovie} loading={deciding}>
               Finalize Decision
             </Button>
           </div>
 
           <p className="text-[11px] text-muted text-center">
-            The movie with the highest consensus score (60% average + 40% minimum rating) will be selected.
+            Winner score = 60% average rating + 40% minimum rating across voters.
           </p>
         </div>
       )}
 
-      {/* Step: Decided */}
       {step === "decided" && decidedMovie && (
         <div className="text-center space-y-6 py-8 animate-slide-up">
           <div className="w-20 h-20 mx-auto bg-success/15 rounded-full flex items-center justify-center">
-            <svg className="w-10 h-10 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            <svg
+              className="w-10 h-10 text-success"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M5 13l4 4L19 7"
+              />
             </svg>
           </div>
 
@@ -958,16 +1189,10 @@ export default function SessionPage() {
 
           <div className="bg-card border border-border rounded-xl p-4 inline-block">
             <div className="text-sm text-muted">Consensus Score</div>
-            <div className="text-2xl font-bold text-accent">
-              {decidedMovie.score.toFixed(1)}/5
-            </div>
+            <div className="text-2xl font-bold text-accent">{decidedMovie.score.toFixed(1)}/5</div>
           </div>
 
-          <Button
-            variant="secondary"
-            onClick={() => router.push("/dashboard")}
-            className="mt-4"
-          >
+          <Button variant="secondary" onClick={() => router.push("/dashboard")} className="mt-4">
             Back to Dashboard
           </Button>
         </div>
