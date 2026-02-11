@@ -31,6 +31,19 @@ interface ArchetypeSignature {
   studios?: string[];
 }
 
+interface MovieQuickRating {
+  rating: number | null;
+  hasSeen: boolean;
+  notHeardOf: boolean;
+}
+
+interface RateableMovie {
+  id: string;
+  title: string;
+  year: number | null;
+  posterUrl: string | null;
+}
+
 interface ProfileStats {
   user: {
     id: string;
@@ -227,12 +240,106 @@ function RatingDistribution({
   );
 }
 
+function ProfileMovieCard({
+  movie,
+  canRate,
+  ratingState,
+  isSaving,
+  onRate,
+  onToggleSeen,
+}: {
+  movie: RateableMovie;
+  canRate: boolean;
+  ratingState: MovieQuickRating;
+  isSaving: boolean;
+  onRate: (movieId: string, rating: number) => void;
+  onToggleSeen: (movieId: string) => void;
+}) {
+  return (
+    <div className="group shrink-0 w-24">
+      <div className="relative rounded-lg overflow-hidden border border-border">
+        {movie.posterUrl ? (
+          <img
+            src={movie.posterUrl}
+            alt={movie.title}
+            className="w-full aspect-[2/3] object-cover"
+          />
+        ) : (
+          <div className="w-full aspect-[2/3] bg-border flex items-center justify-center">
+            <span className="text-xs text-muted">No poster</span>
+          </div>
+        )}
+
+        <div className="absolute inset-0 bg-black/70 p-1.5 flex flex-col justify-end transition-opacity opacity-100 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
+          <div className="text-[10px] text-white/90 mb-1 truncate">
+            {ratingState.rating ? `Your rating: ${ratingState.rating}/5` : "Not rated yet"}
+          </div>
+
+          <button
+            type="button"
+            className={`text-[10px] px-1.5 py-0.5 rounded border mb-1 text-left ${
+              ratingState.hasSeen
+                ? "bg-emerald-500/30 border-emerald-300/50 text-emerald-100"
+                : "bg-white/10 border-white/30 text-white"
+            } ${canRate ? "hover:bg-white/20" : "opacity-60 cursor-not-allowed"}`}
+            disabled={!canRate || isSaving}
+            onClick={() => onToggleSeen(movie.id)}
+          >
+            {ratingState.hasSeen ? "Seen" : "Unseen"}
+          </button>
+
+          <div className="flex items-center gap-0.5">
+            {[1, 2, 3, 4, 5].map((star) => (
+              <button
+                key={star}
+                type="button"
+                className={`w-3.5 h-3.5 ${canRate ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
+                disabled={!canRate || isSaving}
+                onClick={() => onRate(movie.id, star)}
+                title={`Rate ${star} stars`}
+              >
+                <svg
+                  viewBox="0 0 20 20"
+                  className={`w-full h-full ${
+                    (ratingState.rating ?? 0) >= star
+                      ? "text-yellow-400"
+                      : "text-white/45"
+                  }`}
+                  fill="currentColor"
+                >
+                  <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                </svg>
+              </button>
+            ))}
+          </div>
+          {isSaving && <div className="text-[10px] text-white/80 mt-1">Saving...</div>}
+        </div>
+      </div>
+
+      <div className="text-[11px] font-medium truncate mt-1">
+        {movie.title}
+      </div>
+      {movie.year ? (
+        <div className="text-[10px] text-muted">{movie.year}</div>
+      ) : null}
+    </div>
+  );
+}
+
 function MoviePersonalityCard({
   personality,
-  targetUserId,
+  canRate,
+  movieRatings,
+  savingMovieIds,
+  onRate,
+  onToggleSeen,
 }: {
   personality: NonNullable<ProfileStats["moviePersonality"]>;
-  targetUserId: string;
+  canRate: boolean;
+  movieRatings: Record<string, MovieQuickRating>;
+  savingMovieIds: Record<string, boolean>;
+  onRate: (movieId: string, rating: number) => void;
+  onToggleSeen: (movieId: string) => void;
 }) {
   const renderPosterRow = (
     title: string,
@@ -244,27 +351,15 @@ function MoviePersonalityCard({
         <div className="text-sm font-medium mb-2">{title}</div>
         <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
           {movies.slice(0, 10).map((m) => (
-            <Link
+            <ProfileMovieCard
               key={m.id}
-              href={`/preferences/movies?movieId=${encodeURIComponent(m.id)}&returnTo=${encodeURIComponent(`/profile?userId=${targetUserId}`)}`}
-              className="shrink-0 w-24"
-              title={`Rate: ${m.title}${m.year ? ` (${m.year})` : ""}`}
-            >
-              {m.posterUrl ? (
-                <img
-                  src={m.posterUrl}
-                  alt={m.title}
-                  className="w-full aspect-[2/3] object-cover rounded-lg border border-border hover:border-accent transition-colors"
-                />
-              ) : (
-                <div className="w-full aspect-[2/3] bg-border rounded-lg flex items-center justify-center border border-border">
-                  <span className="text-xs text-muted">No poster</span>
-                </div>
-              )}
-              <div className="text-[11px] font-medium truncate mt-1">
-                {m.title}
-              </div>
-            </Link>
+              movie={{ id: m.id, title: m.title, year: m.year, posterUrl: m.posterUrl }}
+              canRate={canRate}
+              ratingState={movieRatings[m.id] ?? { rating: null, hasSeen: false, notHeardOf: false }}
+              isSaving={Boolean(savingMovieIds[m.id])}
+              onRate={onRate}
+              onToggleSeen={onToggleSeen}
+            />
           ))}
         </div>
       </div>
@@ -539,6 +634,8 @@ function ProfilePageContent() {
   const [stats, setStats] = useState<ProfileStats | null>(null);
   const [householdMembers, setHouseholdMembers] = useState<HouseholdMemberOption[]>([]);
   const [error, setError] = useState<ProfileLoadError | null>(null);
+  const [movieRatings, setMovieRatings] = useState<Record<string, MovieQuickRating>>({});
+  const [savingMovieIds, setSavingMovieIds] = useState<Record<string, boolean>>({});
 
   const selectedUserId =
     searchParams.get("userId")?.trim() ||
@@ -624,6 +721,34 @@ function ProfilePageContent() {
       !activeError &&
       (!stats || stats.user.id !== selectedUserId));
 
+  const isOwnProfile = Boolean(stats && stats.user.id === (session?.user?.id ?? ""));
+
+  useEffect(() => {
+    if (!isOwnProfile || status !== "authenticated") return;
+
+    let cancelled = false;
+    fetch("/api/ratings")
+      .then((res) => (res.ok ? res.json() : []))
+      .then((rows) => {
+        if (cancelled || !Array.isArray(rows)) return;
+        const next: Record<string, MovieQuickRating> = {};
+        for (const row of rows) {
+          if (!row?.movieId) continue;
+          next[row.movieId] = {
+            rating: typeof row.rating === "number" ? row.rating : null,
+            hasSeen: Boolean(row.hasSeen),
+            notHeardOf: Boolean(row.notHeardOf),
+          };
+        }
+        setMovieRatings(next);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOwnProfile, status, stats?.user.id]);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -654,7 +779,46 @@ function ProfilePageContent() {
     hidden_gems: "Hidden Gems",
   };
 
-  const isOwnProfile = stats.user.id === (session?.user?.id ?? "");
+  const saveRating = async (movieId: string, next: MovieQuickRating) => {
+    setSavingMovieIds((prev) => ({ ...prev, [movieId]: true }));
+    try {
+      const res = await fetch("/api/ratings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          movieId,
+          rating: next.rating,
+          hasSeen: next.hasSeen,
+          notHeardOf: false,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error("Failed to save rating");
+      }
+    } finally {
+      setSavingMovieIds((prev) => ({ ...prev, [movieId]: false }));
+    }
+  };
+
+  const handleRateMovie = (movieId: string, rating: number) => {
+    if (!isOwnProfile) return;
+    const prev = movieRatings[movieId] ?? { rating: null, hasSeen: false, notHeardOf: false };
+    const next: MovieQuickRating = { ...prev, rating, notHeardOf: false };
+    setMovieRatings((curr) => ({ ...curr, [movieId]: next }));
+    void saveRating(movieId, next);
+  };
+
+  const handleToggleSeen = (movieId: string) => {
+    if (!isOwnProfile) return;
+    const prev = movieRatings[movieId] ?? { rating: null, hasSeen: false, notHeardOf: false };
+    const next: MovieQuickRating = { ...prev, hasSeen: !prev.hasSeen };
+    setMovieRatings((curr) => ({ ...curr, [movieId]: next }));
+
+    // Persist immediately only when a rating exists; otherwise keep draft until stars are picked.
+    if (next.rating !== null) {
+      void saveRating(movieId, next);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -848,7 +1012,14 @@ function ProfilePageContent() {
 
       {/* Movie Personality */}
       {stats.moviePersonality && (
-        <MoviePersonalityCard personality={stats.moviePersonality} targetUserId={stats.user.id} />
+        <MoviePersonalityCard
+          personality={stats.moviePersonality}
+          canRate={isOwnProfile}
+          movieRatings={movieRatings}
+          savingMovieIds={savingMovieIds}
+          onRate={handleRateMovie}
+          onToggleSeen={handleToggleSeen}
+        />
       )}
 
       {/* Stats Grid */}
@@ -989,35 +1160,15 @@ function ProfilePageContent() {
           <h3 className="font-semibold mb-4">Recent Favorites</h3>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
             {stats.recentHighRatedMovies.map((movie) => (
-              <div key={movie.id} className="space-y-1">
-                <Link
-                  href={`/preferences/movies?movieId=${encodeURIComponent(movie.id)}&returnTo=${encodeURIComponent(`/profile?userId=${stats.user.id}`)}`}
-                  title={`Rate: ${movie.title}${movie.year ? ` (${movie.year})` : ""}`}
-                >
-                  {movie.posterUrl ? (
-                    <img
-                      src={movie.posterUrl}
-                      alt={movie.title}
-                      className="w-full aspect-[2/3] object-cover rounded-lg border border-border hover:border-accent transition-colors"
-                    />
-                  ) : (
-                    <div className="w-full aspect-[2/3] bg-border rounded-lg flex items-center justify-center border border-border">
-                      <span className="text-xs text-muted">No poster</span>
-                    </div>
-                  )}
-                </Link>
-                <div className="text-xs font-medium truncate">{movie.title}</div>
-                <div className="flex items-center gap-1">
-                  <svg
-                    className="w-3 h-3 text-yellow-500"
-                    fill="currentColor"
-                    viewBox="0 0 20 20"
-                  >
-                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-                  </svg>
-                  <span className="text-xs text-muted">{movie.rating}</span>
-                </div>
-              </div>
+              <ProfileMovieCard
+                key={movie.id}
+                movie={{ id: movie.id, title: movie.title, year: movie.year, posterUrl: movie.posterUrl }}
+                canRate={isOwnProfile}
+                ratingState={movieRatings[movie.id] ?? { rating: movie.rating, hasSeen: false, notHeardOf: false }}
+                isSaving={Boolean(savingMovieIds[movie.id])}
+                onRate={handleRateMovie}
+                onToggleSeen={handleToggleSeen}
+              />
             ))}
           </div>
         </div>

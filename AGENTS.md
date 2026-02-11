@@ -710,3 +710,9 @@ Core entities in `prisma/schema.prisma`:
   - Added `scripts/rename-archetypes.ts` to apply curated, more informative cluster names to currently trained archetypes.
   - Added stronger cluster label heuristics in `nameArchetype()` to reduce repetitive "Drama/Action Enthusiast" naming on future retrains.
   - Learned user workflow preference: profile insights should be immediately actionable (tap a suggested movie and rate it) and concise on-screen.
+- 2026-02-11 (Profile inline rating controls):
+  - Replaced profile movie-card deep links with inline poster overlays that support direct star rating and seen/unseen toggling on the profile page itself (`src/app/(app)/profile/page.tsx`).
+  - Profile now fetches current user movie ratings and renders them per poster (filled stars for rated titles, empty stars for unrated), with hover/focus overlays on desktop and always-accessible controls on mobile.
+  - Added in-place rating persistence from profile via `POST /api/ratings` and optimistic per-movie saving state.
+  - Behavior detail: seen/unseen toggles for unrated movies are stored as local draft until a star rating is chosen, then persisted together.
+  - Learned product preference: users want lightweight triage from profile (rate/seen decisions in context) without navigation jumps to a separate matching/rating screen.
