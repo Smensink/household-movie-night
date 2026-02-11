@@ -118,7 +118,8 @@ CMD ["sh", "-c", "\
           echo \"[Background] GPU has ${GPU_PROC_COUNT} active compute process(es); deferring MF retrain.\"; \
         fi; \
       else \
-        echo '[Background] nvidia-smi not available; proceeding with MF retrain without external GPU-idle verification.'; \
+        GPU_BUSY=1; \
+        echo '[Background] nvidia-smi not available; skipping MF retrain to avoid GPU contention risk.'; \
       fi; \
       if [ \"$GPU_BUSY\" -eq 0 ]; then \
         echo '[Background] Triggering scheduled MF retrain...' && \
