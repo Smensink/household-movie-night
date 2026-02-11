@@ -806,13 +806,13 @@ export async function evaluateHeuristicVsMF(
 
   const pairwiseTotal = mfWins + heurWins + ties;
   const currentAdaptiveParams: AdaptiveBlendParams = {
-    minWarm: 0.04,
-    maxWarm: 0.6,
+    minWarm: 0.07,
+    maxWarm: 0.75,
     minCold: 0.18,
     maxCold: 0.75,
-    explorationLift: 0.12,
+    explorationLift: 0.18,
     evidencePower: 1,
-    minFloorMultiplier: 0.5,
+    minFloorMultiplier: 0,
   };
   const currentAdaptive = evaluateHybridStrategy(
     hybridRows,

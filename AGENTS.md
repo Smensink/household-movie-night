@@ -833,4 +833,5 @@ Core entities in `prisma/schema.prisma`:
     - MF `RMSE=0.780`, `MAE=0.701`
     - Heuristic `RMSE=0.876`, `MAE=0.674`
   - Applied tuned warm-user parameters in `GET /api/movies/discover` (`computeAdaptiveMfWeight`), while keeping cold-start guardrails conservative due limited cold-start evidence in the holdout sample.
+  - Aligned evaluator baseline constants (`src/lib/mf-heuristic-compare.ts` current adaptive strategy) with the deployed discovery blend constants to keep future comparisons apples-to-apples.
   - Learned workflow preference: user expects adaptive mixing choices to be empirically tuned on current household data, not only manually reasoned.
