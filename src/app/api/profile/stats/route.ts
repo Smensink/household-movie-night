@@ -230,6 +230,11 @@ export async function GET(req: NextRequest) {
             title: true,
             year: true,
             posterUrl: true,
+            genres: {
+              select: {
+                genre: { select: { id: true, name: true } },
+              },
+            },
             cast: {
               select: { person: { select: { id: true, name: true } } },
               take: 5, // Top 5 cast members
@@ -263,12 +268,39 @@ export async function GET(req: NextRequest) {
 
   // Calculate genre affinities from rankings
   const maxRank = Math.max(totalGenres, 1);
-  const genreAffinities: AffinityItem[] = genreRankings.map((gr) => ({
-    id: gr.genre.id,
-    name: gr.genre.name,
-    affinity: maxRank <= 1 ? 0 : ((maxRank - gr.rank) / (maxRank - 1)) * 2 - 1,
-    ratingCount: 1,
-  }));
+  const genreAccumulators = new Map<string, AffinityAccumulator>();
+
+  // Direct genre rankings are the strongest genre signal.
+  for (const gr of genreRankings) {
+    const score = maxRank <= 1 ? 0 : ((maxRank - gr.rank) / (maxRank - 1)) * 2 - 1;
+    genreAccumulators.set(gr.genre.id, {
+      name: gr.genre.name,
+      weightedSum: score * DIRECT_RATING_WEIGHT,
+      totalWeight: DIRECT_RATING_WEIGHT,
+    });
+  }
+
+  // Infer genre affinity from movie ratings so users without genre ranking still get genre profile.
+  for (const mr of movieRatings) {
+    if (mr.rating === null) continue;
+    const movieAffinity = normalizeRating(mr.rating);
+    for (const mg of mr.movie.genres) {
+      const genreId = mg.genre.id;
+      const existing = genreAccumulators.get(genreId);
+      if (existing) {
+        existing.weightedSum += movieAffinity * INFERRED_RATING_WEIGHT;
+        existing.totalWeight += INFERRED_RATING_WEIGHT;
+      } else {
+        genreAccumulators.set(genreId, {
+          name: mg.genre.name,
+          weightedSum: movieAffinity * INFERRED_RATING_WEIGHT,
+          totalWeight: INFERRED_RATING_WEIGHT,
+        });
+      }
+    }
+  }
+
+  const genreAffinities = mergeAffinities(genreAccumulators);
 
   // Build actor affinities: direct ratings (strong) + inferred from movies (weak)
   const actorAccumulators = new Map<string, AffinityAccumulator>();
@@ -718,6 +750,5 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(stats);
 }
-
 
 

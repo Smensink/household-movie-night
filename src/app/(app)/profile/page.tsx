@@ -722,9 +722,10 @@ function ProfilePageContent() {
       (!stats || stats.user.id !== selectedUserId));
 
   const isOwnProfile = Boolean(stats && stats.user.id === (session?.user?.id ?? ""));
+  const canQuickRate = status === "authenticated";
 
   useEffect(() => {
-    if (!isOwnProfile || status !== "authenticated") return;
+    if (status !== "authenticated") return;
 
     let cancelled = false;
     fetch("/api/ratings")
@@ -747,7 +748,7 @@ function ProfilePageContent() {
     return () => {
       cancelled = true;
     };
-  }, [isOwnProfile, status, stats?.user.id]);
+  }, [status, session?.user?.id]);
 
   if (isLoading) {
     return (
@@ -801,7 +802,7 @@ function ProfilePageContent() {
   };
 
   const handleRateMovie = (movieId: string, rating: number) => {
-    if (!isOwnProfile) return;
+    if (!canQuickRate) return;
     const prev = movieRatings[movieId] ?? { rating: null, hasSeen: false, notHeardOf: false };
     const next: MovieQuickRating = { ...prev, rating, notHeardOf: false };
     setMovieRatings((curr) => ({ ...curr, [movieId]: next }));
@@ -809,7 +810,7 @@ function ProfilePageContent() {
   };
 
   const handleToggleSeen = (movieId: string) => {
-    if (!isOwnProfile) return;
+    if (!canQuickRate) return;
     const prev = movieRatings[movieId] ?? { rating: null, hasSeen: false, notHeardOf: false };
     const next: MovieQuickRating = { ...prev, hasSeen: !prev.hasSeen };
     setMovieRatings((curr) => ({ ...curr, [movieId]: next }));
@@ -1014,7 +1015,7 @@ function ProfilePageContent() {
       {stats.moviePersonality && (
         <MoviePersonalityCard
           personality={stats.moviePersonality}
-          canRate={isOwnProfile}
+          canRate={canQuickRate}
           movieRatings={movieRatings}
           savingMovieIds={savingMovieIds}
           onRate={handleRateMovie}
@@ -1163,8 +1164,8 @@ function ProfilePageContent() {
               <ProfileMovieCard
                 key={movie.id}
                 movie={{ id: movie.id, title: movie.title, year: movie.year, posterUrl: movie.posterUrl }}
-                canRate={isOwnProfile}
-                ratingState={movieRatings[movie.id] ?? { rating: movie.rating, hasSeen: false, notHeardOf: false }}
+                canRate={canQuickRate}
+                ratingState={movieRatings[movie.id] ?? { rating: null, hasSeen: false, notHeardOf: false }}
                 isSaving={Boolean(savingMovieIds[movie.id])}
                 onRate={handleRateMovie}
                 onToggleSeen={handleToggleSeen}

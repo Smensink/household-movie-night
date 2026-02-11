@@ -716,3 +716,12 @@ Core entities in `prisma/schema.prisma`:
   - Added in-place rating persistence from profile via `POST /api/ratings` and optimistic per-movie saving state.
   - Behavior detail: seen/unseen toggles for unrated movies are stored as local draft until a star rating is chosen, then persisted together.
   - Learned product preference: users want lightweight triage from profile (rate/seen decisions in context) without navigation jumps to a separate matching/rating screen.
+- 2026-02-11 (Profile affinity inference consistency):
+  - Updated `GET /api/profile/stats` genre affinity calculation to blend direct genre rankings with weak inferred genre signals from rated movies (`MovieRating -> MovieGenre`) so users without explicit genre ranking still get populated genre affinities.
+  - Verified actor/director/studio affinity sections in the same endpoint already follow the same pattern (direct ratings + weak inference from rated movie metadata), so all four affinity sections remain behaviorally consistent.
+  - Learned product preference: profile affinity sections should populate from movie-rating behavior even when a user has not explicitly completed each dedicated preference section.
+- 2026-02-11 (Cross-profile movie quick-rating):
+  - Profile movie quick-rating controls are now enabled while viewing other household members’ profiles (`/profile?userId=...`), not only on self-profile.
+  - Quick-rating state now always loads from the logged-in viewer via `GET /api/ratings` and persists via `POST /api/ratings`, ensuring ratings are saved to the correct account (session user), never the viewed profile user.
+  - Fixed profile movie-card fallback state to avoid showing viewed user ratings as if they belonged to the viewer (unrated cards now default to empty stars unless viewer has a saved rating).
+  - Learned product preference: household profile browsing should support immediate “rate this for me” interactions without requiring navigation back to self profile.
