@@ -803,3 +803,10 @@ Core entities in `prisma/schema.prisma`:
   - Discovery now enforces a hard minimum vote-count floor (`>=500`) for standard titles, while retaining the explicit reduced threshold for very recent releases.
   - Also clamps user-configured `minVoteCount` to never drop below the baseline 500 floor.
   - Example regression prevented: low-vote items like `Forever Boys (2016)` (`voteCount=2`) are now excluded from rating queues.
+- 2026-02-11 (Heuristic vs MF backtest endpoint):
+  - Added `POST /api/mf/compare` (admin/internal) to evaluate heuristic-only vs MF-only rating prediction on a deterministic held-out split of historical household ratings.
+  - Added evaluator implementation in `src/lib/mf-heuristic-compare.ts`:
+    - Metrics: RMSE, MAE, MF coverage, and per-row win-rate (which predictor had lower absolute error).
+    - Uses deterministic split by `hash(userId,movieId)` for stable reruns.
+    - Heuristic side is deterministic (no random jitter) and disables direct target-movie leakage signals (no direct movie-affinity reuse and excludes self-rating in household signal for the target movie).
+  - Learned workflow preference: user wants direct empirical checks of heuristic vs MF behavior on prior ratings, not only model-training logs.
