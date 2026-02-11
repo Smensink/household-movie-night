@@ -150,6 +150,8 @@ const INFERRED_RATING_WEIGHT = 0.3; // Weak influence from movie ratings
 const ARCHETYPE_EXAMPLE_DISPLAY_LIMIT = 10;
 const ARCHETYPE_SIGNATURE_SAMPLE_SIZE = 36;
 const MIN_INFERRED_EVIDENCE_WEIGHT = 4;
+const DIRECT_SIGNAL_BASE_CONFIDENCE = 0.6;
+const INFERRED_CONFIDENCE_SCALE = 4;
 
 interface AffinityAccumulator {
   name: string;
@@ -170,6 +172,24 @@ function mergeAffinities(accumulators: Map<string, AffinityAccumulator>): Affini
     }
   }
   return result;
+}
+
+function confidenceFromEvidence(totalWeight: number, hasDirectSignal: boolean): number {
+  const clampedWeight = Math.max(0, totalWeight);
+  if (hasDirectSignal) {
+    const inferredWeight = Math.max(0, clampedWeight - DIRECT_RATING_WEIGHT);
+    return (
+      DIRECT_SIGNAL_BASE_CONFIDENCE +
+      (1 - DIRECT_SIGNAL_BASE_CONFIDENCE) * (1 - Math.exp(-inferredWeight / INFERRED_CONFIDENCE_SCALE))
+    );
+  }
+  return 1 - Math.exp(-clampedWeight / INFERRED_CONFIDENCE_SCALE);
+}
+
+function calibrateAffinity(rawAffinity: number, totalWeight: number, hasDirectSignal: boolean): number {
+  const clamped = Math.max(-1, Math.min(1, rawAffinity));
+  const confidence = confidenceFromEvidence(totalWeight, hasDirectSignal);
+  return clamped * confidence;
 }
 
 export async function GET(req: NextRequest) {
@@ -318,6 +338,7 @@ export async function GET(req: NextRequest) {
 
   // Build actor affinities: direct ratings (strong) + inferred from movies (weak)
   const actorAccumulators = new Map<string, AffinityAccumulator>();
+  const actorHasDirectSignal = new Map<string, boolean>();
 
   // Add direct actor ratings with strong weight
   for (const ar of actorRatings) {
@@ -327,6 +348,7 @@ export async function GET(req: NextRequest) {
         weightedSum: normalizeRating(ar.rating) * DIRECT_RATING_WEIGHT,
         totalWeight: DIRECT_RATING_WEIGHT,
       });
+      actorHasDirectSignal.set(ar.person.id, true);
     }
   }
 
@@ -351,10 +373,21 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const actorAffinities = mergeAffinities(actorAccumulators);
+  const actorAffinities = mergeAffinities(actorAccumulators).map((item) => {
+    const acc = actorAccumulators.get(item.id);
+    return {
+      ...item,
+      affinity: calibrateAffinity(
+        item.affinity,
+        acc?.totalWeight ?? item.ratingCount,
+        actorHasDirectSignal.get(item.id) === true
+      ),
+    };
+  });
 
   // Build director affinities: direct ratings (strong) + inferred from movies (weak)
   const directorAccumulators = new Map<string, AffinityAccumulator>();
+  const directorHasDirectSignal = new Map<string, boolean>();
 
   // Add direct director ratings with strong weight
   for (const dr of directorRatings) {
@@ -364,6 +397,7 @@ export async function GET(req: NextRequest) {
         weightedSum: normalizeRating(dr.rating) * DIRECT_RATING_WEIGHT,
         totalWeight: DIRECT_RATING_WEIGHT,
       });
+      directorHasDirectSignal.set(dr.person.id, true);
     }
   }
 
@@ -388,10 +422,21 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const directorAffinities = mergeAffinities(directorAccumulators);
+  const directorAffinities = mergeAffinities(directorAccumulators).map((item) => {
+    const acc = directorAccumulators.get(item.id);
+    return {
+      ...item,
+      affinity: calibrateAffinity(
+        item.affinity,
+        acc?.totalWeight ?? item.ratingCount,
+        directorHasDirectSignal.get(item.id) === true
+      ),
+    };
+  });
 
   // Build studio affinities: direct ratings (strong) + inferred from movies (weak)
   const studioAccumulators = new Map<string, AffinityAccumulator>();
+  const studioHasDirectSignal = new Map<string, boolean>();
 
   // Add direct studio ratings with strong weight
   for (const sr of studioRatings) {
@@ -401,6 +446,7 @@ export async function GET(req: NextRequest) {
         weightedSum: normalizeRating(sr.rating) * DIRECT_RATING_WEIGHT,
         totalWeight: DIRECT_RATING_WEIGHT,
       });
+      studioHasDirectSignal.set(sr.studio.id, true);
     }
   }
 
@@ -425,7 +471,17 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const studioAffinities = mergeAffinities(studioAccumulators);
+  const studioAffinities = mergeAffinities(studioAccumulators).map((item) => {
+    const acc = studioAccumulators.get(item.id);
+    return {
+      ...item,
+      affinity: calibrateAffinity(
+        item.affinity,
+        acc?.totalWeight ?? item.ratingCount,
+        studioHasDirectSignal.get(item.id) === true
+      ),
+    };
+  });
 
   // Sort and get top/bottom
   const sortByAffinity = (a: AffinityItem, b: AffinityItem) => b.affinity - a.affinity;

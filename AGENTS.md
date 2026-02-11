@@ -733,3 +733,9 @@ Core entities in `prisma/schema.prisma`:
   - Profile genre top/bottom ordering in `GET /api/profile/stats` is now confidence-adjusted for inferred-only genres to avoid tiny-sample genres (for example 2-3 highly rated movies) outranking strongly supported genres.
   - Explicitly ranked genres are treated as full-confidence signals in ordering; inferred-only genres scale by evidence weight (`MIN_INFERRED_EVIDENCE_WEIGHT=4`) before sort.
   - Learned product preference: profile genre ranking should match intuitive long-run taste and not be dominated by small-sample artifacts.
+- 2026-02-11 (Affinity dynamic-range calibration for people/studios):
+  - Profile actor/director/studio affinities now apply confidence calibration before display/sorting in `GET /api/profile/stats`:
+    - Direct signal starts at baseline confidence (`DIRECT_SIGNAL_BASE_CONFIDENCE=0.6`) and grows with inferred evidence.
+    - Inferred-only signal confidence grows with accumulated evidence weight (`INFERRED_CONFIDENCE_SCALE=4`).
+  - This prevents many single-item direct ratings from showing as ±100% affinity while preserving stronger, high-evidence preferences at the top.
+  - Learned product preference: affinity percentages should express both preference direction and confidence, not just raw mean score.
