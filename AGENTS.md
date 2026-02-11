@@ -753,5 +753,5 @@ Core entities in `prisma/schema.prisma`:
   - Updated container background scheduling in `Dockerfile` so costly MF retraining is no longer attempted at startup or every 5 minutes.
   - Retraining is now attempted once per day during the 03:00 hour (server local time), with `LAST_RETRAIN_DATE` guard to prevent multiple runs in the same day.
   - During the 03:00 retrain window, routine backfill jobs are skipped to avoid resource contention.
-  - Added external GPU-idle gating via `nvidia-smi` process check before triggering `/api/mf/train`; if external compute processes are active (or `nvidia-smi` is unavailable), retrain is deferred.
+  - Added external GPU-load gating via `nvidia-smi` before triggering `/api/mf/train`; retrain is deferred only when GPU load is significant (`max utilization > 25%` or `max VRAM used > 5120MB`), or when `nvidia-smi` is unavailable.
   - Learned workflow preference: expensive GPU training should run overnight in a predictable window and avoid overlap with other heavy jobs.

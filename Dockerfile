@@ -112,10 +112,13 @@ CMD ["sh", "-c", "\
       echo '[Background] 03:00 retrain window reached; checking GPU availability...' ; \
       GPU_BUSY=0; \
       if command -v nvidia-smi >/dev/null 2>&1; then \
-        GPU_PROC_COUNT=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c '[0-9]' || true); \
-        if [ \"$GPU_PROC_COUNT\" -gt 0 ]; then \
+        GPU_MAX_UTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | awk 'BEGIN{max=0} {gsub(/ /,\"\"); if (($1+0)>max) max=($1+0)} END{print max+0}'); \
+        GPU_MAX_MEM=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | awk 'BEGIN{max=0} {gsub(/ /,\"\"); if (($1+0)>max) max=($1+0)} END{print max+0}'); \
+        if [ \"$GPU_MAX_UTIL\" -gt 25 ] || [ \"$GPU_MAX_MEM\" -gt 5120 ]; then \
           GPU_BUSY=1; \
-          echo \"[Background] GPU has ${GPU_PROC_COUNT} active compute process(es); deferring MF retrain.\"; \
+          echo \"[Background] GPU busy (max util=${GPU_MAX_UTIL}%, max VRAM=${GPU_MAX_MEM}MB); deferring MF retrain.\"; \
+        else \
+          echo \"[Background] GPU within retrain threshold (max util=${GPU_MAX_UTIL}%, max VRAM=${GPU_MAX_MEM}MB).\"; \
         fi; \
       else \
         GPU_BUSY=1; \
