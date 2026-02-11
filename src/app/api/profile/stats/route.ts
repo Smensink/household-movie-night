@@ -149,6 +149,7 @@ const DIRECT_RATING_WEIGHT = 1.0;
 const INFERRED_RATING_WEIGHT = 0.3; // Weak influence from movie ratings
 const ARCHETYPE_EXAMPLE_DISPLAY_LIMIT = 10;
 const ARCHETYPE_SIGNATURE_SAMPLE_SIZE = 36;
+const MIN_INFERRED_EVIDENCE_WEIGHT = 4;
 
 interface AffinityAccumulator {
   name: string;
@@ -271,6 +272,7 @@ export async function GET(req: NextRequest) {
   // Calculate genre affinities from rankings
   const maxRank = Math.max(totalGenres, 1);
   const genreAccumulators = new Map<string, AffinityAccumulator>();
+  const genreHasDirectSignal = new Map<string, boolean>();
 
   // Direct genre rankings are the strongest genre signal.
   for (const gr of genreRankings) {
@@ -280,6 +282,7 @@ export async function GET(req: NextRequest) {
       weightedSum: score * DIRECT_RATING_WEIGHT,
       totalWeight: DIRECT_RATING_WEIGHT,
     });
+    genreHasDirectSignal.set(gr.genre.id, true);
   }
 
   // Infer genre affinity from movie ratings so users without genre ranking still get genre profile.
@@ -303,6 +306,15 @@ export async function GET(req: NextRequest) {
   }
 
   const genreAffinities = mergeAffinities(genreAccumulators);
+
+  const genreSortScore = (item: AffinityItem): number => {
+    const acc = genreAccumulators.get(item.id);
+    const hasDirect = genreHasDirectSignal.get(item.id) === true;
+    if (!acc) return item.affinity;
+    if (hasDirect) return item.affinity;
+    const confidence = Math.min(1, acc.totalWeight / MIN_INFERRED_EVIDENCE_WEIGHT);
+    return item.affinity * confidence;
+  };
 
   // Build actor affinities: direct ratings (strong) + inferred from movies (weak)
   const actorAccumulators = new Map<string, AffinityAccumulator>();
@@ -418,8 +430,13 @@ export async function GET(req: NextRequest) {
   // Sort and get top/bottom
   const sortByAffinity = (a: AffinityItem, b: AffinityItem) => b.affinity - a.affinity;
 
-  const topGenres = [...genreAffinities].sort(sortByAffinity).slice(0, 5);
-  const bottomGenres = [...genreAffinities].sort(sortByAffinity).slice(-5).reverse();
+  const topGenres = [...genreAffinities]
+    .sort((a, b) => genreSortScore(b) - genreSortScore(a))
+    .slice(0, 5);
+  const bottomGenres = [...genreAffinities]
+    .sort((a, b) => genreSortScore(b) - genreSortScore(a))
+    .slice(-5)
+    .reverse();
 
   const topActors = [...actorAffinities].sort(sortByAffinity).slice(0, 5);
   const bottomActors = [...actorAffinities].sort(sortByAffinity).slice(-5).reverse();
@@ -753,4 +770,3 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(stats);
 }
-

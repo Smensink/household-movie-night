@@ -729,3 +729,7 @@ Core entities in `prisma/schema.prisma`:
   - Kept profile archetype example rows capped at 10 posters (`archetypeLovedMovies` / `archetypeHatedMovies`) for concise one-row UX.
   - Increased archetype signature aggregation sample in `GET /api/profile/stats` from the displayed 10 loved movies to the top 36 loved movies (`ARCHETYPE_SIGNATURE_SAMPLE_SIZE=36`) so Distinctive Tags/Typical Years/Recurring Directors-Actors-Studios are more stable and less outlier-driven.
   - Learned product preference: profile signature summaries should reflect broader viewing patterns, not just the visible poster row.
+- 2026-02-11 (Genre affinity ordering confidence adjustment):
+  - Profile genre top/bottom ordering in `GET /api/profile/stats` is now confidence-adjusted for inferred-only genres to avoid tiny-sample genres (for example 2-3 highly rated movies) outranking strongly supported genres.
+  - Explicitly ranked genres are treated as full-confidence signals in ordering; inferred-only genres scale by evidence weight (`MIN_INFERRED_EVIDENCE_WEIGHT=4`) before sort.
+  - Learned product preference: profile genre ranking should match intuitive long-run taste and not be dominated by small-sample artifacts.
