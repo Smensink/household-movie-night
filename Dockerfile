@@ -92,19 +92,40 @@ CMD ["sh", "-c", "\
   curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/cleanup 2>&1 | head -c 500 && echo '' && \
   echo '[Startup] Importing MovieLens tag genome...' && \
   curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movielens/import 2>&1 | head -c 500 && echo '' && \
-  echo '[Startup] Checking/training recommendation model...' && \
-  curl -s -X PATCH -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/mf/train 2>&1 | head -c 500 && echo '' && \
+  echo '[Startup] Skipping immediate MF retrain (scheduled overnight at 03:00)...' && \
   echo '[Startup] All startup tasks complete.' && \
+  LAST_RETRAIN_DATE='' && \
   while true; do \
     sleep 300; \
-    echo '[Background] Backfilling vote counts...' && \
-    curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/backfill-votes 2>&1 | head -c 200 && echo '' && \
-    echo '[Background] Backfilling language/country data...' && \
-    curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/backfill-language 2>&1 | head -c 200 && echo '' && \
-    echo '[Background] Cleaning up obscure movies...' && \
-    curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/cleanup 2>&1 | head -c 200 && echo '' && \
-    echo '[Background] Checking if model retraining needed...' && \
-    curl -s -X PATCH -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/mf/train 2>&1 | head -c 200 && echo ''; \
+    NOW_HOUR=$(date +%H); \
+    NOW_HOUR_INT=$((10#$NOW_HOUR)); \
+    TODAY=$(date +%F); \
+    if [ \"$NOW_HOUR_INT\" -ne 3 ]; then \
+      echo '[Background] Backfilling vote counts...' && \
+      curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/backfill-votes 2>&1 | head -c 200 && echo '' && \
+      echo '[Background] Backfilling language/country data...' && \
+      curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/backfill-language 2>&1 | head -c 200 && echo '' && \
+      echo '[Background] Cleaning up obscure movies...' && \
+      curl -s -X POST -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/movies/cleanup 2>&1 | head -c 200 && echo ''; \
+    fi; \
+    if [ \"$NOW_HOUR_INT\" -eq 3 ] && [ \"$LAST_RETRAIN_DATE\" != \"$TODAY\" ]; then \
+      echo '[Background] 03:00 retrain window reached; checking GPU availability...' ; \
+      GPU_BUSY=0; \
+      if command -v nvidia-smi >/dev/null 2>&1; then \
+        GPU_PROC_COUNT=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c '[0-9]' || true); \
+        if [ \"$GPU_PROC_COUNT\" -gt 0 ]; then \
+          GPU_BUSY=1; \
+          echo \"[Background] GPU has ${GPU_PROC_COUNT} active compute process(es); deferring MF retrain.\"; \
+        fi; \
+      else \
+        echo '[Background] nvidia-smi not available; proceeding with MF retrain without external GPU-idle verification.'; \
+      fi; \
+      if [ \"$GPU_BUSY\" -eq 0 ]; then \
+        echo '[Background] Triggering scheduled MF retrain...' && \
+        curl -s -X PATCH -H \"x-internal-key: $INTERNAL_API_KEY\" http://localhost:3000/api/mf/train 2>&1 | head -c 500 && echo '' && \
+        LAST_RETRAIN_DATE=\"$TODAY\"; \
+      fi; \
+    fi; \
   done & \
   wait $SERVER_PID \
 "]

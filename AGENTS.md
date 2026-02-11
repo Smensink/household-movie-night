@@ -749,3 +749,9 @@ Core entities in `prisma/schema.prisma`:
   - Wired this lightweight assignment into movie rating writes (`POST/DELETE /api/ratings`) and profile loads (`GET /api/profile/stats`) so new or recently active users get archetype updates without waiting for full MF retraining.
   - Updated clustering save flow to preserve existing archetype names across retrains by centroid matching (greedy one-to-one), reducing label churn and preventing manual/curated names from being overwritten on each MF retrain.
   - Learned product preference: retraining and clustering should remain heavy background jobs, while per-user archetype assignment must be fast and incremental.
+- 2026-02-11 (Overnight MF retrain scheduling):
+  - Updated container background scheduling in `Dockerfile` so costly MF retraining is no longer attempted at startup or every 5 minutes.
+  - Retraining is now attempted once per day during the 03:00 hour (server local time), with `LAST_RETRAIN_DATE` guard to prevent multiple runs in the same day.
+  - During the 03:00 retrain window, routine backfill jobs are skipped to avoid resource contention.
+  - Added best-effort external GPU-idle gating via `nvidia-smi` process check before triggering `/api/mf/train`; if external compute processes are active, retrain is deferred.
+  - Learned workflow preference: expensive GPU training should run overnight in a predictable window and avoid overlap with other heavy jobs.
