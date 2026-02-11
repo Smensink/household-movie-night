@@ -1007,9 +1007,9 @@ export default function SessionPage() {
                         <Image
                           src={sessionMovie.movie.posterUrl}
                           alt={sessionMovie.movie.title}
-                          fill
-                          sizes="64px"
-                          className="w-full h-full object-cover"
+                          width={64}
+                          height={96}
+                          className="w-16 h-24 object-cover"
                         />
                       ) : (
                         <div className="w-full h-full flex items-center justify-center text-muted text-xs">

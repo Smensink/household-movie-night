@@ -795,3 +795,6 @@ Core entities in `prisma/schema.prisma`:
     - Prisma model default for `SessionParticipant.okWithRewatch` updated to `false`.
     - Session preferences page default toggle state changed to off.
   - Learned product preference: session voting should mirror Tinder-style rich-card interactions and treat “not okay with rewatches” as the default baseline.
+- 2026-02-11 (Leaderboard poster rendering bug fix):
+  - Fixed session leaderboard poster rendering in `/session/[id]` by switching the row poster thumbnail to explicit `Image` dimensions (`width=64`, `height=96`) instead of `fill` in that compact layout cell.
+  - This prevents occasional oversized/pixelated poster overlays covering the leaderboard UI.
