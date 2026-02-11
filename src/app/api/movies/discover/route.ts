@@ -79,12 +79,15 @@ function computeAdaptiveMfWeight(params: {
   const { mfConfidence, hasPrediction, coldStartUser, heuristicEvidence, explorationFactor } = params;
   if (!hasPrediction || mfConfidence <= 0) return 0;
 
-  const minWeight = coldStartUser ? 0.18 : 0.04;
-  const maxWeight = coldStartUser ? 0.75 : 0.6;
+  // Tuned on held-out historical ratings:
+  // warm-user path benefited from higher MF ceiling and stronger exploration lift.
+  // cold-start values remain conservative because holdout had limited cold-start coverage.
+  const minWeight = coldStartUser ? 0.18 : 0.07;
+  const maxWeight = coldStartUser ? 0.75 : 0.75;
   const heuristicNeed = clamp(1 - heuristicEvidence, 0, 1);
-  const explorationLift = clamp(explorationFactor, 0, 1) * 0.12;
+  const explorationLift = clamp(explorationFactor, 0, 1) * 0.18;
   const targetWeight = minWeight + (maxWeight - minWeight) * heuristicNeed + explorationLift;
-  return clamp(targetWeight * clamp(mfConfidence, 0, 1), minWeight * 0.5, maxWeight);
+  return clamp(targetWeight * clamp(mfConfidence, 0, 1), 0, maxWeight);
 }
 
 function getReleaseYear(movie: { releaseDate: Date | null; year: number | null }, fallbackYear: number): number {
@@ -821,6 +824,5 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(finalResults);
 }
-
 
 

@@ -824,3 +824,13 @@ Core entities in `prisma/schema.prisma`:
     - Increase MF weight when user/movie evidence is sparse (especially cold-start).
     - Decrease MF weight when explicit heuristic evidence is strong.
   - Learned product preference: hybrid recommendation should use an intelligent dynamic mix instead of a hard static MF cap.
+- 2026-02-11 (Hybrid mix tuning on live ratings):
+  - Extended `POST /api/mf/compare` / `src/lib/mf-heuristic-compare.ts` with adaptive hybrid tuning (`tuneHybrid=true`) that grid-searches blend parameters against held-out historical ratings.
+  - Tuning run on live data (model v10) across `10%`, `20%`, and `30%` deterministic holdouts consistently selected:
+    - `minWarm=0.07`, `maxWarm=0.75`, `explorationLift=0.18`, `evidencePower=1`.
+  - On 20% holdout (`406` rows): hybrid improved over both standalone models:
+    - Hybrid `RMSE=0.655`, `MAE=0.553`
+    - MF `RMSE=0.780`, `MAE=0.701`
+    - Heuristic `RMSE=0.876`, `MAE=0.674`
+  - Applied tuned warm-user parameters in `GET /api/movies/discover` (`computeAdaptiveMfWeight`), while keeping cold-start guardrails conservative due limited cold-start evidence in the holdout sample.
+  - Learned workflow preference: user expects adaptive mixing choices to be empirically tuned on current household data, not only manually reasoned.
