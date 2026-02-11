@@ -19,6 +19,29 @@ export type HeuristicVsMFEvalConfig = {
   minValidationRatingsPerUser: number; // default 5
   maxUsers: number | null; // default null
   includePerUser: boolean; // default false
+  tuneHybrid: boolean; // default false
+};
+
+type AdaptiveBlendParams = {
+  minWarm: number;
+  maxWarm: number;
+  minCold: number;
+  maxCold: number;
+  explorationLift: number;
+  evidencePower: number;
+  minFloorMultiplier: number;
+};
+
+type HybridStrategyResult = {
+  strategy: string;
+  params?: AdaptiveBlendParams;
+  rmse: number;
+  mae: number;
+  mfWeightMean: number;
+  mfWeightP90: number;
+  mfWeightMax: number;
+  hybridBeatsMfRate: number;
+  hybridBeatsHeuristicRate: number;
 };
 
 export type HeuristicVsMFEvalResult = {
@@ -36,6 +59,23 @@ export type HeuristicVsMFEvalResult = {
     mfBeatsHeuristicRate: number | null;
     heuristicBeatsMfRate: number | null;
     tieRate: number | null;
+    hybridRmse: number | null;
+    hybridMae: number | null;
+    hybridBeatsMfRate: number | null;
+    hybridBeatsHeuristicRate: number | null;
+  };
+  hybridStrategy?: {
+    strategy: string;
+    params?: AdaptiveBlendParams;
+    mfWeightMean: number;
+    mfWeightP90: number;
+    mfWeightMax: number;
+  };
+  tuning?: {
+    objective: "rmse_then_mae";
+    strategiesSearched: number;
+    recommended: HybridStrategyResult;
+    topStrategies: HybridStrategyResult[];
   };
   caveats: string[];
   perUser?: HeuristicVsMFEvalUserResult[];
@@ -68,6 +108,16 @@ type EvalMovie = {
   radarrSync: { available: boolean } | null;
 };
 
+type HybridEvalRow = {
+  actual: number;
+  heuristicPred: number;
+  mfPred: number;
+  hasMfPrediction: boolean;
+  coldStartUser: boolean;
+  explorationFactor: number;
+  heuristicEvidence: number;
+};
+
 function fnv1a32(input: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < input.length; i++) {
@@ -95,10 +145,32 @@ function normalizeRating(rating: number): number {
   return (rating - 3) / 2;
 }
 
+function computeColdStartUser(profile: Awaited<ReturnType<typeof buildDiscoveryPreferenceProfile>>): boolean {
+  return profile.userRatedMovieIds.size < 10 && profile.genreAffinity.size < 5;
+}
+
+function computeEffectiveExplorationFactor(
+  explorationFactor: number,
+  coldStartUser: boolean
+): number {
+  return coldStartUser ? Math.max(0.7, explorationFactor) : Math.pow(explorationFactor, 1.5);
+}
+
 function getReleaseYear(movie: { releaseDate: Date | null; year: number | null }, fallbackYear: number): number {
   if (movie.releaseDate) return movie.releaseDate.getFullYear();
   if (movie.year) return movie.year;
   return fallbackYear;
+}
+
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = clamp(p, 0, 1) * (sorted.length - 1);
+  const lo = Math.floor(rank);
+  const hi = Math.ceil(rank);
+  if (lo === hi) return sorted[lo];
+  const t = rank - lo;
+  return sorted[lo] * (1 - t) + sorted[hi] * t;
 }
 
 function computeSourceSignal(
@@ -306,6 +378,177 @@ function computeHeuristicRawScore(
   return heuristicScore * confidenceWeight;
 }
 
+function computeHeuristicEvidence(
+  movie: EvalMovie,
+  userId: string,
+  profile: Awaited<ReturnType<typeof buildDiscoveryPreferenceProfile>>
+): number {
+  const householdPeerCount = Math.max(1, profile.householdUserIds.length - 1);
+  const explicitRatingsFromPeers = movie.ratings.filter(
+    (rating) => rating.userId !== userId && !rating.notHeardOf && rating.rating !== null
+  );
+  const explicitRatingCoverage = explicitRatingsFromPeers.length / householdPeerCount;
+
+  const genreAffinityCoverage =
+    movie.genres.length > 0
+      ? movie.genres.filter((genre) => profile.genreAffinity.has(genre.genreId)).length /
+        movie.genres.length
+      : 0;
+  const actorAffinityCoverage =
+    movie.cast.length > 0
+      ? movie.cast.filter((castMember) => profile.actorAffinity.has(castMember.personId)).length /
+        movie.cast.length
+      : 0;
+  const directorAffinityCoverage =
+    movie.crew.length > 0
+      ? movie.crew.filter((crewMember) => profile.directorAffinity.has(crewMember.personId)).length /
+        movie.crew.length
+      : 0;
+  const studioAffinityCoverage =
+    movie.studios.length > 0
+      ? movie.studios.filter((studio) => profile.studioAffinity.has(studio.studioId)).length /
+        movie.studios.length
+      : 0;
+
+  // In held-out backtests we deliberately avoid counting direct user-movie affinity as evidence
+  // to prevent target-row leakage from prior explicit ratings.
+  const movieAffinityKnown = 0;
+
+  const affinityEvidence = clamp(
+    genreAffinityCoverage * 0.35 +
+      actorAffinityCoverage * 0.2 +
+      directorAffinityCoverage * 0.15 +
+      studioAffinityCoverage * 0.15 +
+      movieAffinityKnown * 0.15,
+    0,
+    1
+  );
+  const explicitEvidence = clamp(explicitRatingCoverage, 0, 1);
+  return clamp(explicitEvidence * 0.55 + affinityEvidence * 0.45, 0, 1);
+}
+
+function computeAdaptiveMfWeightFromParams(args: {
+  mfConfidence: number;
+  hasPrediction: boolean;
+  coldStartUser: boolean;
+  heuristicEvidence: number;
+  explorationFactor: number;
+  params: AdaptiveBlendParams;
+}): number {
+  const {
+    mfConfidence,
+    hasPrediction,
+    coldStartUser,
+    heuristicEvidence,
+    explorationFactor,
+    params,
+  } = args;
+  if (!hasPrediction || mfConfidence <= 0) return 0;
+
+  const minWeight = coldStartUser ? params.minCold : params.minWarm;
+  const maxWeight = coldStartUser ? params.maxCold : params.maxWarm;
+  const heuristicNeed = Math.pow(clamp(1 - heuristicEvidence, 0, 1), params.evidencePower);
+  const targetWeight =
+    minWeight + (maxWeight - minWeight) * heuristicNeed + explorationFactor * params.explorationLift;
+
+  return clamp(
+    targetWeight * clamp(mfConfidence, 0, 1),
+    minWeight * params.minFloorMultiplier,
+    maxWeight
+  );
+}
+
+function evaluateHybridStrategy(
+  rows: HybridEvalRow[],
+  strategyName: string,
+  mfConfidence: number,
+  params?: AdaptiveBlendParams
+): HybridStrategyResult | null {
+  if (rows.length === 0) return null;
+
+  let sse = 0;
+  let sae = 0;
+  let beatsMf = 0;
+  let beatsHeur = 0;
+  const weights: number[] = [];
+
+  for (const row of rows) {
+    const mfWeight = params
+      ? computeAdaptiveMfWeightFromParams({
+          mfConfidence,
+          hasPrediction: row.hasMfPrediction,
+          coldStartUser: row.coldStartUser,
+          heuristicEvidence: row.heuristicEvidence,
+          explorationFactor: row.explorationFactor,
+          params,
+        })
+      : row.hasMfPrediction
+        ? clamp(mfConfidence * 0.4, 0, 0.4)
+        : 0;
+    const hybridPred = row.heuristicPred * (1 - mfWeight) + row.mfPred * mfWeight;
+    const hybridErr = Math.abs(row.actual - hybridPred);
+    const mfErr = Math.abs(row.actual - row.mfPred);
+    const heurErr = Math.abs(row.actual - row.heuristicPred);
+
+    sse += hybridErr * hybridErr;
+    sae += hybridErr;
+    weights.push(mfWeight);
+
+    if (hybridErr + 1e-9 < mfErr) beatsMf++;
+    if (hybridErr + 1e-9 < heurErr) beatsHeur++;
+  }
+
+  return {
+    strategy: strategyName,
+    params,
+    rmse: Math.sqrt(sse / rows.length),
+    mae: sae / rows.length,
+    mfWeightMean: average(weights),
+    mfWeightP90: percentile(weights, 0.9),
+    mfWeightMax: Math.max(...weights),
+    hybridBeatsMfRate: beatsMf / rows.length,
+    hybridBeatsHeuristicRate: beatsHeur / rows.length,
+  };
+}
+
+function generateAdaptiveCandidateParams(): AdaptiveBlendParams[] {
+  const minWarmValues = [0.02, 0.04, 0.07];
+  const maxWarmValues = [0.45, 0.6, 0.75];
+  const minColdValues = [0.12, 0.18, 0.25];
+  const maxColdValues = [0.65, 0.75, 0.9];
+  const explorationLiftValues = [0.06, 0.12, 0.18];
+  const evidencePowerValues = [1.0, 1.25, 1.5];
+  const minFloorMultiplierValues = [0.0, 0.25, 0.5];
+
+  const candidates: AdaptiveBlendParams[] = [];
+  for (const minWarm of minWarmValues) {
+    for (const maxWarm of maxWarmValues) {
+      if (maxWarm <= minWarm) continue;
+      for (const minCold of minColdValues) {
+        for (const maxCold of maxColdValues) {
+          if (maxCold <= minCold) continue;
+          for (const explorationLift of explorationLiftValues) {
+            for (const evidencePower of evidencePowerValues) {
+              for (const minFloorMultiplier of minFloorMultiplierValues) {
+                candidates.push({
+                  minWarm,
+                  maxWarm,
+                  minCold,
+                  maxCold,
+                  explorationLift,
+                  evidencePower,
+                  minFloorMultiplier,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return candidates;
+}
+
 function fitLinearCalibration(points: Array<{ score: number; rating: number }>): {
   intercept: number;
   slope: number;
@@ -346,6 +589,7 @@ export async function evaluateHeuristicVsMF(
     minValidationRatingsPerUser: partial.minValidationRatingsPerUser ?? 5,
     maxUsers: partial.maxUsers ?? null,
     includePerUser: partial.includePerUser ?? false,
+    tuneHybrid: partial.tuneHybrid ?? false,
   };
 
   const model = await getModelMetadata();
@@ -365,6 +609,10 @@ export async function evaluateHeuristicVsMF(
         mfBeatsHeuristicRate: null,
         heuristicBeatsMfRate: null,
         tieRate: null,
+        hybridRmse: null,
+        hybridMae: null,
+        hybridBeatsMfRate: null,
+        hybridBeatsHeuristicRate: null,
       },
       caveats: [
         "No MF model metadata found.",
@@ -398,9 +646,15 @@ export async function evaluateHeuristicVsMF(
   let heurWins = 0;
   let ties = 0;
   const perUser: HeuristicVsMFEvalUserResult[] = [];
+  const hybridRows: HybridEvalRow[] = [];
 
   for (const userId of userIds) {
     const profile = await buildDiscoveryPreferenceProfile(userId);
+    const coldStartUser = computeColdStartUser(profile);
+    const effectiveExplorationFactor = computeEffectiveExplorationFactor(
+      profile.explorationFactor,
+      coldStartUser
+    );
 
     const ratings = await prisma.movieRating.findMany({
       where: {
@@ -515,6 +769,16 @@ export async function evaluateHeuristicVsMF(
       userMfSse += mfSqErr;
       userMfSae += mfAbsErr;
 
+      hybridRows.push({
+        actual,
+        heuristicPred,
+        mfPred,
+        hasMfPrediction: mfRaw !== undefined,
+        coldStartUser,
+        explorationFactor: effectiveExplorationFactor,
+        heuristicEvidence: computeHeuristicEvidence(row.movie as EvalMovie, userId, profile),
+      });
+
       if (mfAbsErr + 1e-9 < heurAbsErr) mfWins++;
       else if (heurAbsErr + 1e-9 < mfAbsErr) heurWins++;
       else ties++;
@@ -541,6 +805,47 @@ export async function evaluateHeuristicVsMF(
   }
 
   const pairwiseTotal = mfWins + heurWins + ties;
+  const currentAdaptiveParams: AdaptiveBlendParams = {
+    minWarm: 0.04,
+    maxWarm: 0.6,
+    minCold: 0.18,
+    maxCold: 0.75,
+    explorationLift: 0.12,
+    evidencePower: 1,
+    minFloorMultiplier: 0.5,
+  };
+  const currentAdaptive = evaluateHybridStrategy(
+    hybridRows,
+    "adaptive_current",
+    model.confidence,
+    currentAdaptiveParams
+  );
+  const fixed40 = evaluateHybridStrategy(hybridRows, "fixed_40_cap", model.confidence);
+
+  const strategyCandidates: HybridStrategyResult[] = [];
+  if (fixed40) strategyCandidates.push(fixed40);
+  if (currentAdaptive) strategyCandidates.push(currentAdaptive);
+  if (config.tuneHybrid) {
+    for (const params of generateAdaptiveCandidateParams()) {
+      const strategy = evaluateHybridStrategy(
+        hybridRows,
+        "adaptive_tuned",
+        model.confidence,
+        params
+      );
+      if (strategy) strategyCandidates.push(strategy);
+    }
+  }
+
+  strategyCandidates.sort((a, b) => {
+    if (a.rmse !== b.rmse) return a.rmse - b.rmse;
+    return a.mae - b.mae;
+  });
+
+  const recommendedHybrid = strategyCandidates[0] ?? currentAdaptive ?? fixed40 ?? null;
+  const activeHybrid = recommendedHybrid;
+  const hybridBeatsMfRate = activeHybrid?.hybridBeatsMfRate ?? null;
+  const hybridBeatsHeuristicRate = activeHybrid?.hybridBeatsHeuristicRate ?? null;
 
   return {
     model,
@@ -557,12 +862,34 @@ export async function evaluateHeuristicVsMF(
       mfBeatsHeuristicRate: pairwiseTotal > 0 ? mfWins / pairwiseTotal : null,
       heuristicBeatsMfRate: pairwiseTotal > 0 ? heurWins / pairwiseTotal : null,
       tieRate: pairwiseTotal > 0 ? ties / pairwiseTotal : null,
+      hybridRmse: activeHybrid?.rmse ?? null,
+      hybridMae: activeHybrid?.mae ?? null,
+      hybridBeatsMfRate,
+      hybridBeatsHeuristicRate,
     },
+    hybridStrategy: activeHybrid
+      ? {
+          strategy: activeHybrid.strategy,
+          params: activeHybrid.params,
+          mfWeightMean: activeHybrid.mfWeightMean,
+          mfWeightP90: activeHybrid.mfWeightP90,
+          mfWeightMax: activeHybrid.mfWeightMax,
+        }
+      : undefined,
+    tuning: config.tuneHybrid && strategyCandidates.length > 0
+      ? {
+          objective: "rmse_then_mae",
+          strategiesSearched: strategyCandidates.length,
+          recommended: strategyCandidates[0],
+          topStrategies: strategyCandidates.slice(0, 8),
+        }
+      : undefined,
     caveats: [
       "Deterministic holdout split by hash(userId,movieId) is used for comparability.",
       "Heuristic scores are linearly calibrated per user on that user's training subset before evaluating holdout rows.",
       "MF model is the currently saved model and may already include some holdout interactions from prior training runs, so this is not a full retrain-per-split benchmark.",
       "Heuristic evaluation disables direct self-rating leakage signals for the target movie (movie-specific affinity and self household vote).",
+      "Hybrid tuning (when enabled) optimizes RMSE first with MAE as tie-break on this holdout split.",
     ],
     perUser: config.includePerUser ? perUser : undefined,
     timingMs: Date.now() - startedAt,
