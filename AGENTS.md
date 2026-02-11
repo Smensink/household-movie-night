@@ -772,3 +772,10 @@ Core entities in `prisma/schema.prisma`:
   - Added a new page at `/preferences/radarr-threshold` with inline 1-5 star rating controls, “Haven’t heard of it,” and clear actions for near-threshold titles.
   - Added navigation entry in Preferences hub (`/preferences`) for “Near Radarr Threshold”.
   - Learned product preference: non-admin household members should be able to directly help push borderline titles over the Radarr threshold from a focused rating queue, rather than relying on admin/internal-only tools.
+- 2026-02-11 (Near-threshold watched-state clarity):
+  - Updated `/preferences/radarr-threshold` cards to include an explicit watched-status toggle (`Unseen` / `Seen`) per movie before rating.
+  - Ratings from this page now persist with the selected `hasSeen` state instead of always forcing unseen.
+  - Rating label text now adapts to watched state:
+    - Unseen: willingness to watch.
+    - Seen: how much the user liked it.
+  - Learned product preference: watched-state must be explicit and user-controlled anywhere movie ratings are submitted.

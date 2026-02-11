@@ -50,6 +50,9 @@ export default function RadarrThresholdPage() {
   const [loading, setLoading] = useState(true);
   const [savingMovieId, setSavingMovieId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [hasSeenDrafts, setHasSeenDrafts] = useState<Map<string, boolean>>(
+    new Map()
+  );
 
   useEffect(() => {
     if (status === "unauthenticated") {
@@ -81,7 +84,20 @@ export default function RadarrThresholdPage() {
     }
   }, [status]);
 
-  const submitRating = async (movieId: string, rating: number) => {
+  useEffect(() => {
+    if (!data) return;
+    setHasSeenDrafts((prev) => {
+      const next = new Map(prev);
+      for (const household of data.households) {
+        for (const movie of household.nearThreshold) {
+          next.set(movie.movieId, movie.userRating?.hasSeen ?? false);
+        }
+      }
+      return next;
+    });
+  }, [data]);
+
+  const submitRating = async (movieId: string, rating: number, hasSeen: boolean) => {
     setSavingMovieId(movieId);
     try {
       const response = await fetch("/api/ratings", {
@@ -90,7 +106,7 @@ export default function RadarrThresholdPage() {
         body: JSON.stringify({
           movieId,
           rating,
-          hasSeen: false,
+          hasSeen,
           notHeardOf: false,
         }),
       });
@@ -126,6 +142,11 @@ export default function RadarrThresholdPage() {
     } catch (ratingError) {
       setError(ratingError instanceof Error ? ratingError.message : "Could not save status");
     } finally {
+      setHasSeenDrafts((prev) => {
+        const next = new Map(prev);
+        next.set(movieId, false);
+        return next;
+      });
       setSavingMovieId(null);
     }
   };
@@ -172,8 +193,8 @@ export default function RadarrThresholdPage() {
         <div>
           <h1 className="text-2xl font-bold">Near Radarr Threshold</h1>
           <p className="text-sm text-muted mt-1">
-            Rate movies that are close to auto-sync. Your rating here is
-            willingness-to-watch and counts as unseen.
+            Rate movies that are close to auto-sync. Set watched status first,
+            then rate.
           </p>
           {data && (
             <p className="text-xs text-muted mt-2">
@@ -219,6 +240,8 @@ export default function RadarrThresholdPage() {
                     ? null
                     : movie.userRating?.rating ?? null;
                   const isSaving = savingMovieId === movie.movieId;
+                  const hasSeen =
+                    hasSeenDrafts.get(movie.movieId) ?? movie.userRating?.hasSeen ?? false;
 
                   return (
                     <article
@@ -279,13 +302,57 @@ export default function RadarrThresholdPage() {
                           </div>
 
                           <div>
+                            <p className="text-[11px] text-muted mb-1">Watched status:</p>
+                            <div className="inline-flex items-center gap-1 p-1 bg-card-hover border border-border rounded-xl">
+                              <button
+                                type="button"
+                                disabled={isSaving}
+                                onClick={() => {
+                                  setHasSeenDrafts((prev) => {
+                                    const next = new Map(prev);
+                                    next.set(movie.movieId, false);
+                                    return next;
+                                  });
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-[11px] transition ${
+                                  !hasSeen
+                                    ? "bg-accent text-white"
+                                    : "text-muted hover:text-foreground"
+                                }`}
+                              >
+                                Unseen
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isSaving}
+                                onClick={() => {
+                                  setHasSeenDrafts((prev) => {
+                                    const next = new Map(prev);
+                                    next.set(movie.movieId, true);
+                                    return next;
+                                  });
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-[11px] transition ${
+                                  hasSeen
+                                    ? "bg-accent text-white"
+                                    : "text-muted hover:text-foreground"
+                                }`}
+                              >
+                                Seen
+                              </button>
+                            </div>
+                          </div>
+
+                          <div>
                             <p className="text-[11px] text-muted mb-1">
-                              Your rating (willingness to watch):
+                              {hasSeen
+                                ? "Your rating (how much you liked it):"
+                                : "Your rating (willingness to watch):"}
                             </p>
                             <StarRating
                               rating={rating}
                               onChange={(nextRating) => {
-                                void submitRating(movie.movieId, nextRating);
+                                void submitRating(movie.movieId, nextRating, hasSeen);
                               }}
                               size="sm"
                             />
@@ -334,4 +401,3 @@ export default function RadarrThresholdPage() {
     </div>
   );
 }
-
