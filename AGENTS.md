@@ -840,3 +840,11 @@ Core entities in `prisma/schema.prisma`:
   - API update: `GET /api/profile/stats` now returns `moviePersonality.archetypeMostLovedMovies` computed from highest centroid similarity for the user’s assigned archetype.
   - UI update: `/profile` renders a new `Most Loved` poster row above `Uniquely Loved` / `Uniquely Avoided`.
   - Learned product preference: users want both "core archetype favorites" and "uniquely archetype-specific" examples visible on profile.
+- 2026-02-11 (Archetype row overlap reduction):
+  - Refined profile archetype movie selection logic in `GET /api/profile/stats` to reduce overlap between `Most Loved` and `Uniquely Loved`.
+  - New strategy:
+    - `Uniquely Loved`: selected by high uniqueness margin (target archetype similarity minus best non-target similarity), using a percentile-based strong-uniqueness cutoff.
+    - `Most Loved`: selected by high absolute similarity with an explicit penalty for high uniqueness, and excludes IDs already shown in `Uniquely Loved`.
+    - `Uniquely Avoided`: now uses a percentile-based strong-uniqueness cutoff on hate margin for consistency.
+  - Resulting behavior: the two positive rows become intentionally complementary (core favorites vs distinctive favorites) instead of near-duplicates.
+  - Learned product preference: profile archetype sections should maximize informational diversity, not repeat the same titles across rows.

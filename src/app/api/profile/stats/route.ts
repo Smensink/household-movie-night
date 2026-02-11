@@ -141,6 +141,18 @@ function median(nums: number[]): number | null {
     : sorted[mid];
 }
 
+function percentile(nums: number[], q: number): number | null {
+  if (nums.length === 0) return null;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const qq = Math.max(0, Math.min(1, q));
+  const idx = qq * (sorted.length - 1);
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  const t = idx - lo;
+  return sorted[lo] * (1 - t) + sorted[hi] * t;
+}
+
 function topKeys(map: Map<string, number>, limit: number): string[] {
   return Array.from(map.entries())
     .sort((a, b) => b[1] - a[1])
@@ -655,9 +667,11 @@ export async function GET(req: NextRequest) {
             });
             const vecById = new Map(vectors.map((v) => [v.entityId, v.vector]));
 
-            const mostLoved: ArchetypeMovieExample[] = [];
-            const loved: ArchetypeMovieExample[] = [];
-            const hated: ArchetypeMovieExample[] = [];
+            const signals: Array<{
+              movie: ArchetypeMovieExample;
+              loveMargin: number;
+              hateMargin: number;
+            }> = [];
 
             for (const m of candidates) {
               const raw = vecById.get(m.id);
@@ -679,54 +693,91 @@ export async function GET(req: NextRequest) {
               const loveMargin = tSim - maxOther;
               const hateMargin = minOther - tSim;
 
-              if (tSim > 0.08) {
-                mostLoved.push({
+              if (!Number.isFinite(tSim)) continue;
+              signals.push({
+                movie: {
                   id: m.id,
                   title: m.title,
                   year: m.year ?? null,
                   posterUrl: m.posterUrl ?? null,
                   uniqueness: Number.isFinite(loveMargin) ? loveMargin : 0,
                   similarity: tSim,
-                });
-              }
-
-              // Avoid noisy picks: require both margin and absolute position.
-              if (Number.isFinite(loveMargin) && loveMargin > 0.06 && tSim > 0.08) {
-                loved.push({
-                  id: m.id,
-                  title: m.title,
-                  year: m.year ?? null,
-                  posterUrl: m.posterUrl ?? null,
-                  uniqueness: loveMargin,
-                  similarity: tSim,
-                });
-              }
-              if (Number.isFinite(hateMargin) && hateMargin > 0.06 && tSim < 0.02) {
-                hated.push({
-                  id: m.id,
-                  title: m.title,
-                  year: m.year ?? null,
-                  posterUrl: m.posterUrl ?? null,
-                  uniqueness: hateMargin,
-                  similarity: tSim,
-                });
-              }
+                },
+                loveMargin: Number.isFinite(loveMargin) ? loveMargin : 0,
+                hateMargin: Number.isFinite(hateMargin) ? hateMargin : 0,
+              });
             }
 
-            mostLoved.sort((a, b) => {
-              if (b.similarity !== a.similarity) return b.similarity - a.similarity;
-              return b.uniqueness - a.uniqueness;
-            });
-            loved.sort((a, b) => b.uniqueness - a.uniqueness);
-            hated.sort((a, b) => b.uniqueness - a.uniqueness);
+            // Separate "most loved" and "uniquely loved" on purpose:
+            // - most loved = highest absolute archetype similarity with a penalty for very high uniqueness
+            // - uniquely loved = strongest margin over other archetypes
+            const positiveLoveMargins = signals
+              .map((s) => s.loveMargin)
+              .filter((v) => Number.isFinite(v) && v > 0);
+            const positiveHateMargins = signals
+              .map((s) => s.hateMargin)
+              .filter((v) => Number.isFinite(v) && v > 0);
 
-            moviePersonality.archetypeMostLovedMovies = mostLoved.slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
-            moviePersonality.archetypeLovedMovies = loved.slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
-            moviePersonality.archetypeHatedMovies = hated.slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
+            const strongUniqueLoveCutoff = Math.max(
+              0.06,
+              percentile(positiveLoveMargins, 0.75) ?? 0.06
+            );
+            const lowUniqueLoveCutoff = Math.max(
+              0.02,
+              percentile(positiveLoveMargins, 0.45) ?? 0.04
+            );
+            const strongUniqueHateCutoff = Math.max(
+              0.06,
+              percentile(positiveHateMargins, 0.75) ?? 0.06
+            );
+
+            const uniquelyLoved = signals
+              .filter((s) => s.movie.similarity > 0.08 && s.loveMargin >= strongUniqueLoveCutoff)
+              .map((s) => ({
+                movie: s.movie,
+                score: s.loveMargin * 0.8 + s.movie.similarity * 0.2,
+              }))
+              .sort((a, b) => b.score - a.score)
+              .map((s) => s.movie)
+              .slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
+
+            const uniqueLovedIds = new Set(uniquelyLoved.map((m) => m.id));
+            const mostLovedRanked = signals
+              .filter((s) => s.movie.similarity > 0.08 && !uniqueLovedIds.has(s.movie.id))
+              .map((s) => {
+                const consensusPenalty = Math.max(0, s.loveMargin - lowUniqueLoveCutoff) * 0.6;
+                return {
+                  movie: s.movie,
+                  score: s.movie.similarity - consensusPenalty,
+                };
+              })
+              .sort((a, b) => {
+                if (b.score !== a.score) return b.score - a.score;
+                return b.movie.similarity - a.movie.similarity;
+              })
+              .map((s) => s.movie);
+
+            const mostLoved = mostLovedRanked.slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
+
+            const uniquelyHated = signals
+              .filter((s) => s.movie.similarity < 0.02 && s.hateMargin >= strongUniqueHateCutoff)
+              .map((s) => ({
+                movie: { ...s.movie, uniqueness: s.hateMargin },
+                score: s.hateMargin * 0.85 + Math.max(0, -s.movie.similarity) * 0.15,
+              }))
+              .sort((a, b) => b.score - a.score)
+              .map((s) => s.movie)
+              .slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
+
+            moviePersonality.archetypeMostLovedMovies = mostLoved;
+            moviePersonality.archetypeLovedMovies = uniquelyLoved;
+            moviePersonality.archetypeHatedMovies = uniquelyHated;
 
             // Build a compact signature from a larger uniquely-loved sample so tags/years/people are
             // less sensitive to a handful of outliers, while still showing a concise 1-row example list.
-            const lovedIds = loved.slice(0, ARCHETYPE_SIGNATURE_SAMPLE_SIZE).map((m) => m.id);
+            const lovedIds = uniquelyLoved
+              .slice(0, ARCHETYPE_SIGNATURE_SAMPLE_SIZE)
+              .map((m) => m.id);
             if (lovedIds.length > 0) {
               const sigMovies = await prisma.movie.findMany({
                 where: { id: { in: lovedIds } },
