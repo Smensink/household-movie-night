@@ -74,6 +74,15 @@ interface ProfileStats {
     archetypeSimilarities?: { name: string; score: number }[];
     archetypeLovedMovies?: ArchetypeMovieExample[];
     archetypeHatedMovies?: ArchetypeMovieExample[];
+    archetypeSignature?: {
+      yearRange?: { min: number | null; max: number | null; median: number | null };
+      decades?: string[];
+      eras?: string[];
+      tags?: string[];
+      directors?: string[];
+      actors?: string[];
+      studios?: string[];
+    };
     ratingMean: number | null;
     ratingStdDev: number | null;
   } | null;
@@ -117,6 +126,22 @@ function normalizeUnit(a: number[]): number[] | null {
   const n = norm(a);
   if (!Number.isFinite(n) || n <= 0) return null;
   return a.map((v) => v / n);
+}
+
+function median(nums: number[]): number | null {
+  if (nums.length === 0) return null;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+function topKeys(map: Map<string, number>, limit: number): string[] {
+  return Array.from(map.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([k]) => k);
 }
 
 // Weight for direct ratings vs inferred from movies
@@ -555,8 +580,94 @@ export async function GET(req: NextRequest) {
             loved.sort((a, b) => b.uniqueness - a.uniqueness);
             hated.sort((a, b) => b.uniqueness - a.uniqueness);
 
-            moviePersonality.archetypeLovedMovies = loved.slice(0, 12);
-            moviePersonality.archetypeHatedMovies = hated.slice(0, 12);
+            moviePersonality.archetypeLovedMovies = loved.slice(0, 10);
+            moviePersonality.archetypeHatedMovies = hated.slice(0, 10);
+
+            // Build a compact signature from the top uniquely-loved examples.
+            const lovedIds = moviePersonality.archetypeLovedMovies.map((m) => m.id);
+            if (lovedIds.length > 0) {
+              const sigMovies = await prisma.movie.findMany({
+                where: { id: { in: lovedIds } },
+                select: {
+                  id: true,
+                  year: true,
+                  era: true,
+                  cast: {
+                    select: { person: { select: { name: true } } },
+                    take: 5,
+                    orderBy: { castOrder: "asc" },
+                  },
+                  crew: {
+                    where: { job: "Director" },
+                    select: { person: { select: { name: true } } },
+                    take: 3,
+                  },
+                  studios: {
+                    select: { studio: { select: { name: true } } },
+                    take: 3,
+                  },
+                  movieTags: {
+                    select: { tag: true, relevance: true },
+                    orderBy: { relevance: "desc" },
+                    take: 8,
+                  },
+                },
+              });
+
+              const years: number[] = [];
+              const decadeCounts = new Map<string, number>();
+              const eraCounts = new Map<string, number>();
+              const tagScores = new Map<string, number>();
+              const directorCounts = new Map<string, number>();
+              const actorCounts = new Map<string, number>();
+              const studioCounts = new Map<string, number>();
+
+              for (const m of sigMovies) {
+                if (m.year != null) {
+                  years.push(m.year);
+                  const decade = `${Math.floor(m.year / 10) * 10}s`;
+                  decadeCounts.set(decade, (decadeCounts.get(decade) || 0) + 1);
+                }
+                if (m.era) {
+                  eraCounts.set(m.era, (eraCounts.get(m.era) || 0) + 1);
+                }
+                for (const t of m.movieTags) {
+                  const w = Number.isFinite(t.relevance) ? t.relevance : 0;
+                  tagScores.set(t.tag, (tagScores.get(t.tag) || 0) + Math.max(0.1, w));
+                }
+                for (const d of m.crew) {
+                  const name = d.person?.name?.trim();
+                  if (!name) continue;
+                  directorCounts.set(name, (directorCounts.get(name) || 0) + 1);
+                }
+                for (const c of m.cast) {
+                  const name = c.person?.name?.trim();
+                  if (!name) continue;
+                  actorCounts.set(name, (actorCounts.get(name) || 0) + 1);
+                }
+                for (const s of m.studios) {
+                  const name = s.studio?.name?.trim();
+                  if (!name) continue;
+                  studioCounts.set(name, (studioCounts.get(name) || 0) + 1);
+                }
+              }
+
+              moviePersonality.archetypeSignature = {
+                yearRange: years.length
+                  ? {
+                      min: Math.min(...years),
+                      max: Math.max(...years),
+                      median: median(years),
+                    }
+                  : { min: null, max: null, median: null },
+                decades: topKeys(decadeCounts, 5),
+                eras: topKeys(eraCounts, 3),
+                tags: topKeys(tagScores, 10),
+                directors: topKeys(directorCounts, 6),
+                actors: topKeys(actorCounts, 8),
+                studios: topKeys(studioCounts, 6),
+              };
+            }
           }
         }
       }
@@ -607,7 +718,6 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(stats);
 }
-
 
 
 

@@ -21,6 +21,16 @@ interface ArchetypeMovieExample {
   similarity: number;
 }
 
+interface ArchetypeSignature {
+  yearRange?: { min: number | null; max: number | null; median: number | null };
+  decades?: string[];
+  eras?: string[];
+  tags?: string[];
+  directors?: string[];
+  actors?: string[];
+  studios?: string[];
+}
+
 interface ProfileStats {
   user: {
     id: string;
@@ -76,6 +86,7 @@ interface ProfileStats {
     archetypeSimilarities?: { name: string; score: number }[];
     archetypeLovedMovies?: ArchetypeMovieExample[];
     archetypeHatedMovies?: ArchetypeMovieExample[];
+    archetypeSignature?: ArchetypeSignature;
     ratingMean: number | null;
     ratingStdDev: number | null;
   } | null;
@@ -218,9 +229,48 @@ function RatingDistribution({
 
 function MoviePersonalityCard({
   personality,
+  targetUserId,
 }: {
   personality: NonNullable<ProfileStats["moviePersonality"]>;
+  targetUserId: string;
 }) {
+  const renderPosterRow = (
+    title: string,
+    movies: ArchetypeMovieExample[] | undefined
+  ) => {
+    if (!movies || movies.length === 0) return null;
+    return (
+      <div className="mb-4">
+        <div className="text-sm font-medium mb-2">{title}</div>
+        <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+          {movies.slice(0, 10).map((m) => (
+            <Link
+              key={m.id}
+              href={`/preferences/movies?movieId=${encodeURIComponent(m.id)}&returnTo=${encodeURIComponent(`/profile?userId=${targetUserId}`)}`}
+              className="shrink-0 w-24"
+              title={`Rate: ${m.title}${m.year ? ` (${m.year})` : ""}`}
+            >
+              {m.posterUrl ? (
+                <img
+                  src={m.posterUrl}
+                  alt={m.title}
+                  className="w-full aspect-[2/3] object-cover rounded-lg border border-border hover:border-accent transition-colors"
+                />
+              ) : (
+                <div className="w-full aspect-[2/3] bg-border rounded-lg flex items-center justify-center border border-border">
+                  <span className="text-xs text-muted">No poster</span>
+                </div>
+              )}
+              <div className="text-[11px] font-medium truncate mt-1">
+                {m.title}
+              </div>
+            </Link>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="bg-card border border-border rounded-xl p-4">
       <div className="flex items-center gap-2 mb-4">
@@ -272,6 +322,116 @@ function MoviePersonalityCard({
           </div>
         )}
 
+        {/* Distinctive tags/directors/actors/years */}
+        {personality.archetypeSignature && (
+          <div className="space-y-3">
+            {personality.archetypeSignature.yearRange &&
+              (personality.archetypeSignature.yearRange.min != null ||
+                personality.archetypeSignature.yearRange.max != null) && (
+                <div>
+                  <div className="text-xs text-muted uppercase tracking-wide mb-2">
+                    Typical Years
+                  </div>
+                  <div className="text-sm">
+                    {personality.archetypeSignature.yearRange.min ?? "?"}..{personality.archetypeSignature.yearRange.max ?? "?"}
+                    {personality.archetypeSignature.yearRange.median != null
+                      ? ` (median ${personality.archetypeSignature.yearRange.median})`
+                      : ""}
+                  </div>
+                  {personality.archetypeSignature.decades &&
+                    personality.archetypeSignature.decades.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        {personality.archetypeSignature.decades.slice(0, 6).map((d) => (
+                          <span
+                            key={d}
+                            className="px-2 py-1 bg-border/40 border border-border rounded-lg text-xs"
+                          >
+                            {d}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                </div>
+              )}
+
+            {personality.archetypeSignature.tags &&
+              personality.archetypeSignature.tags.length > 0 && (
+                <div>
+                  <div className="text-xs text-muted uppercase tracking-wide mb-2">
+                    Distinctive Tags
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {personality.archetypeSignature.tags.slice(0, 10).map((t) => (
+                      <span
+                        key={t}
+                        className="px-2 py-1 bg-border/40 border border-border rounded-lg text-xs"
+                      >
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+            {personality.archetypeSignature.directors &&
+              personality.archetypeSignature.directors.length > 0 && (
+                <div>
+                  <div className="text-xs text-muted uppercase tracking-wide mb-2">
+                    Recurring Directors
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {personality.archetypeSignature.directors.slice(0, 6).map((d) => (
+                      <span
+                        key={d}
+                        className="px-2 py-1 bg-border/40 border border-border rounded-lg text-xs"
+                      >
+                        {d}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+            {personality.archetypeSignature.actors &&
+              personality.archetypeSignature.actors.length > 0 && (
+                <div>
+                  <div className="text-xs text-muted uppercase tracking-wide mb-2">
+                    Recurring Actors
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {personality.archetypeSignature.actors.slice(0, 8).map((a) => (
+                      <span
+                        key={a}
+                        className="px-2 py-1 bg-border/40 border border-border rounded-lg text-xs"
+                      >
+                        {a}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+            {personality.archetypeSignature.studios &&
+              personality.archetypeSignature.studios.length > 0 && (
+                <div>
+                  <div className="text-xs text-muted uppercase tracking-wide mb-2">
+                    Recurring Studios
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {personality.archetypeSignature.studios.slice(0, 6).map((s) => (
+                      <span
+                        key={s}
+                        className="px-2 py-1 bg-border/40 border border-border rounded-lg text-xs"
+                      >
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+          </div>
+        )}
+
         {/* Similarity distribution */}
         {personality.archetypeSimilarities && personality.archetypeSimilarities.length > 0 && (
           <div>
@@ -309,59 +469,8 @@ function MoviePersonalityCard({
               Movies the model thinks this archetype is unusually likely to love or avoid (compared to other archetypes).
             </div>
 
-            {personality.archetypeLovedMovies && personality.archetypeLovedMovies.length > 0 && (
-              <div className="mb-4">
-                <div className="text-sm font-medium mb-2">Uniquely Loved</div>
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-                  {personality.archetypeLovedMovies.slice(0, 12).map((m) => (
-                    <div key={m.id} className="space-y-1">
-                      {m.posterUrl ? (
-                        <img
-                          src={m.posterUrl}
-                          alt={m.title}
-                          title={`${m.title}${m.year ? ` (${m.year})` : ""}`}
-                          className="w-full aspect-[2/3] object-cover rounded-lg"
-                        />
-                      ) : (
-                        <div className="w-full aspect-[2/3] bg-border rounded-lg flex items-center justify-center">
-                          <span className="text-xs text-muted">No poster</span>
-                        </div>
-                      )}
-                      <div className="text-[11px] font-medium truncate">
-                        {m.title}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {personality.archetypeHatedMovies && personality.archetypeHatedMovies.length > 0 && (
-              <div>
-                <div className="text-sm font-medium mb-2">Uniquely Avoided</div>
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-                  {personality.archetypeHatedMovies.slice(0, 12).map((m) => (
-                    <div key={m.id} className="space-y-1">
-                      {m.posterUrl ? (
-                        <img
-                          src={m.posterUrl}
-                          alt={m.title}
-                          title={`${m.title}${m.year ? ` (${m.year})` : ""}`}
-                          className="w-full aspect-[2/3] object-cover rounded-lg"
-                        />
-                      ) : (
-                        <div className="w-full aspect-[2/3] bg-border rounded-lg flex items-center justify-center">
-                          <span className="text-xs text-muted">No poster</span>
-                        </div>
-                      )}
-                      <div className="text-[11px] font-medium truncate">
-                        {m.title}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            {renderPosterRow("Uniquely Loved", personality.archetypeLovedMovies)}
+            {renderPosterRow("Uniquely Avoided", personality.archetypeHatedMovies)}
           </div>
         ) : null}
 
@@ -739,7 +848,7 @@ function ProfilePageContent() {
 
       {/* Movie Personality */}
       {stats.moviePersonality && (
-        <MoviePersonalityCard personality={stats.moviePersonality} />
+        <MoviePersonalityCard personality={stats.moviePersonality} targetUserId={stats.user.id} />
       )}
 
       {/* Stats Grid */}
@@ -881,17 +990,22 @@ function ProfilePageContent() {
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
             {stats.recentHighRatedMovies.map((movie) => (
               <div key={movie.id} className="space-y-1">
-                {movie.posterUrl ? (
-                  <img
-                    src={movie.posterUrl}
-                    alt={movie.title}
-                    className="w-full aspect-[2/3] object-cover rounded-lg"
-                  />
-                ) : (
-                  <div className="w-full aspect-[2/3] bg-border rounded-lg flex items-center justify-center">
-                    <span className="text-xs text-muted">No poster</span>
-                  </div>
-                )}
+                <Link
+                  href={`/preferences/movies?movieId=${encodeURIComponent(movie.id)}&returnTo=${encodeURIComponent(`/profile?userId=${stats.user.id}`)}`}
+                  title={`Rate: ${movie.title}${movie.year ? ` (${movie.year})` : ""}`}
+                >
+                  {movie.posterUrl ? (
+                    <img
+                      src={movie.posterUrl}
+                      alt={movie.title}
+                      className="w-full aspect-[2/3] object-cover rounded-lg border border-border hover:border-accent transition-colors"
+                    />
+                  ) : (
+                    <div className="w-full aspect-[2/3] bg-border rounded-lg flex items-center justify-center border border-border">
+                      <span className="text-xs text-muted">No poster</span>
+                    </div>
+                  )}
+                </Link>
                 <div className="text-xs font-medium truncate">{movie.title}</div>
                 <div className="flex items-center gap-1">
                   <svg

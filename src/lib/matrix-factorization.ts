@@ -3447,7 +3447,26 @@ function nameArchetype(
   };
   const genreLabel = genreNameMap[primary] || primary;
 
-  const name = `The ${genreLabel} ${personality}`;
+  let name = `The ${genreLabel} ${personality}`;
+
+  // Improve naming diversity for common "Action/Adventure/Drama" overlaps.
+  // These labels are intentionally opinionated to avoid repetitive "Drama Enthusiast N".
+  const hasGenre = (g: string) => topGenres.some((x) => x.name === g);
+  if (hasGenre("Adventure") && hasGenre("Science Fiction")) {
+    name = "The Blockbuster Voyager";
+  } else if (hasGenre("Action") && hasGenre("Crime")) {
+    name = "The Neo-Noir Adrenaline Seeker";
+  } else if (hasGenre("Drama") && hasGenre("Crime") && hasGenre("History")) {
+    name = "The Prestige Crime Historian";
+  } else if (hasGenre("Drama") && hasGenre("Science Fiction") && hasGenre("Mystery")) {
+    name = "The Cerebral Sci-Fi Sleuth";
+  } else if (hasGenre("Drama") && hasGenre("Romance")) {
+    name = "The Intimate Character Reader";
+  } else if (hasGenre("Romance") && hasGenre("Science Fiction")) {
+    name = "The Sentimental Futurist";
+  } else if (hasGenre("Action") && hasGenre("Adventure") && hasGenre("Fantasy")) {
+    name = "The Epic Quest Loyalist";
+  }
 
   // Description combines genre preference with viewing style
   const styleDescriptions: Record<string, string> = {

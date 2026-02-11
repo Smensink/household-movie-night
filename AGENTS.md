@@ -702,3 +702,11 @@ Core entities in `prisma/schema.prisma`:
   - Wired `archetypeDistance` through `POST /api/mf/train` so retrains can explicitly choose `"cosine"` vs `"euclidean"` (`src/app/api/mf/train/route.ts`).
   - Profile stats now includes "uniquely loved" and "uniquely avoided" movie examples for the user’s archetype, based on cosine similarity margin vs other archetypes; Profile UI renders these as poster grids (`src/app/api/profile/stats/route.ts`, `src/app/(app)/profile/page.tsx`).
   - Learned product preference: archetype outputs should be interpretable with concrete movie examples, and clustering should be more diverse than genre-only naming.
+- 2026-02-11 (Profile interaction and archetype naming refinement):
+  - Profile "Archetype Examples" now shows a single horizontal row for uniquely loved and a single row for uniquely avoided movies (instead of large multi-row grids) to reduce visual overload.
+  - Movies shown on Profile (archetype examples + recent favorites) are now clickable and deep-link into movie rating flow (`/preferences/movies?movieId=...`).
+  - Movie rating page now reads `movieId` query param and prioritizes that movie in the discover queue; wrapped page in Suspense to satisfy Next.js `useSearchParams()` prerender constraints.
+  - Profile summary now includes richer archetype signature chips: distinctive tags, recurring directors, actors, studios, and year/decade summary from uniquely loved examples.
+  - Added `scripts/rename-archetypes.ts` to apply curated, more informative cluster names to currently trained archetypes.
+  - Added stronger cluster label heuristics in `nameArchetype()` to reduce repetitive "Drama/Action Enthusiast" naming on future retrains.
+  - Learned user workflow preference: profile insights should be immediately actionable (tap a suggested movie and rate it) and concise on-screen.

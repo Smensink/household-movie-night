@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { Suspense, useEffect, useState, useCallback, useRef } from "react";
 import { useSession } from "next-auth/react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import TinderMovieCard from "@/components/TinderMovieCard";
 import Input from "@/components/ui/Input";
@@ -101,9 +101,10 @@ function mergeRatedMoviesPreserveOrder(
   return merged;
 }
 
-export default function RateMoviesPage() {
+function RateMoviesPageContent() {
   const { status } = useSession();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [currentMovie, setCurrentMovie] = useState<Movie | null>(null);
   const [movieQueue, setMovieQueue] = useState<Movie[]>([]);
@@ -118,6 +119,8 @@ export default function RateMoviesPage() {
   const [ratedMoviesSearch, setRatedMoviesSearch] = useState("");
   const [ratedMovies, setRatedMovies] = useState<RatedMovieEntry[]>([]);
   const [updatingRatedMovieId, setUpdatingRatedMovieId] = useState<string | null>(null);
+
+  const targetMovieId = searchParams.get("movieId")?.trim() || null;
 
   const queueRef = useRef<Movie[]>([]);
   const ratingsRef = useRef<Map<string, UserRating>>(new Map());
@@ -213,10 +216,19 @@ export default function RateMoviesPage() {
         // Filter out already-rated movies from discover results
         const unratedMovies = dedupeAndFilterMovies(discoverMovies, ratedIds);
 
+        // If a specific movie was requested (e.g. from Profile), prioritize it.
+        let prioritized: Movie[] = unratedMovies;
+        if (targetMovieId) {
+          const idx = prioritized.findIndex((m) => m.id === targetMovieId);
+          if (idx > 0) {
+            prioritized = [prioritized[idx], ...prioritized.slice(0, idx), ...prioritized.slice(idx + 1)];
+          }
+        }
+
         // Set first unrated movie as current
-        if (unratedMovies.length > 0) {
-          setCurrentMovie(unratedMovies[0]);
-          setQueueAndRef(unratedMovies.slice(1));
+        if (prioritized.length > 0) {
+          setCurrentMovie(prioritized[0]);
+          setQueueAndRef(prioritized.slice(1));
         }
 
         ratingsRef.current = ratingMap;
@@ -232,8 +244,7 @@ export default function RateMoviesPage() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status]);
+  }, [status, targetMovieId, fetchDiscoverBatch, setQueueAndRef]);
 
   // Background preloading effect - use ref to avoid recreating interval
   const preloadMoviesRef = useRef(preloadMovies);
@@ -755,3 +766,10 @@ export default function RateMoviesPage() {
   );
 }
 
+export default function RateMoviesPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-64"><div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" /></div>}>
+      <RateMoviesPageContent />
+    </Suspense>
+  );
+}
