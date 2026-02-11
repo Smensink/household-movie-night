@@ -739,3 +739,8 @@ Core entities in `prisma/schema.prisma`:
     - Inferred-only signal confidence grows with accumulated evidence weight (`INFERRED_CONFIDENCE_SCALE=4`).
   - This prevents many single-item direct ratings from showing as ±100% affinity while preserving stronger, high-evidence preferences at the top.
   - Learned product preference: affinity percentages should express both preference direction and confidence, not just raw mean score.
+- 2026-02-11 (Profile affinity percent display + genre calibration follow-up):
+  - Extended confidence calibration to profile genre affinity values themselves (not just inferred-genre sort weighting) in `GET /api/profile/stats`.
+  - Updated Profile UI affinity percent formatting to truncate to one decimal place (for example `+99.6%` instead of rounding to `+100%`) in `src/app/(app)/profile/page.tsx`.
+  - Increased affinity percent label width and enabled tabular numerals so decimal percentages render cleanly on mobile and desktop.
+  - Learned product preference: avoid coarse rounded percentages that visually imply certainty (`100%`) when values are only near-max.

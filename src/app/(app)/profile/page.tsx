@@ -116,6 +116,16 @@ interface HouseholdMemberOption {
   ratingCount: number;
 }
 
+function formatAffinityPercent(affinity: number): string {
+  const clamped = Math.max(-1, Math.min(1, affinity)) * 100;
+  // Truncate instead of round so near-max values don't present as 100%.
+  const truncated = clamped >= 0
+    ? Math.floor(clamped * 10) / 10
+    : Math.ceil(clamped * 10) / 10;
+  const sign = truncated > 0 ? "+" : "";
+  return `${sign}${truncated.toFixed(1)}%`;
+}
+
 function AffinityBar({ affinity }: { affinity: number }) {
   // affinity is -1 to 1, we need to map it to 0-100%
   const percentage = ((affinity + 1) / 2) * 100;
@@ -171,9 +181,8 @@ function AffinitySection({
                 <span className="text-sm truncate flex-1">{item.name}</span>
                 <div className="flex items-center gap-2">
                   <AffinityBar affinity={item.affinity} />
-                  <span className="text-xs text-muted w-10 text-right">
-                    {item.affinity > 0 ? "+" : ""}
-                    {(item.affinity * 100).toFixed(0)}%
+                  <span className="text-xs text-muted w-14 text-right tabular-nums">
+                    {formatAffinityPercent(item.affinity)}
                   </span>
                 </div>
               </div>
@@ -196,9 +205,8 @@ function AffinitySection({
                 <span className="text-sm truncate flex-1">{item.name}</span>
                 <div className="flex items-center gap-2">
                   <AffinityBar affinity={item.affinity} />
-                  <span className="text-xs text-muted w-10 text-right">
-                    {item.affinity > 0 ? "+" : ""}
-                    {(item.affinity * 100).toFixed(0)}%
+                  <span className="text-xs text-muted w-14 text-right tabular-nums">
+                    {formatAffinityPercent(item.affinity)}
                   </span>
                 </div>
               </div>

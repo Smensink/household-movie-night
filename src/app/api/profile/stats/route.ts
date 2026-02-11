@@ -325,7 +325,17 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const genreAffinities = mergeAffinities(genreAccumulators);
+  const genreAffinities = mergeAffinities(genreAccumulators).map((item) => {
+    const acc = genreAccumulators.get(item.id);
+    return {
+      ...item,
+      affinity: calibrateAffinity(
+        item.affinity,
+        acc?.totalWeight ?? item.ratingCount,
+        genreHasDirectSignal.get(item.id) === true
+      ),
+    };
+  });
 
   const genreSortScore = (item: AffinityItem): number => {
     const acc = genreAccumulators.get(item.id);
