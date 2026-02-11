@@ -798,3 +798,8 @@ Core entities in `prisma/schema.prisma`:
 - 2026-02-11 (Leaderboard poster rendering bug fix):
   - Fixed session leaderboard poster rendering in `/session/[id]` by switching the row poster thumbnail to explicit `Image` dimensions (`width=64`, `height=96`) instead of `fill` in that compact layout cell.
   - This prevents occasional oversized/pixelated poster overlays covering the leaderboard UI.
+- 2026-02-11 (Discover vote-threshold bypass fix):
+  - Fixed `GET /api/movies/discover` so low-vote titles can no longer bypass recognition thresholds via high IMDb rating fallback.
+  - Discovery now enforces a hard minimum vote-count floor (`>=500`) for standard titles, while retaining the explicit reduced threshold for very recent releases.
+  - Also clamps user-configured `minVoteCount` to never drop below the baseline 500 floor.
+  - Example regression prevented: low-vote items like `Forever Boys (2016)` (`voteCount=2`) are now excluded from rating queues.

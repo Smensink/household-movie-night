@@ -22,7 +22,7 @@ const COLD_START_THRESHOLD = 10; // Minimum ratings before personalized recommen
 const DIVERSITY_INJECTION_RATE = 0.15; // 15% of recommendations from diverse sources
 
 // Recognition thresholds - movies need enough ratings to be "known"
-const DEFAULT_MIN_VOTE_COUNT = 500; // Minimum votes on TMDB to be considered recognizable
+const DEFAULT_MIN_VOTE_COUNT = 500; // Minimum votes required for standard catalog candidates
 const MIN_VOTE_COUNT_RECENT_FLOOR = 100; // Lower bound for recent releases
 const HIGH_IMDB_THRESHOLD = 7.0; // Well-rated mainstream movies
 const MIN_CANDIDATE_POOL = 250;
@@ -167,7 +167,10 @@ export async function GET(req: NextRequest) {
   ]);
   const tuning = algorithmSettings.movieDiscovery;
   const indieDarlingsMode = profile.discoverySourcePref === "indie_darlings";
-  const minVoteCount = userSettings?.minVoteCount ?? DEFAULT_MIN_VOTE_COUNT;
+  const configuredMinVoteCount =
+    userSettings?.minVoteCount ?? DEFAULT_MIN_VOTE_COUNT;
+  // Always enforce at least the baseline recognition floor.
+  const minVoteCount = Math.max(DEFAULT_MIN_VOTE_COUNT, configuredMinVoteCount);
   const minVoteCountRecent = Math.max(
     MIN_VOTE_COUNT_RECENT_FLOOR,
     Math.floor(minVoteCount * 0.2)
@@ -225,8 +228,6 @@ export async function GET(req: NextRequest) {
                 { voteCount: { gte: minVoteCountRecent } },
               ],
             },
-            // Fallback: high IMDB rating suggests mainstream recognition
-            { imdbRating: { gte: 7.0 } },
           ],
         },
         ...(indieDarlingsMode
@@ -754,7 +755,6 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(finalResults);
 }
-
 
 
 
