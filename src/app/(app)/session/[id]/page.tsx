@@ -5,7 +5,7 @@ import { useSession } from "next-auth/react";
 import { useRouter, useParams } from "next/navigation";
 import Image from "next/image";
 import GenreRanker from "@/components/GenreRanker";
-import SessionVoteCard from "@/components/SessionVoteCard";
+import TinderMovieCard from "@/components/TinderMovieCard";
 import StarRating from "@/components/StarRating";
 import Button from "@/components/ui/Button";
 
@@ -30,7 +30,7 @@ interface SessionMovie {
     cast?: { person: { name: string } }[];
     crew?: { job: string; person: { name: string } }[];
     studios?: { studio: { name: string } }[];
-    ratings?: { hasSeen: boolean }[];
+    ratings?: { hasSeen: boolean; rating: number | null; notHeardOf: boolean }[];
   };
   votes: {
     userId: string;
@@ -106,11 +106,11 @@ export default function SessionPage() {
   const [step, setStep] = useState<Step>("preferences");
   const [minReleaseYear, setMinReleaseYear] = useState(1990);
   const [maxReleaseYear, setMaxReleaseYear] = useState(new Date().getFullYear());
-  const [okWithRewatch, setOkWithRewatch] = useState(true);
+  const [okWithRewatch, setOkWithRewatch] = useState(false);
   const [votes, setVotes] = useState<
     Map<string, { rating: number; willingToRewatch: boolean }>
   >(new Map());
-  const [rewatchDrafts, setRewatchDrafts] = useState<Map<string, boolean>>(
+  const [hasSeenDrafts, setHasSeenDrafts] = useState<Map<string, boolean>>(
     new Map()
   );
   const [explorationFactor, setExplorationFactor] = useState(0.5);
@@ -252,7 +252,12 @@ export default function SessionPage() {
   );
 
   const persistVote = useCallback(
-    async (sessionMovieId: string, rating: number, willingToRewatch: boolean) => {
+    async (
+      sessionMovieId: string,
+      rating: number,
+      hasSeen: boolean,
+      willingToRewatch: boolean
+    ) => {
       const res = await fetch(`/api/sessions/${sessionId}/vote`, {
         method: "POST",
         headers: buildHeaders(true),
@@ -261,6 +266,7 @@ export default function SessionPage() {
             {
               sessionMovieId,
               rating,
+              hasSeen,
               willingToRewatch,
             },
           ],
@@ -273,16 +279,13 @@ export default function SessionPage() {
   );
 
   const handleQueueVote = useCallback(
-    async (sessionMovieId: string, rating: number) => {
+    async (sessionMovieId: string, rating: number, hasSeen: boolean) => {
       if (submittingVoteFor === sessionMovieId) return;
 
       setVoteError(null);
-      const willingToRewatch =
-        votes.get(sessionMovieId)?.willingToRewatch ??
-        rewatchDrafts.get(sessionMovieId) ??
-        false;
+      const willingToRewatch = hasSeen ? okWithRewatch : false;
       applyVoteLocally(sessionMovieId, rating, willingToRewatch);
-      setRewatchDrafts((prev) => {
+      setHasSeenDrafts((prev) => {
         const next = new Map(prev);
         next.delete(sessionMovieId);
         return next;
@@ -290,7 +293,12 @@ export default function SessionPage() {
       setQueueMovies((prev) => prev.filter((movie) => movie.id !== sessionMovieId));
       setSubmittingVoteFor(sessionMovieId);
 
-      const success = await persistVote(sessionMovieId, rating, willingToRewatch);
+      const success = await persistVote(
+        sessionMovieId,
+        rating,
+        hasSeen,
+        willingToRewatch
+      );
       await Promise.all([refreshSessionMovies(), refreshQueue()]);
       if (!success) {
         setVoteError("Could not save your vote. Please try again.");
@@ -300,56 +308,11 @@ export default function SessionPage() {
     },
     [
       applyVoteLocally,
-      persistVote,
-      refreshQueue,
-      refreshSessionMovies,
-      rewatchDrafts,
-      submittingVoteFor,
-      votes,
-    ]
-  );
-
-  const handleRewatchToggle = useCallback(
-    async (sessionMovieId: string, willing: boolean) => {
-      const existing = votes.get(sessionMovieId);
-      const existingRating = existing?.rating ?? null;
-
-      if (!existingRating || existingRating < 1) {
-        setRewatchDrafts((prev) => {
-          const next = new Map(prev);
-          next.set(sessionMovieId, willing);
-          return next;
-        });
-        return;
-      }
-
-      setVotes((prev) => {
-        const next = new Map(prev);
-        next.set(sessionMovieId, {
-          rating: existingRating,
-          willingToRewatch: willing,
-        });
-        return next;
-      });
-
-      if (submittingVoteFor === sessionMovieId) return;
-      setVoteError(null);
-      applyVoteLocally(sessionMovieId, existingRating, willing);
-      setSubmittingVoteFor(sessionMovieId);
-      const success = await persistVote(sessionMovieId, existingRating, willing);
-      await Promise.all([refreshSessionMovies(), refreshQueue()]);
-      if (!success) {
-        setVoteError("Could not update rewatch preference. Please try again.");
-      }
-      setSubmittingVoteFor(null);
-    },
-    [
-      applyVoteLocally,
+      okWithRewatch,
       persistVote,
       refreshQueue,
       refreshSessionMovies,
       submittingVoteFor,
-      votes,
     ]
   );
 
@@ -903,30 +866,37 @@ export default function SessionPage() {
 
           {currentQueueMovie ? (
             <div className="relative max-w-4xl mx-auto">
-              <SessionVoteCard
+              <TinderMovieCard
                 key={currentQueueMovie.id}
                 movie={{
-                  ...currentQueueMovie.movie,
+                  id: currentQueueMovie.movie.id,
+                  title: currentQueueMovie.movie.title,
+                  year: currentQueueMovie.movie.year,
+                  posterUrl: currentQueueMovie.movie.posterUrl,
+                  overview: currentQueueMovie.movie.overview,
+                  genres: currentQueueMovie.movie.genres
+                    ?.map((genre) => genre.genre.name)
+                    .filter(Boolean),
                   ...extractMovieMeta(currentQueueMovie.movie),
                 }}
-                sessionMovieId={currentQueueMovie.id}
-                userHasSeen={Boolean(currentQueueMovie.movie.ratings?.[0]?.hasSeen)}
                 rating={votes.get(currentQueueMovie.id)?.rating ?? null}
-                willingToRewatch={
-                  votes.get(currentQueueMovie.id)?.willingToRewatch ??
-                  rewatchDrafts.get(currentQueueMovie.id) ??
-                  false
+                hasSeen={
+                  hasSeenDrafts.get(currentQueueMovie.id) ??
+                  Boolean(currentQueueMovie.movie.ratings?.[0]?.hasSeen)
                 }
+                onSeenToggle={(seen) => {
+                  setHasSeenDrafts((prev) => {
+                    const next = new Map(prev);
+                    next.set(currentQueueMovie.id, seen);
+                    return next;
+                  });
+                }}
                 onRate={(rating) => {
-                  void handleQueueVote(currentQueueMovie.id, rating);
+                  const hasSeen =
+                    hasSeenDrafts.get(currentQueueMovie.id) ??
+                    Boolean(currentQueueMovie.movie.ratings?.[0]?.hasSeen);
+                  void handleQueueVote(currentQueueMovie.id, rating, hasSeen);
                 }}
-                onRewatchToggle={(willing) => {
-                  void handleRewatchToggle(currentQueueMovie.id, willing);
-                }}
-                available={Boolean(
-                  currentQueueMovie.movie.plexAvailability?.available ||
-                    currentQueueMovie.movie.radarrSync?.available
-                )}
               />
 
               {submittingVoteFor === currentQueueMovie.id && (
@@ -934,6 +904,14 @@ export default function SessionPage() {
                   <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
                 </div>
               )}
+              {(hasSeenDrafts.get(currentQueueMovie.id) ??
+                Boolean(currentQueueMovie.movie.ratings?.[0]?.hasSeen)) &&
+                !okWithRewatch && (
+                  <p className="text-[11px] text-warning mt-2 text-center">
+                    Rewatch preference is off. Seen movies are strongly de-prioritized in this
+                    session.
+                  </p>
+                )}
             </div>
           ) : (
             <div className="bg-card border border-border rounded-xl p-6 text-center">
@@ -1002,9 +980,9 @@ export default function SessionPage() {
                 : undefined;
               const trackedVote = votes.get(sessionMovie.id);
               const effectiveRating = trackedVote?.rating ?? userVote?.rating ?? null;
-              const effectiveWilling =
-                trackedVote?.willingToRewatch ?? userVote?.willingToRewatch ?? false;
-              const userHasSeen = Boolean(sessionMovie.movie.ratings?.[0]?.hasSeen);
+              const userHasSeen =
+                hasSeenDrafts.get(sessionMovie.id) ??
+                Boolean(sessionMovie.movie.ratings?.[0]?.hasSeen);
 
               return (
                 <div
@@ -1073,16 +1051,18 @@ export default function SessionPage() {
                           size="sm"
                           rating={effectiveRating}
                           onChange={(rating) => {
-                            const willing =
-                              votes.get(sessionMovie.id)?.willingToRewatch ??
-                              userVote?.willingToRewatch ??
-                              false;
+                            const willing = userHasSeen ? okWithRewatch : false;
                             void (async () => {
                               if (submittingVoteFor === sessionMovie.id) return;
                               setVoteError(null);
                               applyVoteLocally(sessionMovie.id, rating, willing);
                               setSubmittingVoteFor(sessionMovie.id);
-                              const success = await persistVote(sessionMovie.id, rating, willing);
+                              const success = await persistVote(
+                                sessionMovie.id,
+                                rating,
+                                userHasSeen,
+                                willing
+                              );
                               await Promise.all([refreshSessionMovies(), refreshQueue()]);
                               if (!success) {
                                 setVoteError("Could not save your rating update.");
@@ -1091,25 +1071,11 @@ export default function SessionPage() {
                             })();
                           }}
                         />
-                        {userHasSeen && effectiveRating !== null && (
-                          <button
-                            onClick={() => {
-                              void handleRewatchToggle(
-                                sessionMovie.id,
-                                !effectiveWilling
-                              );
-                            }}
-                            className={`mt-2 text-[11px] px-2 py-1 rounded-lg transition-all ${
-                              effectiveWilling
-                                ? "bg-accent-soft text-accent border border-accent/30"
-                                : "bg-card-hover text-muted border border-border"
-                            }`}
-                          >
-                            {effectiveWilling
-                              ? "Willing to rewatch"
-                              : "Seen it. Tap if willing to rewatch"}
-                          </button>
-                        )}
+                        <p className="mt-2 text-[11px] text-muted">
+                          {userHasSeen
+                            ? "Seen: stars represent how much you liked it."
+                            : "Unseen: stars represent willingness to watch tonight."}
+                        </p>
                       </div>
 
                       <div className="mt-2 flex flex-wrap gap-2">

@@ -36,6 +36,7 @@ export async function POST(
     data: {
       sessionId: session.id,
       userId: guestUser.id,
+      okWithRewatch: false,
     },
   });
 

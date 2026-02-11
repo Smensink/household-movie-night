@@ -67,6 +67,7 @@ export async function resolveSessionActor(
         create: {
           sessionId,
           userId: loggedInUserId,
+          okWithRewatch: false,
         },
         update: {},
       });

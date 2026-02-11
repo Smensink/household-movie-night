@@ -24,7 +24,7 @@ const sessionMovieInclude = {
         take: 2,
       },
       ratings: {
-        select: { hasSeen: true },
+        select: { hasSeen: true, rating: true, notHeardOf: true },
       },
     },
   },
@@ -56,7 +56,7 @@ async function fetchSessionMoviesForActor(sessionId: string, userId: string) {
           ...sessionMovieInclude.movie.include,
           ratings: {
             where: { userId },
-            select: { hasSeen: true },
+            select: { hasSeen: true, rating: true, notHeardOf: true },
           },
         },
       },
@@ -252,7 +252,7 @@ export async function POST(
             ...sessionMovieInclude.movie.include,
             ratings: {
               where: { userId: actor.userId },
-              select: { hasSeen: true },
+              select: { hasSeen: true, rating: true, notHeardOf: true },
             },
           },
         },

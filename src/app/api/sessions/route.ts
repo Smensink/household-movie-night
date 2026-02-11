@@ -122,6 +122,7 @@ export async function POST(req: NextRequest) {
       participants: {
         create: finalParticipantIds.map((id) => ({
           userId: id,
+          okWithRewatch: false,
         })),
       },
     },

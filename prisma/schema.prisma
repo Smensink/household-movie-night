@@ -237,7 +237,7 @@ model SessionParticipant {
   eraPreference  String?
   minReleaseYear Int?
   maxReleaseYear Int?
-  okWithRewatch  Boolean @default(true)
+  okWithRewatch  Boolean @default(false)
   isPresent      Boolean @default(true)
 
   session MovieNightSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)

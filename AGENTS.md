@@ -783,3 +783,15 @@ Core entities in `prisma/schema.prisma`:
   - Updated `GET /api/radarr/near-threshold/mine` to exclude any movie the requesting user has already rated (including seen/unseen/not-heard states), so the page is always an unrated action queue.
   - Added defensive client-side filtering on `/preferences/radarr-threshold` to render only unrated candidates and updated summary copy to explicitly describe “unrated near-threshold titles”.
   - Learned product preference: this queue should function as a pure “next items to rate” surface, not a review/edit list of already-rated movies.
+- 2026-02-11 (Session Tinder voting + seen/unseen propagation):
+  - Movie-night voting step in `/session/[id]` now uses `TinderMovieCard` for full-card, mobile-first voting UX instead of the compact list card component.
+  - Added explicit `Seen`/`Unseen` state on the session voting card and included that state in session vote payloads (`POST /api/sessions/[id]/vote` as `hasSeen`).
+  - Session vote API now bootstraps background movie preferences when absent:
+    - If a user votes in session and has no existing `MovieRating` for that title, it creates one using session `rating` + `hasSeen`.
+    - Existing background ratings are not overwritten.
+  - Session movie payloads now include current user movie rating metadata (`hasSeen`, `rating`, `notHeardOf`) to support consistent watch-state UX.
+  - Default rewatch preference is now off for new participants:
+    - New session participants are created with `okWithRewatch=false` in session create/join/auto-add flows.
+    - Prisma model default for `SessionParticipant.okWithRewatch` updated to `false`.
+    - Session preferences page default toggle state changed to off.
+  - Learned product preference: session voting should mirror Tinder-style rich-card interactions and treat “not okay with rewatches” as the default baseline.

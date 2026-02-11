@@ -33,6 +33,7 @@ export async function POST(
         sessionMovieId?: unknown;
         rating?: unknown;
         willingToRewatch?: unknown;
+        hasSeen?: unknown;
       }>)
     : null;
   // votes: [{ sessionMovieId, rating, willingToRewatch }]
@@ -50,6 +51,7 @@ export async function POST(
     rating: typeof vote?.rating === "number" ? vote.rating : NaN,
     willingToRewatch:
       typeof vote?.willingToRewatch === "boolean" ? vote.willingToRewatch : false,
+    hasSeen: typeof vote?.hasSeen === "boolean" ? vote.hasSeen : null,
   }));
 
   const hasInvalidVote = normalizedVotes.some(
@@ -79,7 +81,7 @@ export async function POST(
       id: { in: sessionMovieIds },
       sessionId,
     },
-    select: { id: true },
+    select: { id: true, movieId: true },
   });
 
   if (validSessionMovies.length !== sessionMovieIds.length) {
@@ -89,9 +91,13 @@ export async function POST(
     );
   }
 
-  await prisma.$transaction(
-    uniqueVotes.map((vote) =>
-      prisma.sessionVote.upsert({
+  const movieIdBySessionMovieId = new Map(
+    validSessionMovies.map((movie) => [movie.id, movie.movieId])
+  );
+
+  await prisma.$transaction(async (tx) => {
+    for (const vote of uniqueVotes) {
+      await tx.sessionVote.upsert({
         where: {
           sessionMovieId_userId: {
             sessionMovieId: vote.sessionMovieId,
@@ -108,9 +114,37 @@ export async function POST(
           rating: vote.rating,
           willingToRewatch: vote.willingToRewatch,
         },
-      })
-    )
-  );
+      });
+
+      if (typeof vote.hasSeen === "boolean") {
+        const movieId = movieIdBySessionMovieId.get(vote.sessionMovieId);
+        if (!movieId) continue;
+
+        const existingMovieRating = await tx.movieRating.findUnique({
+          where: {
+            userId_movieId: {
+              userId,
+              movieId,
+            },
+          },
+          select: { id: true },
+        });
+
+        // Session votes can bootstrap background preferences, but do not overwrite existing history.
+        if (!existingMovieRating) {
+          await tx.movieRating.create({
+            data: {
+              userId,
+              movieId,
+              rating: vote.rating,
+              hasSeen: vote.hasSeen,
+              notHeardOf: false,
+            },
+          });
+        }
+      }
+    }
+  });
 
   return NextResponse.json({ success: true });
 }
