@@ -809,4 +809,7 @@ Core entities in `prisma/schema.prisma`:
     - Metrics: RMSE, MAE, MF coverage, and per-row win-rate (which predictor had lower absolute error).
     - Uses deterministic split by `hash(userId,movieId)` for stable reruns.
     - Heuristic side is deterministic (no random jitter) and disables direct target-movie leakage signals (no direct movie-affinity reuse and excludes self-rating in household signal for the target movie).
+  - Initial live backtest snapshot (model v10, 2026-02-11):
+    - 20% holdout: MF lower RMSE (`0.780` vs `0.877`), heuristic slightly lower MAE (`0.674` vs `0.701`).
+    - 10% and 30% holdout reruns showed the same pattern: MF better RMSE, MAE near parity.
   - Learned workflow preference: user wants direct empirical checks of heuristic vs MF behavior on prior ratings, not only model-training logs.
