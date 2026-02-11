@@ -75,6 +75,7 @@ interface ProfileStats {
     dispositionExplanation: string;
     topGenres: { name: string; score: number }[];
     archetypeSimilarities?: { name: string; score: number }[];
+    archetypeMostLovedMovies?: ArchetypeMovieExample[];
     archetypeLovedMovies?: ArchetypeMovieExample[];
     archetypeHatedMovies?: ArchetypeMovieExample[];
     archetypeSignature?: {
@@ -654,6 +655,7 @@ export async function GET(req: NextRequest) {
             });
             const vecById = new Map(vectors.map((v) => [v.entityId, v.vector]));
 
+            const mostLoved: ArchetypeMovieExample[] = [];
             const loved: ArchetypeMovieExample[] = [];
             const hated: ArchetypeMovieExample[] = [];
 
@@ -676,6 +678,17 @@ export async function GET(req: NextRequest) {
 
               const loveMargin = tSim - maxOther;
               const hateMargin = minOther - tSim;
+
+              if (tSim > 0.08) {
+                mostLoved.push({
+                  id: m.id,
+                  title: m.title,
+                  year: m.year ?? null,
+                  posterUrl: m.posterUrl ?? null,
+                  uniqueness: Number.isFinite(loveMargin) ? loveMargin : 0,
+                  similarity: tSim,
+                });
+              }
 
               // Avoid noisy picks: require both margin and absolute position.
               if (Number.isFinite(loveMargin) && loveMargin > 0.06 && tSim > 0.08) {
@@ -700,9 +713,14 @@ export async function GET(req: NextRequest) {
               }
             }
 
+            mostLoved.sort((a, b) => {
+              if (b.similarity !== a.similarity) return b.similarity - a.similarity;
+              return b.uniqueness - a.uniqueness;
+            });
             loved.sort((a, b) => b.uniqueness - a.uniqueness);
             hated.sort((a, b) => b.uniqueness - a.uniqueness);
 
+            moviePersonality.archetypeMostLovedMovies = mostLoved.slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
             moviePersonality.archetypeLovedMovies = loved.slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
             moviePersonality.archetypeHatedMovies = hated.slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
 

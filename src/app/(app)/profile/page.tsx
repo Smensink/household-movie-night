@@ -97,6 +97,7 @@ interface ProfileStats {
     dispositionExplanation: string;
     topGenres: { name: string; score: number }[];
     archetypeSimilarities?: { name: string; score: number }[];
+    archetypeMostLovedMovies?: ArchetypeMovieExample[];
     archetypeLovedMovies?: ArchetypeMovieExample[];
     archetypeHatedMovies?: ArchetypeMovieExample[];
     archetypeSignature?: ArchetypeSignature;
@@ -563,15 +564,18 @@ function MoviePersonalityCard({
         )}
 
         {/* Archetype example movies */}
-        {(personality.archetypeLovedMovies?.length || personality.archetypeHatedMovies?.length) ? (
+        {(personality.archetypeMostLovedMovies?.length ||
+          personality.archetypeLovedMovies?.length ||
+          personality.archetypeHatedMovies?.length) ? (
           <div>
             <div className="text-xs text-muted uppercase tracking-wide mb-2">
               Archetype Examples
             </div>
             <div className="text-xs text-muted mb-3">
-              Movies the model thinks this archetype is unusually likely to love or avoid (compared to other archetypes).
+              A mix of generally loved titles for this archetype plus movies it is unusually likely to love or avoid (compared to other archetypes).
             </div>
 
+            {renderPosterRow("Most Loved", personality.archetypeMostLovedMovies)}
             {renderPosterRow("Uniquely Loved", personality.archetypeLovedMovies)}
             {renderPosterRow("Uniquely Avoided", personality.archetypeHatedMovies)}
           </div>

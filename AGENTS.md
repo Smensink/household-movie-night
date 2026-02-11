@@ -835,3 +835,8 @@ Core entities in `prisma/schema.prisma`:
   - Applied tuned warm-user parameters in `GET /api/movies/discover` (`computeAdaptiveMfWeight`), while keeping cold-start guardrails conservative due limited cold-start evidence in the holdout sample.
   - Aligned evaluator baseline constants (`src/lib/mf-heuristic-compare.ts` current adaptive strategy) with the deployed discovery blend constants to keep future comparisons apples-to-apples.
   - Learned workflow preference: user expects adaptive mixing choices to be empirically tuned on current household data, not only manually reasoned.
+- 2026-02-11 (Profile archetype "most loved" row):
+  - Added a new profile archetype movie row for generally most-loved titles (not uniqueness-filtered) in addition to the existing uniquely loved/avoided rows.
+  - API update: `GET /api/profile/stats` now returns `moviePersonality.archetypeMostLovedMovies` computed from highest centroid similarity for the user’s assigned archetype.
+  - UI update: `/profile` renders a new `Most Loved` poster row above `Uniquely Loved` / `Uniquely Avoided`.
+  - Learned product preference: users want both "core archetype favorites" and "uniquely archetype-specific" examples visible on profile.
