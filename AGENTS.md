@@ -725,3 +725,7 @@ Core entities in `prisma/schema.prisma`:
   - Quick-rating state now always loads from the logged-in viewer via `GET /api/ratings` and persists via `POST /api/ratings`, ensuring ratings are saved to the correct account (session user), never the viewed profile user.
   - Fixed profile movie-card fallback state to avoid showing viewed user ratings as if they belonged to the viewer (unrated cards now default to empty stars unless viewer has a saved rating).
   - Learned product preference: household profile browsing should support immediate “rate this for me” interactions without requiring navigation back to self profile.
+- 2026-02-11 (Archetype signature sample-size tuning):
+  - Kept profile archetype example rows capped at 10 posters (`archetypeLovedMovies` / `archetypeHatedMovies`) for concise one-row UX.
+  - Increased archetype signature aggregation sample in `GET /api/profile/stats` from the displayed 10 loved movies to the top 36 loved movies (`ARCHETYPE_SIGNATURE_SAMPLE_SIZE=36`) so Distinctive Tags/Typical Years/Recurring Directors-Actors-Studios are more stable and less outlier-driven.
+  - Learned product preference: profile signature summaries should reflect broader viewing patterns, not just the visible poster row.

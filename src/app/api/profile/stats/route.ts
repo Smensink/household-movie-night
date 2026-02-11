@@ -147,6 +147,8 @@ function topKeys(map: Map<string, number>, limit: number): string[] {
 // Weight for direct ratings vs inferred from movies
 const DIRECT_RATING_WEIGHT = 1.0;
 const INFERRED_RATING_WEIGHT = 0.3; // Weak influence from movie ratings
+const ARCHETYPE_EXAMPLE_DISPLAY_LIMIT = 10;
+const ARCHETYPE_SIGNATURE_SAMPLE_SIZE = 36;
 
 interface AffinityAccumulator {
   name: string;
@@ -612,11 +614,12 @@ export async function GET(req: NextRequest) {
             loved.sort((a, b) => b.uniqueness - a.uniqueness);
             hated.sort((a, b) => b.uniqueness - a.uniqueness);
 
-            moviePersonality.archetypeLovedMovies = loved.slice(0, 10);
-            moviePersonality.archetypeHatedMovies = hated.slice(0, 10);
+            moviePersonality.archetypeLovedMovies = loved.slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
+            moviePersonality.archetypeHatedMovies = hated.slice(0, ARCHETYPE_EXAMPLE_DISPLAY_LIMIT);
 
-            // Build a compact signature from the top uniquely-loved examples.
-            const lovedIds = moviePersonality.archetypeLovedMovies.map((m) => m.id);
+            // Build a compact signature from a larger uniquely-loved sample so tags/years/people are
+            // less sensitive to a handful of outliers, while still showing a concise 1-row example list.
+            const lovedIds = loved.slice(0, ARCHETYPE_SIGNATURE_SAMPLE_SIZE).map((m) => m.id);
             if (lovedIds.length > 0) {
               const sigMovies = await prisma.movie.findMany({
                 where: { id: { in: lovedIds } },
@@ -750,5 +753,4 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(stats);
 }
-
 
