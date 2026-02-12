@@ -101,13 +101,13 @@ export default function NewSessionPage() {
       {households.length === 0 ? (
         <div className="bg-card border border-border rounded-xl p-8 text-center">
           <p className="text-sm text-muted">
-            You need to create or join a household first.
+            You need to create or join a household first in Settings.
           </p>
           <Button
             className="mt-4"
-            onClick={() => router.push("/dashboard")}
+            onClick={() => router.push("/settings")}
           >
-            Go to Dashboard
+            Go to Settings
           </Button>
         </div>
       ) : (

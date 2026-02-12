@@ -10,6 +10,37 @@ Capture the main product flows, how they currently work, and how they should wor
 - Consistent interaction patterns across rating surfaces.
 - Progressive disclosure: simple first, details on demand.
 
+## 0) Navigation and Home Information Architecture
+### Current
+- Bottom navigation is:
+  - Home (`/dashboard`)
+  - Preferences (`/preferences`)
+  - Movie Night (`/session/new`)
+  - Settings (`/settings`)
+- Profile is nested under Preferences instead of being a primary destination.
+- Home mixes high-frequency tasks with lower-frequency admin tasks (household creation, join by invite code, invite-link administration).
+
+### Should Be
+- Bottom navigation should be:
+  - Home
+  - Rate
+  - Movie Night
+  - Profile
+  - Settings
+- Home should prioritize high-frequency shortcuts only:
+  - Continue rating queue (resume where user left off).
+  - Join/resume active movie night session.
+  - Start movie night.
+  - Rate near-Radarr-threshold titles.
+  - Rate upcoming titles.
+- Move household and invite administration off Home into Settings:
+  - `Settings > Household & Members`
+  - `Settings > Invites & Access`
+  - `Settings > Integrations`
+- Use role-aware rendering:
+  - Admin sees household/invite/integration controls.
+  - Non-admin sees only personal settings and member-safe household views.
+
 ## 1) Auth, Onboarding, and Recovery
 ### Current
 - Users land on intro/login/register pages.
@@ -28,7 +59,7 @@ Capture the main product flows, how they currently work, and how they should wor
 ### Current
 - Admin can create invite links for household members.
 - Members can join via invite acceptance route.
-- Dashboard shows active sessions and invite controls.
+- Dashboard currently surfaces invite and household management actions.
 
 ### Should Be
 - Dedicated "Household" area:
@@ -36,6 +67,7 @@ Capture the main product flows, how they currently work, and how they should wor
   - Invite lifecycle status (pending, accepted, expired).
   - Quick actions: copy invite, resend, revoke.
 - Make admin-only actions visually distinct and grouped.
+- Keep this entire area under Settings rather than Home.
 
 ## 3) Background Preferences Hub
 ### Current
@@ -173,6 +205,40 @@ Capture the main product flows, how they currently work, and how they should wor
   - Better focus states.
   - Larger touch targets.
   - Consistent keyboard interactions.
+
+## 13) Additional Flow Improvements (Recommended)
+- Add a `Resume` system:
+  - One-tap "Continue where you left off" cards for rating queues and movie night sessions.
+- Introduce a global household context switcher in the app header:
+  - Clear active household label.
+  - Fast switching for users in multiple households.
+- Create a lightweight inbox/feed:
+  - "Session started", "You were invited", "Movie close to Radarr threshold", "Your vote needed".
+- Replace hidden setup dependencies with explicit step states:
+  - Example: session setup should always show `Step X/Y` and required actions before unlock.
+- Standardize empty states into action states:
+  - Every empty screen should provide the next best action CTA.
+- Add "why this is shown" chips on rating cards:
+  - Based on your ratings, household trend, popularity, near-threshold, or discovery diversification.
+- Consolidate search and rate into a universal command surface:
+  - One place to find and rate movies, actors, directors, studios.
+- Add persistent undo history:
+  - Not just last action; allow undo stack (last 3-5 actions) for accidental taps.
+- Add progress-quality indicators:
+  - "Preference confidence" by domain (genres/movies/people/studios), not just count of ratings.
+- Improve desktop flow without sacrificing mobile:
+  - Keep single-column primary path on mobile.
+  - Use desktop side panels for context, filters, and session status.
+
+## 14) Immediate IA Changes (High Impact)
+- Home simplification:
+  - Keep only frequent shortcuts, active session state, and resume cards.
+- Profile promotion:
+  - Make Profile a first-class tab in global navigation.
+- Admin relocation:
+  - Move household/invite/link management from Home to Settings sections.
+- Label clarity:
+  - Rename `Preferences` tab to `Rate` to reflect dominant user intent.
 
 ## Execution Notes
 - Preserve existing backend behavior and recommendation logic while redesigning UI.

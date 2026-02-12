@@ -14,6 +14,32 @@ interface Integration {
   enabled: boolean;
 }
 
+interface Household {
+  id: string;
+  name: string;
+  inviteCode: string;
+  role: string;
+  members: {
+    user: {
+      id: string;
+      name: string;
+      avatarUrl: string | null;
+      ratingCount: number;
+    };
+  }[];
+}
+
+interface HouseholdInvite {
+  id: string;
+  token: string;
+  status: string;
+  displayName: string | null;
+  email: string | null;
+  createdAt: string;
+  household: { id: string; name: string };
+  invitePath: string;
+}
+
 interface UserSettingsData {
   explorationFactor: number;
   discoverySourcePref: string;
@@ -169,6 +195,18 @@ export default function SettingsPage() {
     total: number;
   } | null>(null);
   const [backupDownloading, setBackupDownloading] = useState(false);
+  const [households, setHouseholds] = useState<Household[]>([]);
+  const [householdInvites, setHouseholdInvites] = useState<HouseholdInvite[]>([]);
+  const [showCreateHousehold, setShowCreateHousehold] = useState(false);
+  const [showJoinHousehold, setShowJoinHousehold] = useState(false);
+  const [newHouseholdName, setNewHouseholdName] = useState("");
+  const [joinInviteCode, setJoinInviteCode] = useState("");
+  const [householdLoading, setHouseholdLoading] = useState(false);
+  const [inviteHouseholdId, setInviteHouseholdId] = useState("");
+  const [inviteDisplayName, setInviteDisplayName] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [createdInviteLink, setCreatedInviteLink] = useState("");
+  const [creatingInvite, setCreatingInvite] = useState(false);
   const activeIntervalsRef = useRef<ReturnType<typeof setInterval>[]>([]);
 
   // Cleanup backup polling intervals on unmount
@@ -206,7 +244,20 @@ export default function SettingsPage() {
       fetch("/api/settings/algorithm")
         .then((response) => (response.ok ? response.json() : null))
         .catch(() => null),
-    ]).then(([integrationData, userSettingsData, algorithmData]) => {
+      fetch("/api/household")
+        .then((response) => (response.ok ? response.json() : []))
+        .catch(() => []),
+      fetch("/api/household/invites")
+        .then((response) => (response.ok ? response.json() : []))
+        .catch(() => []),
+    ]).then(
+      ([
+        integrationData,
+        userSettingsData,
+        algorithmData,
+        householdData,
+        householdInviteData,
+      ]) => {
       if (Array.isArray(integrationData)) {
         setIntegrations(integrationData);
         for (const integration of integrationData) {
@@ -227,8 +278,111 @@ export default function SettingsPage() {
       if (algorithmData && typeof algorithmData === "object") {
         setAlgorithmSettings(algorithmData as AlgorithmSettings);
       }
-    });
+
+      if (Array.isArray(householdData)) {
+        setHouseholds(householdData);
+        const firstAdminHousehold = householdData.find(
+          (household: Household) => household.role === "admin"
+        );
+        if (firstAdminHousehold) {
+          setInviteHouseholdId(firstAdminHousehold.id);
+        }
+      }
+
+      if (Array.isArray(householdInviteData)) {
+        setHouseholdInvites(householdInviteData);
+      }
+    }
+    );
   }, [status]);
+
+  const refreshHouseholds = async () => {
+    const response = await fetch("/api/household");
+    if (!response.ok) return;
+    const data = await response.json();
+    if (!Array.isArray(data)) return;
+    setHouseholds(data);
+    const firstAdminHousehold = data.find(
+      (household: Household) => household.role === "admin"
+    );
+    if (firstAdminHousehold && !inviteHouseholdId) {
+      setInviteHouseholdId(firstAdminHousehold.id);
+    }
+  };
+
+  const refreshInvites = async () => {
+    const response = await fetch("/api/household/invites");
+    if (!response.ok) {
+      setHouseholdInvites([]);
+      return;
+    }
+    const data = await response.json();
+    setHouseholdInvites(Array.isArray(data) ? data : []);
+  };
+
+  const createHousehold = async () => {
+    if (!newHouseholdName.trim()) return;
+    setHouseholdLoading(true);
+
+    const response = await fetch("/api/household", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newHouseholdName }),
+    });
+
+    if (response.ok) {
+      setShowCreateHousehold(false);
+      setNewHouseholdName("");
+      await refreshHouseholds();
+    }
+
+    setHouseholdLoading(false);
+  };
+
+  const joinHousehold = async () => {
+    if (!joinInviteCode.trim()) return;
+    setHouseholdLoading(true);
+
+    const response = await fetch("/api/household/join", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inviteCode: joinInviteCode }),
+    });
+
+    if (response.ok) {
+      setShowJoinHousehold(false);
+      setJoinInviteCode("");
+      await refreshHouseholds();
+    }
+
+    setHouseholdLoading(false);
+  };
+
+  const createHouseholdInvite = async () => {
+    if (!inviteHouseholdId) return;
+    setCreatingInvite(true);
+    setCreatedInviteLink("");
+
+    const response = await fetch("/api/household/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        householdId: inviteHouseholdId,
+        displayName: inviteDisplayName || undefined,
+        email: inviteEmail || undefined,
+      }),
+    });
+
+    if (response.ok) {
+      const invite = await response.json();
+      setCreatedInviteLink(`${window.location.origin}${invite.invitePath}`);
+      setInviteDisplayName("");
+      setInviteEmail("");
+      await refreshInvites();
+    }
+
+    setCreatingInvite(false);
+  };
 
   const saveIntegration = async (service: string) => {
     setSaving(service);
@@ -475,6 +629,10 @@ export default function SettingsPage() {
     },
   ];
 
+  const adminHouseholds = households.filter(
+    (household) => household.role === "admin"
+  );
+
   if (status === "loading") {
     return (
       <div className="flex items-center justify-center h-64">
@@ -488,9 +646,218 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
         <p className="text-sm text-muted mt-1">
-          Configure preferences, integrations, imports, and recommendation behavior.
+          Configure household access, personal preferences, integrations, imports, and recommendation behavior.
         </p>
       </div>
+
+      <div className="bg-card border border-border rounded-xl p-4 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold">Household &amp; Members</h3>
+            <p className="text-[11px] text-muted mt-0.5">
+              Manage your household memberships. Create or join households with invite codes.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setShowJoinHousehold((value) => !value)}
+            >
+              Join
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => setShowCreateHousehold((value) => !value)}
+            >
+              Create
+            </Button>
+          </div>
+        </div>
+
+        {showCreateHousehold && (
+          <div className="bg-background/40 border border-border rounded-xl p-3 space-y-2 animate-slide-up">
+            <Input
+              placeholder="Household name"
+              value={newHouseholdName}
+              onChange={(event) => setNewHouseholdName(event.target.value)}
+            />
+            <div className="flex gap-2">
+              <Button size="sm" onClick={createHousehold} loading={householdLoading}>
+                Create Household
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowCreateHousehold(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {showJoinHousehold && (
+          <div className="bg-background/40 border border-border rounded-xl p-3 space-y-2 animate-slide-up">
+            <Input
+              placeholder="Paste household invite code"
+              value={joinInviteCode}
+              onChange={(event) => setJoinInviteCode(event.target.value)}
+            />
+            <div className="flex gap-2">
+              <Button size="sm" onClick={joinHousehold} loading={householdLoading}>
+                Join Household
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowJoinHousehold(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {households.length === 0 ? (
+          <div className="bg-background/40 border border-border rounded-xl p-4 text-sm text-muted">
+            You are not in any households yet.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {households.map((household) => (
+              <div key={household.id} className="bg-background/40 border border-border rounded-xl p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-sm font-semibold">{household.name}</h4>
+                    <p className="text-[11px] text-muted">
+                      {household.members.length} member
+                      {household.members.length !== 1 ? "s" : ""}
+                    </p>
+                  </div>
+                  <span className="text-[10px] bg-accent-soft text-accent px-2 py-0.5 rounded-full">
+                    {household.role}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 mt-3">
+                  <code className="text-[11px] bg-card px-2 py-1 rounded-lg text-muted font-mono flex-1 truncate">
+                    {household.inviteCode}
+                  </code>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(household.inviteCode)}
+                    className="text-xs text-accent hover:underline"
+                  >
+                    Copy code
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {adminHouseholds.length > 0 && (
+        <div className="bg-card border border-border rounded-xl p-4 space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold">Invites &amp; Access (Admin)</h3>
+            <p className="text-[11px] text-muted mt-0.5">
+              Create member account invite links and track their status.
+            </p>
+          </div>
+
+          {adminHouseholds.length > 1 && (
+            <div>
+              <label className="text-xs text-muted mb-1 block">Household</label>
+              <select
+                value={inviteHouseholdId}
+                onChange={(event) => setInviteHouseholdId(event.target.value)}
+                className="w-full bg-card-hover border border-border rounded-xl px-3 py-2 text-sm"
+              >
+                {adminHouseholds.map((household) => (
+                  <option key={household.id} value={household.id}>
+                    {household.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <Input
+            placeholder="Display name (optional)"
+            value={inviteDisplayName}
+            onChange={(event) => setInviteDisplayName(event.target.value)}
+          />
+          <Input
+            placeholder="Email (optional)"
+            value={inviteEmail}
+            onChange={(event) => setInviteEmail(event.target.value)}
+            type="email"
+          />
+
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={createHouseholdInvite}
+              loading={creatingInvite}
+              disabled={!inviteHouseholdId}
+            >
+              Create Invite Link
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void refreshInvites()}>
+              Refresh
+            </Button>
+          </div>
+
+          {createdInviteLink && (
+            <div className="bg-background/40 border border-border rounded-xl p-3">
+              <p className="text-[11px] text-muted mb-1">Newest invite link</p>
+              <div className="flex items-center gap-2">
+                <code className="text-[11px] text-foreground truncate flex-1">
+                  {createdInviteLink}
+                </code>
+                <button
+                  onClick={() => navigator.clipboard.writeText(createdInviteLink)}
+                  className="text-xs text-accent hover:underline"
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+          )}
+
+          {householdInvites.length > 0 ? (
+            <div className="space-y-2 pt-1">
+              {householdInvites.slice(0, 8).map((invite) => (
+                <div
+                  key={invite.id}
+                  className="bg-background/30 border border-border rounded-xl px-3 py-2 flex items-center gap-2"
+                >
+                  <div className="flex-1">
+                    <div className="text-xs font-medium">
+                      {invite.displayName || invite.email || "Household member"}
+                    </div>
+                    <p className="text-[11px] text-muted">
+                      {invite.household.name} - {invite.status}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() =>
+                      navigator.clipboard.writeText(
+                        `${window.location.origin}${invite.invitePath}`
+                      )
+                    }
+                    className="text-xs text-accent hover:underline"
+                  >
+                    Copy Link
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted">No invites created yet.</p>
+          )}
+        </div>
+      )}
 
       <div className="bg-card border border-border rounded-xl p-4 space-y-4">
         <div>
@@ -1217,5 +1584,3 @@ export default function SettingsPage() {
     </div>
   );
 }
-
-

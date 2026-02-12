@@ -860,3 +860,34 @@ Core entities in `prisma/schema.prisma`:
     - Current interaction model.
     - Recommended future interaction model.
   - Learned user workflow preference: wants clearer guided progression in session setup and a durable redesign brief that maps current UX to desired UX by feature block.
+- 2026-02-12 (Navigation and home-flow redesign guidance update):
+  - Confirmed multi-household membership behavior:
+    - Existing logged-in users can join additional households via `POST /api/household/join` using household invite code.
+    - Dashboard already exposes this via the `Join` action and invite-code input.
+    - Household invite-link acceptance (`/api/household/invites/accept`) remains the account-creation path.
+  - Expanded `redesign_plans.md` with explicit information-architecture guidance:
+    - Home should focus only on high-frequency shortcuts and resume flows.
+    - Household/admin/invite management should move under Settings sections.
+    - Profile should be promoted to a first-class top-level tab instead of being nested under Preferences.
+    - Added prioritized "Immediate IA Changes" and broader flow improvements (resume cards, context switcher, inbox-style prompts, clearer step gating).
+  - Learned user product preference: reduce cognitive load on Home by removing low-frequency admin controls and prioritize the most-used actions.
+  - Learned user workflow preference: keep redesign decisions documented in a durable planning file before full UI refactor work starts.
+- 2026-02-12 (Implemented navigation + IA relocation):
+  - Implemented top-level navigation changes in `src/components/NavBar.tsx`:
+    - Renamed `Preferences` tab label to `Rate`.
+    - Added `Profile` as a dedicated primary tab.
+    - Adjusted bottom-nav spacing/icon sizing for a 5-tab layout.
+  - Refocused Home (`/dashboard`) to high-frequency actions only:
+    - Removed household creation/join/invite-management blocks from Home.
+    - Kept session-focused content and added direct shortcuts to core actions (`Continue Rating`, `Start Movie Night`, `Near Threshold`, `Upcoming`, `Search & Rate`, `Profile`).
+    - Preserved active-session resume and recent-session access.
+  - Moved household administration and onboarding controls into Settings (`/settings`):
+    - Added `Household & Members` section with create household, join household by invite code, and membership list.
+    - Added `Invites & Access (Admin)` section with invite-link creation and invite status list.
+    - Reused existing APIs (`/api/household`, `/api/household/join`, `/api/household/invites`) so behavior moved without backend contract changes.
+  - Updated dependent empty-state routing:
+    - `/session/new` no-household fallback now directs users to `/settings` (not `/dashboard`) for create/join actions.
+  - Validation:
+    - `npm run lint` passed with pre-existing warnings only.
+    - `npm run build` succeeded.
+  - Learned user product preference: Home should be an action launcher for frequent flows, while household/invite administration belongs under Settings.
