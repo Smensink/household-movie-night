@@ -8,6 +8,8 @@ import { useRouter } from "next/navigation";
 import StarRating from "@/components/StarRating";
 import Button from "@/components/ui/Button";
 
+const LAST_RATE_PATH_KEY = "lastRatePath";
+
 interface Candidate {
   movieId: string;
   title: string;
@@ -63,6 +65,12 @@ export default function RadarrThresholdPage() {
       router.push("/login");
     }
   }, [status, router]);
+
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    if (typeof window === "undefined") return;
+    localStorage.setItem(LAST_RATE_PATH_KEY, "/preferences/radarr-threshold");
+  }, [status]);
 
   const loadData = async () => {
     setError(null);

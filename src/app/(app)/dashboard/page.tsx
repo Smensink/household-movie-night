@@ -5,6 +5,29 @@ import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
+const LAST_RATE_PATH_KEY = "lastRatePath";
+const ACTIVE_HOUSEHOLD_KEY = "activeHouseholdId";
+
+const RATE_DESTINATIONS: Record<string, { title: string; subtitle: string }> = {
+  "/preferences/movies": { title: "Movies", subtitle: "Movie queue" },
+  "/preferences/people": { title: "People", subtitle: "Actors and directors" },
+  "/preferences/studios": { title: "Studios", subtitle: "Production companies" },
+  "/preferences/upcoming": { title: "Upcoming", subtitle: "Future releases" },
+  "/preferences/radarr-threshold": {
+    title: "Near Threshold",
+    subtitle: "Radarr consensus queue",
+  },
+  "/preferences/search": { title: "Search & Rate", subtitle: "Find specific titles" },
+  "/preferences/genres": { title: "Genres", subtitle: "Rank genre preferences" },
+};
+
+interface Household {
+  id: string;
+  name: string;
+  role: string;
+  members: { user: { id: string; name: string } }[];
+}
+
 interface Session {
   id: string;
   status: string;
@@ -12,7 +35,7 @@ interface Session {
   guestInviteCode: string;
   canManage: boolean;
   isParticipant: boolean;
-  household: { name: string };
+  household: { id: string; name: string };
   participants: { user: { name: string } }[];
 }
 
@@ -20,6 +43,18 @@ export default function DashboardPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [households, setHouseholds] = useState<Household[]>([]);
+  const [movieRatingCount, setMovieRatingCount] = useState(0);
+  const [rankedGenresCount, setRankedGenresCount] = useState(0);
+  const [lastRatePath, setLastRatePath] = useState(() => {
+    if (typeof window === "undefined") return "/preferences/movies";
+    const storedRatePath = localStorage.getItem(LAST_RATE_PATH_KEY);
+    if (storedRatePath && RATE_DESTINATIONS[storedRatePath]) {
+      return storedRatePath;
+    }
+    return "/preferences/movies";
+  });
+  const [selectedHouseholdId, setSelectedHouseholdId] = useState<string>("");
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -27,20 +62,106 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (status !== "authenticated") return;
-    fetch("/api/sessions")
-      .then((response) => (response.ok ? response.json() : []))
-      .then((data) => setSessions(Array.isArray(data) ? data : []))
-      .catch(() => setSessions([]));
+
+    Promise.all([
+      fetch("/api/sessions")
+        .then((response) => (response.ok ? response.json() : []))
+        .catch(() => []),
+      fetch("/api/household")
+        .then((response) => (response.ok ? response.json() : []))
+        .catch(() => []),
+      fetch("/api/ratings")
+        .then((response) => (response.ok ? response.json() : []))
+        .catch(() => []),
+      fetch("/api/genres")
+        .then((response) => (response.ok ? response.json() : { rankings: {} }))
+        .catch(() => ({ rankings: {} })),
+    ]).then(([sessionsData, householdsData, ratingsData, genresData]) => {
+      const safeSessions = Array.isArray(sessionsData) ? (sessionsData as Session[]) : [];
+      const safeHouseholds = Array.isArray(householdsData)
+        ? (householdsData as Household[])
+        : [];
+
+      setSessions(safeSessions);
+      setHouseholds(safeHouseholds);
+      setMovieRatingCount(Array.isArray(ratingsData) ? ratingsData.length : 0);
+      setRankedGenresCount(Object.keys(genresData?.rankings || {}).length);
+
+      const storedHouseholdId =
+        typeof window !== "undefined"
+          ? localStorage.getItem(ACTIVE_HOUSEHOLD_KEY)
+          : null;
+      const defaultHouseholdId = safeHouseholds[0]?.id ?? "";
+      const nextSelectedHouseholdId =
+        storedHouseholdId && safeHouseholds.some((household) => household.id === storedHouseholdId)
+          ? storedHouseholdId
+          : defaultHouseholdId;
+      setSelectedHouseholdId(nextSelectedHouseholdId);
+    });
   }, [status]);
 
-  const activeSessions = sessions.filter(
+  const persistLastRatePath = (path: string) => {
+    setLastRatePath(path);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(LAST_RATE_PATH_KEY, path);
+    }
+  };
+
+  const updateSelectedHousehold = (householdId: string) => {
+    setSelectedHouseholdId(householdId);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, householdId);
+    }
+  };
+
+  const continueRatingDestination = RATE_DESTINATIONS[lastRatePath] || RATE_DESTINATIONS["/preferences/movies"];
+
+  const scopedSessions = selectedHouseholdId
+    ? sessions.filter((movieNightSession) => movieNightSession.household.id === selectedHouseholdId)
+    : sessions;
+
+  const activeSessions = scopedSessions.filter(
     (movieNightSession) =>
       movieNightSession.status === "gathering" ||
       movieNightSession.status === "voting"
   );
-  const recentSessions = sessions
+  const recentSessions = scopedSessions
     .filter((movieNightSession) => movieNightSession.status !== "gathering" && movieNightSession.status !== "voting")
     .slice(0, 5);
+
+  const checklistSteps = [
+    {
+      id: "household",
+      label: "Join or create a household",
+      complete: households.length > 0,
+      href: "/settings",
+      cta: "Open household settings",
+    },
+    {
+      id: "genres",
+      label: "Rank your genres",
+      complete: rankedGenresCount > 0,
+      href: "/preferences/genres",
+      cta: "Rank genres",
+    },
+    {
+      id: "movies",
+      label: `Rate at least 10 movies (${Math.min(movieRatingCount, 10)}/10)`,
+      complete: movieRatingCount >= 10,
+      href: "/preferences/movies",
+      cta: "Rate movies",
+    },
+    {
+      id: "session",
+      label: "Start your first movie night",
+      complete: sessions.length > 0,
+      href: "/session/new",
+      cta: "Start movie night",
+    },
+  ];
+
+  const completedChecklistSteps = checklistSteps.filter((step) => step.complete).length;
+  const nextChecklistStep = checklistSteps.find((step) => !step.complete);
 
   if (status === "loading") {
     return (
@@ -65,13 +186,85 @@ export default function DashboardPage() {
         </button>
       </div>
 
+      {completedChecklistSteps < checklistSteps.length && (
+        <div className="bg-card border border-accent/30 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold">First-Time Setup</h2>
+              <p className="text-[11px] text-muted">
+                Complete these steps once for better recommendations.
+              </p>
+            </div>
+            <span className="text-[10px] bg-accent-soft text-accent px-2 py-0.5 rounded-full">
+              {completedChecklistSteps}/{checklistSteps.length}
+            </span>
+          </div>
+          <div className="w-full h-1.5 bg-border rounded-full overflow-hidden">
+            <div
+              className="h-full bg-accent transition-all duration-300"
+              style={{
+                width: `${(completedChecklistSteps / checklistSteps.length) * 100}%`,
+              }}
+            />
+          </div>
+          <div className="space-y-1.5">
+            {checklistSteps.map((step) => (
+              <div key={step.id} className="flex items-center gap-2 text-xs">
+                <span
+                  className={`w-4 h-4 rounded-full border flex items-center justify-center ${
+                    step.complete
+                      ? "border-success bg-success/10 text-success"
+                      : "border-border text-muted"
+                  }`}
+                >
+                  {step.complete ? "✓" : ""}
+                </span>
+                <span className={step.complete ? "text-foreground" : "text-muted"}>
+                  {step.label}
+                </span>
+              </div>
+            ))}
+          </div>
+          {nextChecklistStep && (
+            <Link
+              href={nextChecklistStep.href}
+              className="inline-flex items-center rounded-lg bg-accent px-3 py-2 text-xs font-medium text-white hover:bg-accent/90 transition-all"
+            >
+              {nextChecklistStep.cta}
+            </Link>
+          )}
+        </div>
+      )}
+
+      {households.length > 0 && (
+        <div className="bg-card border border-border rounded-2xl p-4 space-y-2">
+          <h2 className="text-sm font-semibold">Household Context</h2>
+          {households.length > 1 ? (
+            <select
+              value={selectedHouseholdId}
+              onChange={(event) => updateSelectedHousehold(event.target.value)}
+              className="w-full bg-card-hover border border-border rounded-xl px-3 py-2 text-sm"
+            >
+              {households.map((household) => (
+                <option key={household.id} value={household.id}>
+                  {household.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <p className="text-xs text-muted">{households[0]?.name}</p>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <Link
-          href="/preferences/movies"
+          href={lastRatePath}
+          onClick={() => persistLastRatePath(lastRatePath)}
           className="bg-card border border-border rounded-2xl p-4 hover:border-accent/30 transition-all"
         >
-          <h3 className="text-sm font-semibold">Continue Rating</h3>
-          <p className="text-[11px] text-muted mt-1">Movie queue</p>
+          <h3 className="text-sm font-semibold">Resume {continueRatingDestination.title}</h3>
+          <p className="text-[11px] text-muted mt-1">{continueRatingDestination.subtitle}</p>
         </Link>
 
         <Link
@@ -84,6 +277,7 @@ export default function DashboardPage() {
 
         <Link
           href="/preferences/radarr-threshold"
+          onClick={() => persistLastRatePath("/preferences/radarr-threshold")}
           className="bg-card border border-border rounded-2xl p-4 hover:border-accent/30 transition-all"
         >
           <h3 className="text-sm font-semibold">Near Threshold</h3>
@@ -92,6 +286,7 @@ export default function DashboardPage() {
 
         <Link
           href="/preferences/upcoming"
+          onClick={() => persistLastRatePath("/preferences/upcoming")}
           className="bg-card border border-border rounded-2xl p-4 hover:border-accent/30 transition-all"
         >
           <h3 className="text-sm font-semibold">Upcoming</h3>
@@ -100,6 +295,7 @@ export default function DashboardPage() {
 
         <Link
           href="/preferences/search"
+          onClick={() => persistLastRatePath("/preferences/search")}
           className="bg-card border border-border rounded-2xl p-4 hover:border-accent/30 transition-all"
         >
           <h3 className="text-sm font-semibold">Search & Rate</h3>
@@ -145,6 +341,12 @@ export default function DashboardPage() {
               </Link>
             ))}
           </div>
+        </div>
+      )}
+
+      {selectedHouseholdId && activeSessions.length === 0 && scopedSessions.length === 0 && (
+        <div className="bg-card border border-border rounded-xl p-4 text-xs text-muted">
+          No sessions yet for this household.
         </div>
       )}
 

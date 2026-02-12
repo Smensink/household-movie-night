@@ -8,6 +8,8 @@ import Link from "next/link";
 import Input from "@/components/ui/Input";
 import StarRating from "@/components/StarRating";
 
+const LAST_RATE_PATH_KEY = "lastRatePath";
+
 type Tab = "movies" | "people" | "studios";
 
 interface MovieResult {
@@ -75,6 +77,12 @@ export default function SearchPage() {
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
+
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    if (typeof window === "undefined") return;
+    localStorage.setItem(LAST_RATE_PATH_KEY, "/preferences/search");
+  }, [status]);
 
   // Load existing ratings on mount
   useEffect(() => {

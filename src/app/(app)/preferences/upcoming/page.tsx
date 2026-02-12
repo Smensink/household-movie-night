@@ -7,6 +7,8 @@ import Link from "next/link";
 import TinderMovieCard from "@/components/TinderMovieCard";
 import Button from "@/components/ui/Button";
 
+const LAST_RATE_PATH_KEY = "lastRatePath";
+
 interface UpcomingMovie {
   id: string;
   imdbId: string | null;
@@ -103,6 +105,12 @@ export default function UpcomingMoviesPage() {
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
+
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    if (typeof window === "undefined") return;
+    localStorage.setItem(LAST_RATE_PATH_KEY, "/preferences/upcoming");
+  }, [status]);
 
   const fetchUpcomingBatch = useCallback(
     async (
@@ -548,4 +556,3 @@ export default function UpcomingMoviesPage() {
     </div>
   );
 }
-

@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import GenreRanker from "@/components/GenreRanker";
 import Link from "next/link";
 
+const LAST_RATE_PATH_KEY = "lastRatePath";
+
 interface Genre {
   id: string;
   name: string;
@@ -26,6 +28,12 @@ export default function GenrePreferencesPage() {
       router.push("/login");
     }
   }, [status, router]);
+
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    if (typeof window === "undefined") return;
+    localStorage.setItem(LAST_RATE_PATH_KEY, "/preferences/genres");
+  }, [status]);
 
   useEffect(() => {
     if (status !== "authenticated") return;

@@ -8,6 +8,8 @@ import StarRating from "@/components/StarRating";
 import Input from "@/components/ui/Input";
 import Button from "@/components/ui/Button";
 
+const LAST_RATE_PATH_KEY = "lastRatePath";
+
 interface SampleMovie {
   title: string;
   year?: number | null;
@@ -86,6 +88,12 @@ export default function RatePeoplePage() {
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
+
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    if (typeof window === "undefined") return;
+    localStorage.setItem(LAST_RATE_PATH_KEY, "/preferences/people");
+  }, [status]);
 
   const fetchDiscoverPeople = useCallback(
     async (
@@ -462,4 +470,3 @@ export default function RatePeoplePage() {
     </div>
   );
 }
-

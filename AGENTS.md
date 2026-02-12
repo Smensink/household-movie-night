@@ -891,3 +891,21 @@ Core entities in `prisma/schema.prisma`:
     - `npm run lint` passed with pre-existing warnings only.
     - `npm run build` succeeded.
   - Learned user product preference: Home should be an action launcher for frequent flows, while household/invite administration belongs under Settings.
+- 2026-02-12 (Onboarding productivity + household context + first-time rating guidance):
+  - Implemented first-run productivity checklist on Home (`/dashboard`) with progress tracking and next-action CTA:
+    - Steps: household setup, genre ranking, first 10 movie ratings, first movie-night session.
+    - Progress and CTA now steer new users toward the most productive setup order.
+  - Added household context selection on Home:
+    - New `Household Context` selector for multi-household users.
+    - Selected household is persisted in localStorage (`activeHouseholdId`) and used to scope active/recent session lists.
+  - Improved experienced-user resume flow:
+    - `Continue Rating` is now contextual (`Resume Movies`, `Resume People`, etc.) based on last-used rating surface.
+    - Last-used rating page is persisted via localStorage (`lastRatePath`) from rating pages.
+  - Synced session creation with household context:
+    - `/session/new` now initializes household selection from persisted `activeHouseholdId` when valid.
+  - Added first-time rating coach on `/preferences/movies`:
+    - Explains Seen vs Unseen semantics.
+    - Provides star-scale examples (1-5, including `3 stars = neutral`).
+    - Calls out `I haven't heard of this movie` and `Undo` behavior.
+    - One-time per user (`ratingCoachSeen:<userId>` localStorage key).
+  - Learned product preference: onboarding should explicitly drive users through a productive sequence, while experienced users need immediate resume paths with minimal taps and context retention.

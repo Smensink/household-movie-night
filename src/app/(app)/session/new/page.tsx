@@ -5,6 +5,8 @@ import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Button from "@/components/ui/Button";
 
+const ACTIVE_HOUSEHOLD_KEY = "activeHouseholdId";
+
 interface Household {
   id: string;
   name: string;
@@ -32,7 +34,19 @@ export default function NewSessionPage() {
         .then((data) => {
           setHouseholds(data);
           if (data.length > 0) {
-            setSelectedHousehold(data[0].id);
+            const storedHouseholdId =
+              typeof window !== "undefined"
+                ? localStorage.getItem(ACTIVE_HOUSEHOLD_KEY)
+                : null;
+            const defaultHouseholdId =
+              storedHouseholdId &&
+              data.some((household: Household) => household.id === storedHouseholdId)
+                ? storedHouseholdId
+                : data[0].id;
+            setSelectedHousehold(defaultHouseholdId);
+            if (typeof window !== "undefined") {
+              localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, defaultHouseholdId);
+            }
             // Auto-select current user
             setSelectedMembers(new Set([session?.user?.id || ""]));
           }
@@ -124,6 +138,9 @@ export default function NewSessionPage() {
                     key={h.id}
                     onClick={() => {
                       setSelectedHousehold(h.id);
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, h.id);
+                      }
                       setSelectedMembers(
                         new Set([session?.user?.id || ""])
                       );

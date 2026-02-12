@@ -8,6 +8,8 @@ import TinderMovieCard from "@/components/TinderMovieCard";
 import Input from "@/components/ui/Input";
 import Button from "@/components/ui/Button";
 
+const LAST_RATE_PATH_KEY = "lastRatePath";
+
 interface Movie {
   id: string;
   title: string;
@@ -102,7 +104,7 @@ function mergeRatedMoviesPreserveOrder(
 }
 
 function RateMoviesPageContent() {
-  const { status } = useSession();
+  const { data: session, status } = useSession();
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -115,6 +117,7 @@ function RateMoviesPageContent() {
   const [loading, setLoading] = useState(true);
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const [showSearch, setShowSearch] = useState(false);
+  const [showRatingCoach, setShowRatingCoach] = useState(false);
   const [showRatedMovies, setShowRatedMovies] = useState(false);
   const [ratedMoviesSearch, setRatedMoviesSearch] = useState("");
   const [ratedMovies, setRatedMovies] = useState<RatedMovieEntry[]>([]);
@@ -140,6 +143,27 @@ function RateMoviesPageContent() {
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
+
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    if (typeof window === "undefined") return;
+
+    localStorage.setItem(LAST_RATE_PATH_KEY, "/preferences/movies");
+
+    const userId = session?.user?.id;
+    if (!userId) return;
+    const coachSeenKey = `ratingCoachSeen:${userId}`;
+    if (localStorage.getItem(coachSeenKey) !== "1") {
+      setShowRatingCoach(true);
+    }
+  }, [session?.user?.id, status]);
+
+  const dismissRatingCoach = useCallback(() => {
+    setShowRatingCoach(false);
+    if (typeof window === "undefined") return;
+    if (!session?.user?.id) return;
+    localStorage.setItem(`ratingCoachSeen:${session.user.id}`, "1");
+  }, [session?.user?.id]);
 
   const fetchDiscoverBatch = useCallback(async (limit: number, excludeMovieIds: string[]) => {
     const params = new URLSearchParams();
@@ -620,6 +644,36 @@ function RateMoviesPageContent() {
           >
             Undo
           </button>
+        </div>
+      )}
+
+      {showRatingCoach && (
+        <div className="bg-accent/10 border border-accent/30 rounded-xl p-3 space-y-2 animate-slide-up">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-foreground">Quick rating guide</p>
+            <button
+              onClick={dismissRatingCoach}
+              className="text-xs text-accent hover:underline"
+            >
+              Got it
+            </button>
+          </div>
+          <p className="text-xs text-muted">
+            Set <span className="text-foreground">Unseen</span> if you have not watched it yet.
+            Your stars then mean willingness to watch tonight. Set{" "}
+            <span className="text-foreground">Seen</span> if you have watched it.
+          </p>
+          <div className="flex flex-wrap gap-1.5 text-[11px]">
+            <span className="bg-card border border-border rounded-full px-2 py-0.5">1 star = avoid</span>
+            <span className="bg-card border border-border rounded-full px-2 py-0.5">2 stars = unlikely</span>
+            <span className="bg-card border border-border rounded-full px-2 py-0.5">3 stars = neutral</span>
+            <span className="bg-card border border-border rounded-full px-2 py-0.5">4 stars = keen</span>
+            <span className="bg-card border border-border rounded-full px-2 py-0.5">5 stars = love it</span>
+          </div>
+          <p className="text-xs text-muted">
+            Use <span className="text-foreground">I haven&apos;t heard of this movie</span> when needed.
+            After you rate, an <span className="text-foreground">Undo</span> option appears.
+          </p>
         </div>
       )}
 

@@ -8,6 +8,8 @@ import Link from "next/link";
 import StarRating from "@/components/StarRating";
 import Button from "@/components/ui/Button";
 
+const LAST_RATE_PATH_KEY = "lastRatePath";
+
 interface SampleMovie {
   title: string;
   posterUrl?: string | null;
@@ -52,6 +54,12 @@ export default function StudioPreferencesPage() {
       router.push("/login");
     }
   }, [status, router]);
+
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    if (typeof window === "undefined") return;
+    localStorage.setItem(LAST_RATE_PATH_KEY, "/preferences/studios");
+  }, [status]);
 
   const fetchDiscoverStudios = useCallback(
     async (limit: number, excludeIds: string[] = []): Promise<Studio[]> => {
