@@ -11,6 +11,11 @@ interface AffinityItem {
   name: string;
   affinity: number; // -1 to 1 scale
   ratingCount: number;
+  evidence?: {
+    directSignal: boolean;
+    inferredSignalCount: number;
+    confidence: number;
+  };
 }
 
 interface ArchetypeMovieExample {
@@ -65,6 +70,7 @@ interface ProfileStats {
     featuresLearned: number;
     lastTrainedAt: string | null;
     isTraining: boolean;
+    scope?: "household";
   } | null;
   moviePersonality: {
     archetypeName: string;
@@ -168,6 +174,7 @@ const ARCHETYPE_SIGNATURE_SAMPLE_SIZE = 36;
 const MIN_INFERRED_EVIDENCE_WEIGHT = 4;
 const DIRECT_SIGNAL_BASE_CONFIDENCE = 0.6;
 const INFERRED_CONFIDENCE_SCALE = 4;
+const PROFILE_AFFINITY_DISPLAY_LIMIT = 10;
 
 interface AffinityAccumulator {
   name: string;
@@ -206,6 +213,35 @@ function calibrateAffinity(rawAffinity: number, totalWeight: number, hasDirectSi
   const clamped = Math.max(-1, Math.min(1, rawAffinity));
   const confidence = confidenceFromEvidence(totalWeight, hasDirectSignal);
   return clamped * confidence;
+}
+
+function withAffinityEvidence(
+  items: AffinityItem[],
+  accumulators: Map<string, AffinityAccumulator>,
+  directSignalMap: Map<string, boolean>
+): AffinityItem[] {
+  return items.map((item) => {
+    const acc = accumulators.get(item.id);
+    const totalWeight = acc?.totalWeight ?? item.ratingCount;
+    const hasDirectSignal = directSignalMap.get(item.id) === true;
+    const inferredWeight = Math.max(
+      0,
+      totalWeight - (hasDirectSignal ? DIRECT_RATING_WEIGHT : 0)
+    );
+    const inferredSignalCount = Math.max(
+      0,
+      Math.round(inferredWeight / INFERRED_RATING_WEIGHT)
+    );
+
+    return {
+      ...item,
+      evidence: {
+        directSignal: hasDirectSignal,
+        inferredSignalCount,
+        confidence: confidenceFromEvidence(totalWeight, hasDirectSignal),
+      },
+    };
+  });
 }
 
 export async function GET(req: NextRequest) {
@@ -344,17 +380,21 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const genreAffinities = mergeAffinities(genreAccumulators).map((item) => {
-    const acc = genreAccumulators.get(item.id);
-    return {
-      ...item,
-      affinity: calibrateAffinity(
-        item.affinity,
-        acc?.totalWeight ?? item.ratingCount,
-        genreHasDirectSignal.get(item.id) === true
-      ),
-    };
-  });
+  const genreAffinities = withAffinityEvidence(
+    mergeAffinities(genreAccumulators).map((item) => {
+      const acc = genreAccumulators.get(item.id);
+      return {
+        ...item,
+        affinity: calibrateAffinity(
+          item.affinity,
+          acc?.totalWeight ?? item.ratingCount,
+          genreHasDirectSignal.get(item.id) === true
+        ),
+      };
+    }),
+    genreAccumulators,
+    genreHasDirectSignal
+  );
 
   const genreSortScore = (item: AffinityItem): number => {
     const acc = genreAccumulators.get(item.id);
@@ -402,17 +442,21 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const actorAffinities = mergeAffinities(actorAccumulators).map((item) => {
-    const acc = actorAccumulators.get(item.id);
-    return {
-      ...item,
-      affinity: calibrateAffinity(
-        item.affinity,
-        acc?.totalWeight ?? item.ratingCount,
-        actorHasDirectSignal.get(item.id) === true
-      ),
-    };
-  });
+  const actorAffinities = withAffinityEvidence(
+    mergeAffinities(actorAccumulators).map((item) => {
+      const acc = actorAccumulators.get(item.id);
+      return {
+        ...item,
+        affinity: calibrateAffinity(
+          item.affinity,
+          acc?.totalWeight ?? item.ratingCount,
+          actorHasDirectSignal.get(item.id) === true
+        ),
+      };
+    }),
+    actorAccumulators,
+    actorHasDirectSignal
+  );
 
   // Build director affinities: direct ratings (strong) + inferred from movies (weak)
   const directorAccumulators = new Map<string, AffinityAccumulator>();
@@ -451,17 +495,21 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const directorAffinities = mergeAffinities(directorAccumulators).map((item) => {
-    const acc = directorAccumulators.get(item.id);
-    return {
-      ...item,
-      affinity: calibrateAffinity(
-        item.affinity,
-        acc?.totalWeight ?? item.ratingCount,
-        directorHasDirectSignal.get(item.id) === true
-      ),
-    };
-  });
+  const directorAffinities = withAffinityEvidence(
+    mergeAffinities(directorAccumulators).map((item) => {
+      const acc = directorAccumulators.get(item.id);
+      return {
+        ...item,
+        affinity: calibrateAffinity(
+          item.affinity,
+          acc?.totalWeight ?? item.ratingCount,
+          directorHasDirectSignal.get(item.id) === true
+        ),
+      };
+    }),
+    directorAccumulators,
+    directorHasDirectSignal
+  );
 
   // Build studio affinities: direct ratings (strong) + inferred from movies (weak)
   const studioAccumulators = new Map<string, AffinityAccumulator>();
@@ -500,37 +548,41 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const studioAffinities = mergeAffinities(studioAccumulators).map((item) => {
-    const acc = studioAccumulators.get(item.id);
-    return {
-      ...item,
-      affinity: calibrateAffinity(
-        item.affinity,
-        acc?.totalWeight ?? item.ratingCount,
-        studioHasDirectSignal.get(item.id) === true
-      ),
-    };
-  });
+  const studioAffinities = withAffinityEvidence(
+    mergeAffinities(studioAccumulators).map((item) => {
+      const acc = studioAccumulators.get(item.id);
+      return {
+        ...item,
+        affinity: calibrateAffinity(
+          item.affinity,
+          acc?.totalWeight ?? item.ratingCount,
+          studioHasDirectSignal.get(item.id) === true
+        ),
+      };
+    }),
+    studioAccumulators,
+    studioHasDirectSignal
+  );
 
   // Sort and get top/bottom
   const sortByAffinity = (a: AffinityItem, b: AffinityItem) => b.affinity - a.affinity;
 
   const topGenres = [...genreAffinities]
     .sort((a, b) => genreSortScore(b) - genreSortScore(a))
-    .slice(0, 5);
+    .slice(0, PROFILE_AFFINITY_DISPLAY_LIMIT);
   const bottomGenres = [...genreAffinities]
     .sort((a, b) => genreSortScore(b) - genreSortScore(a))
-    .slice(-5)
+    .slice(-PROFILE_AFFINITY_DISPLAY_LIMIT)
     .reverse();
 
-  const topActors = [...actorAffinities].sort(sortByAffinity).slice(0, 5);
-  const bottomActors = [...actorAffinities].sort(sortByAffinity).slice(-5).reverse();
+  const topActors = [...actorAffinities].sort(sortByAffinity).slice(0, PROFILE_AFFINITY_DISPLAY_LIMIT);
+  const bottomActors = [...actorAffinities].sort(sortByAffinity).slice(-PROFILE_AFFINITY_DISPLAY_LIMIT).reverse();
 
-  const topDirectors = [...directorAffinities].sort(sortByAffinity).slice(0, 5);
-  const bottomDirectors = [...directorAffinities].sort(sortByAffinity).slice(-5).reverse();
+  const topDirectors = [...directorAffinities].sort(sortByAffinity).slice(0, PROFILE_AFFINITY_DISPLAY_LIMIT);
+  const bottomDirectors = [...directorAffinities].sort(sortByAffinity).slice(-PROFILE_AFFINITY_DISPLAY_LIMIT).reverse();
 
-  const topStudios = [...studioAffinities].sort(sortByAffinity).slice(0, 5);
-  const bottomStudios = [...studioAffinities].sort(sortByAffinity).slice(-5).reverse();
+  const topStudios = [...studioAffinities].sort(sortByAffinity).slice(0, PROFILE_AFFINITY_DISPLAY_LIMIT);
+  const bottomStudios = [...studioAffinities].sort(sortByAffinity).slice(-PROFILE_AFFINITY_DISPLAY_LIMIT).reverse();
 
   // Get recent high-rated movies
   const recentHighRatedMovies = movieRatings
@@ -904,6 +956,7 @@ export async function GET(req: NextRequest) {
           featuresLearned: modelMetadata.featuresLearned,
           lastTrainedAt: modelMetadata.lastTrainedAt?.toISOString() ?? null,
           isTraining: modelMetadata.isTraining,
+          scope: "household",
         }
       : null,
     moviePersonality,

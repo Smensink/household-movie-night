@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
@@ -10,6 +10,11 @@ interface AffinityItem {
   name: string;
   affinity: number;
   ratingCount: number;
+  evidence?: {
+    directSignal: boolean;
+    inferredSignalCount: number;
+    confidence: number;
+  };
 }
 
 interface ArchetypeMovieExample {
@@ -87,6 +92,7 @@ interface ProfileStats {
     featuresLearned: number;
     lastTrainedAt: string | null;
     isTraining: boolean;
+    scope?: "household";
   } | null;
   moviePersonality: {
     archetypeName: string;
@@ -149,69 +155,140 @@ function AffinitySection({
   topItems,
   bottomItems,
   icon,
+  drilldownHref,
+  drilldownLabel,
 }: {
   title: string;
   topItems: AffinityItem[];
   bottomItems: AffinityItem[];
   icon: React.ReactNode;
+  drilldownHref?: string;
+  drilldownLabel?: string;
 }) {
+  const [showAll, setShowAll] = useState(false);
+  const [expandedItemIds, setExpandedItemIds] = useState<Record<string, boolean>>({});
+
   if (topItems.length === 0 && bottomItems.length === 0) {
     return null;
   }
 
+  const visibleTopItems = showAll ? topItems : topItems.slice(0, 5);
+  const visibleBottomItems = showAll ? bottomItems : bottomItems.slice(0, 5);
+  const hasOverflow = topItems.length > 5 || bottomItems.length > 5;
+
+  const toggleItemExpanded = (itemId: string) => {
+    setExpandedItemIds((prev) => ({ ...prev, [itemId]: !prev[itemId] }));
+  };
+
   return (
     <div className="bg-card border border-border rounded-xl p-4">
-      <div className="flex items-center gap-2 mb-4">
-        <div className="w-8 h-8 bg-accent-soft rounded-lg flex items-center justify-center">
-          {icon}
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 bg-accent-soft rounded-lg flex items-center justify-center">
+            {icon}
+          </div>
+          <h3 className="font-semibold">{title}</h3>
         </div>
-        <h3 className="font-semibold">{title}</h3>
+        <div className="flex items-center gap-3">
+          {drilldownHref && drilldownLabel ? (
+            <Link href={drilldownHref} className="text-xs text-accent hover:underline">
+              {drilldownLabel}
+            </Link>
+          ) : null}
+          {hasOverflow ? (
+            <button
+              type="button"
+              className="text-xs text-accent hover:underline"
+              onClick={() => setShowAll((prev) => !prev)}
+            >
+              {showAll ? "Show top 5" : "Show more"}
+            </button>
+          ) : null}
+        </div>
       </div>
 
-      {topItems.length > 0 && (
+      {visibleTopItems.length > 0 && (
         <div className="mb-4">
           <div className="text-xs text-muted mb-2 uppercase tracking-wide">
             Favorites
           </div>
           <div className="space-y-2">
-            {topItems.map((item) => (
-              <div
-                key={item.id}
-                className="flex items-center justify-between gap-2"
-              >
-                <span className="text-sm truncate flex-1">{item.name}</span>
-                <div className="flex items-center gap-2">
-                  <AffinityBar affinity={item.affinity} />
-                  <span className="text-xs text-muted w-14 text-right tabular-nums">
-                    {formatAffinityPercent(item.affinity)}
-                  </span>
+            {visibleTopItems.map((item) => {
+              const isExpanded = Boolean(expandedItemIds[item.id]);
+              const confidence = item.evidence?.confidence ?? 0;
+              return (
+                <div key={item.id}>
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      className="text-sm truncate flex-1 text-left hover:text-accent"
+                      onClick={() => toggleItemExpanded(item.id)}
+                      title="Show why this appears here"
+                    >
+                      {item.name}
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <AffinityBar affinity={item.affinity} />
+                      <span className="text-xs text-muted w-14 text-right tabular-nums">
+                        {formatAffinityPercent(item.affinity)}
+                      </span>
+                    </div>
+                  </div>
+                  {isExpanded ? (
+                    <div className="mt-1 text-xs text-muted">
+                      Confidence {Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%
+                      {" · "}
+                      {item.evidence?.directSignal ? "Includes your direct rating" : "Inferred from your movie ratings"}
+                      {" · "}
+                      {item.evidence?.inferredSignalCount ?? item.ratingCount} supporting movie signals
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
 
-      {bottomItems.length > 0 && (
+      {visibleBottomItems.length > 0 && (
         <div>
           <div className="text-xs text-muted mb-2 uppercase tracking-wide">
             Least Preferred
           </div>
           <div className="space-y-2">
-            {bottomItems.map((item) => (
-              <div
-                key={item.id}
-                className="flex items-center justify-between gap-2"
-              >
-                <span className="text-sm truncate flex-1">{item.name}</span>
-                <div className="flex items-center gap-2">
-                  <AffinityBar affinity={item.affinity} />
-                  <span className="text-xs text-muted w-14 text-right tabular-nums">
-                    {formatAffinityPercent(item.affinity)}
-                  </span>
+            {visibleBottomItems.map((item) => {
+              const isExpanded = Boolean(expandedItemIds[item.id]);
+              const confidence = item.evidence?.confidence ?? 0;
+              return (
+                <div key={item.id}>
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      className="text-sm truncate flex-1 text-left hover:text-accent"
+                      onClick={() => toggleItemExpanded(item.id)}
+                      title="Show why this appears here"
+                    >
+                      {item.name}
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <AffinityBar affinity={item.affinity} />
+                      <span className="text-xs text-muted w-14 text-right tabular-nums">
+                        {formatAffinityPercent(item.affinity)}
+                      </span>
+                    </div>
+                  </div>
+                  {isExpanded ? (
+                    <div className="mt-1 text-xs text-muted">
+                      Confidence {Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%
+                      {" · "}
+                      {item.evidence?.directSignal ? "Includes your direct rating" : "Inferred from your movie ratings"}
+                      {" · "}
+                      {item.evidence?.inferredSignalCount ?? item.ratingCount} supporting movie signals
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -254,6 +331,8 @@ function ProfileMovieCard({
   canRate,
   ratingState,
   isSaving,
+  ratingContext,
+  metaText,
   onRate,
   onToggleSeen,
 }: {
@@ -261,6 +340,8 @@ function ProfileMovieCard({
   canRate: boolean;
   ratingState: MovieQuickRating;
   isSaving: boolean;
+  ratingContext?: string;
+  metaText?: string;
   onRate: (movieId: string, rating: number) => void;
   onToggleSeen: (movieId: string) => void;
 }) {
@@ -283,6 +364,9 @@ function ProfileMovieCard({
           <div className="text-[10px] text-white/90 mb-1 truncate">
             {ratingState.rating ? `Your rating: ${ratingState.rating}/5` : "Not rated yet"}
           </div>
+          {ratingContext ? (
+            <div className="text-[10px] text-white/80 mb-1 truncate">{ratingContext}</div>
+          ) : null}
 
           <button
             type="button"
@@ -331,6 +415,9 @@ function ProfileMovieCard({
       {movie.year ? (
         <div className="text-[10px] text-muted">{movie.year}</div>
       ) : null}
+      {metaText ? (
+        <div className="text-[10px] text-muted truncate">{metaText}</div>
+      ) : null}
     </div>
   );
 }
@@ -338,6 +425,8 @@ function ProfileMovieCard({
 function MoviePersonalityCard({
   personality,
   canRate,
+  isOwnProfile,
+  profileOwnerName,
   movieRatings,
   savingMovieIds,
   onRate,
@@ -345,6 +434,8 @@ function MoviePersonalityCard({
 }: {
   personality: NonNullable<ProfileStats["moviePersonality"]>;
   canRate: boolean;
+  isOwnProfile: boolean;
+  profileOwnerName: string;
   movieRatings: Record<string, MovieQuickRating>;
   savingMovieIds: Record<string, boolean>;
   onRate: (movieId: string, rating: number) => void;
@@ -355,6 +446,7 @@ function MoviePersonalityCard({
     movies: ArchetypeMovieExample[] | undefined
   ) => {
     if (!movies || movies.length === 0) return null;
+    const isUniqueRow = title.includes("Unique");
     return (
       <div className="mb-4">
         <div className="text-sm font-medium mb-2">{title}</div>
@@ -366,6 +458,16 @@ function MoviePersonalityCard({
               canRate={canRate}
               ratingState={movieRatings[m.id] ?? { rating: null, hasSeen: false, notHeardOf: false }}
               isSaving={Boolean(savingMovieIds[m.id])}
+              ratingContext={
+                isOwnProfile
+                  ? "Saved to your profile"
+                  : `Saved to your profile while viewing ${profileOwnerName}`
+              }
+              metaText={
+                isUniqueRow
+                  ? `Uniqueness ${Math.max(0, m.uniqueness).toFixed(2)}`
+                  : `Archetype match ${Math.max(0, Math.min(1, m.similarity)).toFixed(2)}`
+              }
               onRate={onRate}
               onToggleSeen={onToggleSeen}
             />
@@ -581,6 +683,17 @@ function MoviePersonalityCard({
           </div>
         ) : null}
 
+        <details className="rounded-lg border border-border bg-background/40 p-3">
+          <summary className="cursor-pointer text-sm font-medium">
+            How these insights are computed
+          </summary>
+          <div className="text-xs text-muted mt-2 space-y-1">
+            <p>Archetypes are based on latent movie preference vectors learned from household ratings.</p>
+            <p>Similarity bars show how closely your current rating pattern aligns with each archetype.</p>
+            <p>Most Loved picks high similarity titles; Uniquely Loved/Avoided emphasize differences vs other archetypes.</p>
+          </div>
+        </details>
+
         {/* Viewing Traits */}
         {personality.traits.length > 0 && (
           <div>
@@ -648,6 +761,8 @@ function ProfilePageContent() {
   const [error, setError] = useState<ProfileLoadError | null>(null);
   const [movieRatings, setMovieRatings] = useState<Record<string, MovieQuickRating>>({});
   const [savingMovieIds, setSavingMovieIds] = useState<Record<string, boolean>>({});
+  const [quickRateError, setQuickRateError] = useState<string | null>(null);
+  const saveSequenceRef = useRef<Record<string, number>>({});
 
   const selectedUserId =
     searchParams.get("userId")?.trim() ||
@@ -782,6 +897,41 @@ function ProfilePageContent() {
     return null;
   }
 
+  const onboardingMilestones = [
+    {
+      label: "Rate Movies",
+      href: "/preferences/movies",
+      current: stats.counts.moviesRated,
+      target: 20,
+    },
+    {
+      label: "Rank Genres",
+      href: "/preferences/genres",
+      current: stats.counts.genresRanked,
+      target: 8,
+    },
+    {
+      label: "Rate People",
+      href: "/preferences/people",
+      current: stats.counts.actorsRated + stats.counts.directorsRated,
+      target: 12,
+    },
+    {
+      label: "Rate Studios",
+      href: "/preferences/studios",
+      current: stats.counts.studiosRated,
+      target: 6,
+    },
+  ];
+  const onboardingCompleteCount = onboardingMilestones.filter((m) => m.current >= m.target).length;
+  const showOnboardingCard =
+    isOwnProfile && (stats.counts.moviesRated < 20 || !stats.moviePersonality);
+  const nextMilestone = onboardingMilestones.find((m) => m.current < m.target);
+  const modelUserShare =
+    stats.mlModel && stats.mlModel.totalRatings > 0
+      ? stats.counts.moviesRated / stats.mlModel.totalRatings
+      : 0;
+
   const discoveryLabels: Record<string, string> = {
     popular: "Popular Movies",
     trending: "Trending Movies",
@@ -792,7 +942,13 @@ function ProfilePageContent() {
     hidden_gems: "Hidden Gems",
   };
 
-  const saveRating = async (movieId: string, next: MovieQuickRating) => {
+  const saveRating = async (
+    movieId: string,
+    next: MovieQuickRating,
+    previous: MovieQuickRating
+  ) => {
+    const saveSequence = (saveSequenceRef.current[movieId] ?? 0) + 1;
+    saveSequenceRef.current[movieId] = saveSequence;
     setSavingMovieIds((prev) => ({ ...prev, [movieId]: true }));
     try {
       const res = await fetch("/api/ratings", {
@@ -808,28 +964,38 @@ function ProfilePageContent() {
       if (!res.ok) {
         throw new Error("Failed to save rating");
       }
+      setQuickRateError(null);
+    } catch {
+      if (saveSequenceRef.current[movieId] === saveSequence) {
+        setMovieRatings((curr) => ({ ...curr, [movieId]: previous }));
+      }
+      setQuickRateError("Could not save that rating. Your previous value has been restored.");
     } finally {
-      setSavingMovieIds((prev) => ({ ...prev, [movieId]: false }));
+      if (saveSequenceRef.current[movieId] === saveSequence) {
+        setSavingMovieIds((prev) => ({ ...prev, [movieId]: false }));
+      }
     }
   };
 
   const handleRateMovie = (movieId: string, rating: number) => {
     if (!canQuickRate) return;
+    setQuickRateError(null);
     const prev = movieRatings[movieId] ?? { rating: null, hasSeen: false, notHeardOf: false };
     const next: MovieQuickRating = { ...prev, rating, notHeardOf: false };
     setMovieRatings((curr) => ({ ...curr, [movieId]: next }));
-    void saveRating(movieId, next);
+    void saveRating(movieId, next, prev);
   };
 
   const handleToggleSeen = (movieId: string) => {
     if (!canQuickRate) return;
+    setQuickRateError(null);
     const prev = movieRatings[movieId] ?? { rating: null, hasSeen: false, notHeardOf: false };
     const next: MovieQuickRating = { ...prev, hasSeen: !prev.hasSeen };
     setMovieRatings((curr) => ({ ...curr, [movieId]: next }));
 
     // Persist immediately only when a rating exists; otherwise keep draft until stars are picked.
     if (next.rating !== null) {
-      void saveRating(movieId, next);
+      void saveRating(movieId, next, prev);
     }
   };
 
@@ -860,6 +1026,67 @@ function ProfilePageContent() {
           </Link>
         )}
       </div>
+
+      {!isOwnProfile && canQuickRate ? (
+        <div className="bg-accent/10 border border-accent/25 rounded-xl p-3 text-sm">
+          Quick ratings on this page are saved to <span className="font-medium">your</span> profile while you view {stats.user.name}&apos;s insights.
+        </div>
+      ) : null}
+
+      {quickRateError ? (
+        <div className="bg-error/10 border border-error/20 text-error text-sm px-4 py-2 rounded-xl">
+          {quickRateError}
+        </div>
+      ) : null}
+
+      {showOnboardingCard ? (
+        <div className="bg-card border border-border rounded-xl p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="font-semibold">Build Your Taste Profile</h3>
+              <p className="text-sm text-muted mt-1">
+                Rate a few more items and your profile will unlock deeper, personalized archetype insights.
+              </p>
+            </div>
+            <div className="text-xs text-muted tabular-nums">
+              {onboardingCompleteCount}/{onboardingMilestones.length} complete
+            </div>
+          </div>
+          <div className="space-y-3 mt-4">
+            {onboardingMilestones.map((milestone) => {
+              const progress = Math.max(0, Math.min(1, milestone.current / milestone.target));
+              return (
+                <div key={milestone.label}>
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <Link href={milestone.href} className="hover:text-accent">
+                      {milestone.label}
+                    </Link>
+                    <span className="text-xs text-muted tabular-nums">
+                      {Math.min(milestone.current, milestone.target)}/{milestone.target}
+                    </span>
+                  </div>
+                  <div className="h-1.5 bg-border rounded-full overflow-hidden mt-1">
+                    <div
+                      className="h-full bg-accent rounded-full"
+                      style={{ width: `${progress * 100}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {nextMilestone ? (
+            <div className="mt-4">
+              <Link
+                href={nextMilestone.href}
+                className="inline-flex items-center text-sm text-accent hover:underline"
+              >
+                Continue with {nextMilestone.label}
+              </Link>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {householdMembers.length > 1 && (
         <div className="bg-card border border-border rounded-xl p-4">
@@ -906,16 +1133,19 @@ function ProfilePageContent() {
               />
             </svg>
           </div>
-          <h3 className="font-semibold">Recommendation Model</h3>
+          <h3 className="font-semibold">Household Recommendation Model</h3>
           {stats.mlModel?.isTraining && (
             <span className="text-xs bg-accent/20 text-accent px-2 py-0.5 rounded-full animate-pulse">
               Training...
             </span>
           )}
         </div>
+        <div className="text-xs text-muted mb-3">
+          Model metrics below are household-wide. Your personal contribution is shown separately.
+        </div>
         {stats.mlModel ? (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-8 gap-4">
               <div>
                 <div className="text-xs text-muted mb-1">Confidence</div>
                 <div className="flex items-center gap-2">
@@ -937,8 +1167,18 @@ function ProfilePageContent() {
                 </div>
               </div>
               <div>
-                <div className="text-xs text-muted mb-1">Ratings</div>
+                <div className="text-xs text-muted mb-1">Household Ratings</div>
                 <div className="text-sm font-medium">{stats.mlModel.totalRatings}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted mb-1">Your Ratings</div>
+                <div className="text-sm font-medium">{stats.counts.moviesRated}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted mb-1">Your Share</div>
+                <div className="text-sm font-medium">
+                  {(Math.max(0, Math.min(1, modelUserShare)) * 100).toFixed(1)}%
+                </div>
               </div>
               <div>
                 <div className="text-xs text-muted mb-1">Features</div>
@@ -1028,6 +1268,8 @@ function ProfilePageContent() {
         <MoviePersonalityCard
           personality={stats.moviePersonality}
           canRate={canQuickRate}
+          isOwnProfile={isOwnProfile}
+          profileOwnerName={stats.user.name}
           movieRatings={movieRatings}
           savingMovieIds={savingMovieIds}
           onRate={handleRateMovie}
@@ -1086,6 +1328,8 @@ function ProfilePageContent() {
           title="Genres"
           topItems={stats.topGenres}
           bottomItems={stats.bottomGenres}
+          drilldownHref="/preferences/genres"
+          drilldownLabel="Rank genres"
           icon={
             <svg
               className="w-4 h-4 text-accent"
@@ -1107,6 +1351,8 @@ function ProfilePageContent() {
           title="Actors"
           topItems={stats.topActors}
           bottomItems={stats.bottomActors}
+          drilldownHref="/preferences/people"
+          drilldownLabel="Rate people"
           icon={
             <svg
               className="w-4 h-4 text-accent"
@@ -1128,6 +1374,8 @@ function ProfilePageContent() {
           title="Directors"
           topItems={stats.topDirectors}
           bottomItems={stats.bottomDirectors}
+          drilldownHref="/preferences/people"
+          drilldownLabel="Rate people"
           icon={
             <svg
               className="w-4 h-4 text-accent"
@@ -1149,6 +1397,8 @@ function ProfilePageContent() {
           title="Studios"
           topItems={stats.topStudios}
           bottomItems={stats.bottomStudios}
+          drilldownHref="/preferences/studios"
+          drilldownLabel="Rate studios"
           icon={
             <svg
               className="w-4 h-4 text-accent"
@@ -1179,6 +1429,11 @@ function ProfilePageContent() {
                 canRate={canQuickRate}
                 ratingState={movieRatings[movie.id] ?? { rating: null, hasSeen: false, notHeardOf: false }}
                 isSaving={Boolean(savingMovieIds[movie.id])}
+                ratingContext={
+                  isOwnProfile
+                    ? "Saved to your profile"
+                    : `Saved to your profile while viewing ${stats.user.name}`
+                }
                 onRate={handleRateMovie}
                 onToggleSeen={handleToggleSeen}
               />

@@ -909,3 +909,28 @@ Core entities in `prisma/schema.prisma`:
     - Calls out `I haven't heard of this movie` and `Undo` behavior.
     - One-time per user (`ratingCoachSeen:<userId>` localStorage key).
   - Learned product preference: onboarding should explicitly drive users through a productive sequence, while experienced users need immediate resume paths with minimal taps and context retention.
+- 2026-02-12 (Profile UX clarity + expert insight interactivity):
+  - Fixed profile trust/clarity issue where model stats looked user-personalized:
+    - Profile now labels the card as `Household Recommendation Model`.
+    - Added explicit copy that metrics are household-wide.
+    - Added per-user contribution metrics (`Your Ratings`, `Your Share`) so new users can contextualize totals.
+  - Added profile onboarding state for low-data users:
+    - New `Build Your Taste Profile` milestone card appears until enough signal exists.
+    - Includes progress bars and direct links to movies/genres/people/studios rating surfaces.
+  - Clarified cross-profile rating ownership:
+    - When viewing another member profile, UI now states quick ratings save to the viewer account.
+    - Poster overlays also show save-context text to reduce ambiguity.
+  - Hardened quick-rating reliability:
+    - Added save sequencing and optimistic rollback on failure in `/profile` quick-rate flows.
+    - Failed writes now restore previous local value and show inline error feedback.
+  - Increased expert drill-down interactivity:
+    - Affinity sections now support `Show more` (top/bottom 10) and per-item expandable evidence.
+    - Evidence includes direct-vs-inferred signal and confidence percentage.
+    - Added per-section drilldown links back to relevant rating pages.
+    - Added expandable `How these insights are computed` explainer in movie personality card.
+    - Archetype movie rows now display match/uniqueness metadata labels.
+  - API enrichment (`GET /api/profile/stats`):
+    - Affinity items now include evidence metadata (`directSignal`, `inferredSignalCount`, `confidence`).
+    - Expanded top/bottom affinity payloads from 5 to 10 to support richer profile exploration UI.
+  - Learned product preference: user expects profile UX to be immediately understandable for brand-new users while still exposing high-depth, inspectable recommendation evidence for expert users.
+  - Learned workflow preference: when insights can be edited or rated from exploratory views, ownership and save-target must be explicit in the interface copy.
