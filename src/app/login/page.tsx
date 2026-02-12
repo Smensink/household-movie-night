@@ -82,6 +82,12 @@ export default function LoginPage() {
             Sign up
           </Link>
         </p>
+        <p className="text-center text-xs text-muted">
+          Fresh install?{" "}
+          <Link href="/setup/restore" className="text-accent hover:underline">
+            Restore from backup
+          </Link>
+        </p>
       </div>
     </div>
   );

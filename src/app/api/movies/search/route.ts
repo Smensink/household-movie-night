@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { searchOMDB, getOMDBMovie } from "@/lib/api/omdb";
+import { searchOMDB, getOMDBMovie, extractRatingsFromOMDB } from "@/lib/api/omdb";
 import { searchTraktMovies } from "@/lib/api/trakt";
 import { prisma } from "@/lib/prisma";
+import { backfillMLDataForMovie } from "@/lib/ml-backfill";
+import {
+  extractMovieMetadataFromRelations,
+  splitCsvNames,
+  syncMovieMetadataFromOMDB,
+} from "@/lib/movie-metadata";
 
 interface SearchMovieCandidate {
   imdbId: string;
@@ -15,6 +21,8 @@ interface SearchMovieCandidate {
   runtime: number | null;
   directors: string[];
   actors: string[];
+  studios: string[];
+  details: Awaited<ReturnType<typeof getOMDBMovie>> | null;
 }
 
 function parseOptionalInt(value: string | undefined): number | null {
@@ -25,12 +33,8 @@ function parseOptionalInt(value: string | undefined): number | null {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-function splitPeople(value: string | undefined): string[] {
-  if (!value || value === "N/A") return [];
-  return value
-    .split(",")
-    .map((person) => person.trim())
-    .filter(Boolean);
+function mergeUnique(values: string[], extras: string[], limit: number): string[] {
+  return Array.from(new Set([...values, ...extras])).slice(0, limit);
 }
 
 export async function GET(req: NextRequest) {
@@ -44,11 +48,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Query required" }, { status: 400 });
   }
 
-  // Search OMDB
-  const omdbResults = await searchOMDB(query);
-
-  // Search Trakt
-  const traktResults = await searchTraktMovies(query);
+  const [omdbResults, traktResults] = await Promise.all([
+    searchOMDB(query),
+    searchTraktMovies(query),
+  ]);
 
   // Merge and deduplicate by IMDB ID
   const seen = new Set<string>();
@@ -67,8 +70,10 @@ export async function GET(req: NextRequest) {
       posterUrl: r.Poster !== "N/A" ? r.Poster : null,
       overview: details?.Plot || null,
       runtime: parseOptionalInt(details?.Runtime),
-      directors: splitPeople(details?.Director),
-      actors: splitPeople(details?.Actors),
+      directors: splitCsvNames(details?.Director, 2),
+      actors: splitCsvNames(details?.Actors, 3),
+      studios: splitCsvNames(details?.Production, 2),
+      details,
     });
   }
 
@@ -86,6 +91,8 @@ export async function GET(req: NextRequest) {
       runtime: null,
       directors: [],
       actors: [],
+      studios: [],
+      details: null,
     });
   }
 
@@ -95,38 +102,120 @@ export async function GET(req: NextRequest) {
     const persisted = await prisma.movie.upsert({
       where: { imdbId: movie.imdbId },
       create: {
+        ...(() => {
+          const ratings = movie.details ? extractRatingsFromOMDB(movie.details) : null;
+          return {
+            imdbRating: ratings?.imdbRating ?? null,
+            rottenTomatoesAudience: ratings?.rottenTomatoesAudience ?? null,
+            imdbVotes: ratings?.imdbVotes ?? null,
+          };
+        })(),
         imdbId: movie.imdbId,
         tmdbId: movie.tmdbId ?? null,
         traktSlug: movie.traktSlug ?? null,
+        isMlOnly: false,
         title: movie.title,
         year: movie.year,
         posterUrl: movie.posterUrl || null,
         overview: movie.overview,
         runtime: movie.runtime,
+        ...(movie.details?.Language && movie.details.Language !== "N/A" && {
+          originalLanguage: movie.details.Language.split(",")[0].trim().toLowerCase(),
+        }),
+        ...(movie.details?.Country && movie.details.Country !== "N/A" && {
+          originCountry: movie.details.Country.split(",")[0].trim(),
+        }),
       },
       update: {
+        ...(() => {
+          const ratings = movie.details ? extractRatingsFromOMDB(movie.details) : null;
+          return {
+            ...(ratings?.imdbRating !== null && ratings?.imdbRating !== undefined
+              ? { imdbRating: ratings.imdbRating }
+              : {}),
+            ...(ratings?.rottenTomatoesAudience !== null &&
+            ratings?.rottenTomatoesAudience !== undefined
+              ? { rottenTomatoesAudience: ratings.rottenTomatoesAudience }
+              : {}),
+            ...(ratings?.imdbVotes !== null && ratings?.imdbVotes !== undefined
+              ? { imdbVotes: ratings.imdbVotes }
+              : {}),
+          };
+        })(),
         title: movie.title,
+        isMlOnly: false,
         ...(movie.tmdbId !== undefined && { tmdbId: movie.tmdbId }),
         ...(movie.traktSlug !== undefined && { traktSlug: movie.traktSlug }),
         ...(movie.year !== null && { year: movie.year }),
         ...(movie.posterUrl !== null && { posterUrl: movie.posterUrl }),
         ...(movie.overview !== null && { overview: movie.overview }),
         ...(movie.runtime !== null && { runtime: movie.runtime }),
+        ...(movie.details?.Language && movie.details.Language !== "N/A" && {
+          originalLanguage: movie.details.Language.split(",")[0].trim().toLowerCase(),
+        }),
+        ...(movie.details?.Country && movie.details.Country !== "N/A" && {
+          originCountry: movie.details.Country.split(",")[0].trim(),
+        }),
       },
-      select: {
-        id: true,
-        imdbId: true,
-        title: true,
-        year: true,
-        posterUrl: true,
-        overview: true,
-        era: true,
+      include: {
+        cast: {
+          include: { person: { select: { name: true } } },
+          orderBy: { castOrder: "asc" },
+          take: 3,
+        },
+        crew: {
+          where: { job: "Director" },
+          include: { person: { select: { name: true } } },
+          take: 3,
+        },
+        studios: {
+          include: { studio: { select: { name: true } } },
+          take: 2,
+        },
       },
     });
+
+    // Backfill MovieLens tags + average rating from cached data
+    await backfillMLDataForMovie(persisted.id, movie.imdbId);
+
+    const relationMetadata = extractMovieMetadataFromRelations(persisted);
+    let metadata = relationMetadata;
+    metadata = {
+      actors: mergeUnique(metadata.actors, movie.actors, 3),
+      directors: mergeUnique(metadata.directors, movie.directors, 2),
+      studios: mergeUnique(metadata.studios, movie.studios, 2),
+      genres: metadata.genres,
+    };
+    const shouldSyncMetadata =
+      movie.details &&
+      (relationMetadata.actors.length === 0 ||
+        relationMetadata.directors.length === 0 ||
+        relationMetadata.studios.length === 0);
+    if (shouldSyncMetadata && movie.details) {
+      const synced = await syncMovieMetadataFromOMDB(persisted.id, movie.details);
+      metadata = {
+        actors: mergeUnique(metadata.actors, synced.actors, 3),
+        directors: mergeUnique(metadata.directors, synced.directors, 2),
+        studios: mergeUnique(metadata.studios, synced.studios, 2),
+        genres: mergeUnique(metadata.genres, synced.genres, 4),
+      };
+    }
+
     persistedMovies.push({
-      ...persisted,
-      directors: movie.directors,
-      actors: movie.actors,
+      id: persisted.id,
+      imdbId: persisted.imdbId,
+      title: persisted.title,
+      year: persisted.year,
+      posterUrl: persisted.posterUrl,
+      overview: persisted.overview,
+      era: persisted.era,
+      tmdbRating: persisted.voteAverage,
+      imdbRating: persisted.imdbRating,
+      rottenTomatoesAudience: persisted.rottenTomatoesAudience,
+      directors: metadata.directors,
+      actors: metadata.actors,
+      studios: metadata.studios,
+      originalLanguage: persisted.originalLanguage,
     });
   }
 

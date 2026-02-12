@@ -25,6 +25,9 @@ model User {
   studioRatings       StudioRating[]
   sessionParticipants SessionParticipant[]
   sessionVotes        SessionVote[]
+  createdSessions     MovieNightSession[] @relation("SessionCreator")
+  createdInvites      HouseholdInvite[]   @relation("HouseholdInviteCreator")
+  claimedInvites      HouseholdInvite[]   @relation("HouseholdInviteClaimer")
   letterboxdImports   LetterboxdImport[]
   settings            UserSettings?
 }
@@ -38,6 +41,7 @@ model Household {
 
   members  HouseholdMember[]
   sessions MovieNightSession[]
+  invites  HouseholdInvite[]
 }
 
 model HouseholdMember {
@@ -58,6 +62,10 @@ model Movie {
   tmdbId        String?   @unique
   imdbId        String?   @unique
   traktSlug     String?   @unique
+  // Movies imported from MovieLens to support collaborative filtering.
+  // These are allowed to surface in discovery only when ranked highly, and are hydrated lazily (poster + metadata)
+  // at the moment they would be shown to a user.
+  isMlOnly      Boolean   @default(false)
   title         String
   year          Int?
   posterUrl     String?
@@ -68,6 +76,15 @@ model Movie {
   certification String?
   popularity    Float?    @default(0)
   voteAverage   Float?    @default(0)
+  voteCount     Int?      @default(0)  // Number of ratings on TMDB - indicates how well-known a movie is
+  imdbRating    Float?
+  imdbVotes     Int?      // Number of votes on IMDB
+  rottenTomatoesAudience Int?
+  letterboxdRating Float?
+  mlRatingCount Int?      @default(0)  // Approx "vote count" from MovieLens (number of ML ratings for this imdbId)
+  originalLanguage String?
+  originCountry    String?
+  surpriseFactor   Float?
   era           String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -80,6 +97,7 @@ model Movie {
   sessionMovies    SessionMovie[]
   radarrSync       RadarrSync?
   plexAvailability PlexAvailability?
+  movieTags        MovieTag[]
 }
 
 model Genre {
@@ -164,6 +182,7 @@ model MovieRating {
   movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
 
   @@unique([userId, movieId])
+  @@index([movieId])
 }
 
 model ActorRating {
@@ -195,6 +214,7 @@ model DirectorRating {
 model MovieNightSession {
   id              String   @id @default(cuid())
   householdId     String
+  createdByUserId String?
   status          String   @default("gathering")
   guestInviteCode String   @unique @default(cuid())
   decidedMovieId  String?
@@ -202,22 +222,50 @@ model MovieNightSession {
   updatedAt       DateTime @updatedAt
 
   household        Household              @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  createdBy        User?                  @relation("SessionCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   participants     SessionParticipant[]
   genrePreferences SessionGenrePreference[]
   movies           SessionMovie[]
+
+  @@index([householdId])
 }
 
 model SessionParticipant {
-  id            String  @id @default(cuid())
-  sessionId     String
-  userId        String
-  eraPreference String?
-  isPresent     Boolean @default(true)
+  id             String  @id @default(cuid())
+  sessionId      String
+  userId         String
+  eraPreference  String?
+  minReleaseYear Int?
+  maxReleaseYear Int?
+  okWithRewatch  Boolean @default(false)
+  isPresent      Boolean @default(true)
 
   session MovieNightSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, userId])
+}
+
+model HouseholdInvite {
+  id              String   @id @default(cuid())
+  householdId     String
+  createdByUserId String
+  claimedByUserId String?
+  token           String   @unique @default(cuid())
+  displayName     String?
+  email           String?
+  role            String   @default("member")
+  status          String   @default("pending")
+  expiresAt       DateTime?
+  claimedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  createdBy User      @relation("HouseholdInviteCreator", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  claimedBy User?     @relation("HouseholdInviteClaimer", fields: [claimedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([householdId])
 }
 
 model SessionGenrePreference {
@@ -244,6 +292,7 @@ model SessionMovie {
   votes   SessionVote[]
 
   @@unique([sessionId, movieId])
+  @@index([sessionId])
 }
 
 model SessionVote {
@@ -257,6 +306,7 @@ model SessionVote {
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([sessionMovieId, userId])
+  @@index([sessionMovieId])
 }
 
 model RadarrSync {
@@ -336,6 +386,127 @@ model UserSettings {
   userId               String @unique
   explorationFactor    Float  @default(0.5) // 0 = deep dive into known preferences, 1 = max exploration of new content
   discoverySourcePref  String @default("balanced") // "trending" | "popular" | "top_rated" | "new_releases" | "balanced"
+  minVoteCount         Int    @default(500)
+  minUpcomingListCount Int    @default(250)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Matrix Factorization models for recommendation
+model LatentVector {
+  id         String   @id @default(cuid())
+  entityType String   // "user" or "movie"
+  entityId   String
+  vector     String   // JSON array of floats
+  bias       Float    @default(0)
+  updatedAt  DateTime @updatedAt
+
+  @@unique([entityType, entityId])
+  @@index([entityType])
+}
+
+model MFModelMetadata {
+  id               String   @id @default(cuid())
+  version          Int      @default(1)
+  latentDimensions Int      @default(50)
+  featureDimensions Int     @default(16)  // Dimensions for side features
+  learningRate     Float    @default(0.005)
+  regularization   Float    @default(0.02)
+  trainedEpochs    Int      @default(0)
+  totalRatings     Int      @default(0)
+  rmse             Float?   // Root mean squared error on training data
+  validationRmse   Float?   // RMSE on held-out validation set
+  lastTrainedAt    DateTime?
+  isTraining       Boolean  @default(false)
+  globalMean       Float    @default(3.0)  // Global average rating
+  featureWeights   String?  // JSON object of learned feature weights
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// Feature embeddings for hybrid factorization machine
+model FeatureEmbedding {
+  id           String   @id @default(cuid())
+  featureType  String   // "genre", "era", "studio", "actor", "director", "popularity_bin", "runtime_bin"
+  featureId    String   // The ID or value of the feature
+  vector       String   // JSON array of floats (embedding)
+  bias         Float    @default(0)
+  updatedAt    DateTime @updatedAt
+
+  @@unique([featureType, featureId])
+  @@index([featureType])
+}
+
+// User feature cache for faster inference
+model UserFeatureCache {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  explorationFactor Float    @default(0.5)
+  genreVector       String?  // Aggregated genre preference vector (JSON)
+  ratingMean        Float?   // User's average rating
+  ratingStdDev      Float?   // User's rating standard deviation
+  ratingCount       Int      @default(0)
+  ratingDisposition String?  // e.g. "lenient_wide", "harsh_narrow", "balanced_wide"
+  topGenreIds       String?  // JSON array of top 5 genre IDs
+  archetypeId       String?
+  archetypeScores   String?  // JSON: { [archetypeId]: number } (soft similarity distribution)
+  archetype         ViewerArchetype? @relation(fields: [archetypeId], references: [id], onDelete: SetNull)
+  updatedAt         DateTime @updatedAt
+}
+
+// Viewer archetype clusters derived from MovieLens user analysis
+model ViewerArchetype {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String
+  centroid    String   // JSON: 50D latent vector
+  clusterSize Int
+  topGenres   String   // JSON: [{ name, score }]
+  disposition String   // Most common disposition in cluster
+  traits      String   // JSON: string[]
+  updatedAt   DateTime @updatedAt
+  users       UserFeatureCache[]
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String   // "rating", "page_view", "session_start", etc.
+  entityType String? // "movie", "actor", "director", "studio"
+  entityId  String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model MovieTag {
+  id        String @id @default(cuid())
+  movieId   String
+  tag       String
+  relevance Float  // 0-1 relevance (genome score from ml-25m or user-frequency from ml-32m)
+
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@unique([movieId, tag])
+  @@index([movieId])
+  @@index([tag])
+}
+
+model MLRating {
+  mlUserId String
+  imdbId   String
+  rating   Float
+
+  @@id([mlUserId, imdbId])
+  @@index([imdbId])
+}
+
+model MLTagData {
+  imdbId    String
+  tag       String
+  relevance Float
+  source    String @default("genome") // "genome" or "user"
+
+  @@id([imdbId, tag])
+  @@index([imdbId])
 }

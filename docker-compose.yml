@@ -2,13 +2,24 @@ services:
   app:
     build: .
     ports:
-      - "3000:3000"
+      - "8347:3000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
       - DATABASE_URL=postgresql://movienight:movienight@db:5432/movienight?schema=public
       - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-change-me-to-a-random-secret}
-      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
+      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:8347}
+      - AUTH_TRUST_HOST=true
+      - NODE_OPTIONS=--max-old-space-size=8192
       - OMDB_API_KEY=${OMDB_API_KEY:-}
       - TRAKT_CLIENT_ID=${TRAKT_CLIENT_ID:-}
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-default-internal-key-change-me}
     depends_on:
       db:
         condition: service_healthy
@@ -22,8 +33,6 @@ services:
       POSTGRES_DB: movienight
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U movienight"]
       interval: 5s

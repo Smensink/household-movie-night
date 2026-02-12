@@ -1,18 +1,18 @@
 @import "tailwindcss";
 
 :root {
-  --background: #0f0f13;
-  --foreground: #e8e6f0;
-  --card: #1a1a24;
-  --card-hover: #22222e;
-  --accent: #8b5cf6;
-  --accent-hover: #7c3aed;
-  --accent-soft: rgba(139, 92, 246, 0.15);
-  --muted: #6b7280;
-  --border: #2a2a3a;
-  --success: #10b981;
+  --background: #09111f;
+  --foreground: #f2f5f8;
+  --card: #0f1a2d;
+  --card-hover: #16243a;
+  --accent: #14b8a6;
+  --accent-hover: #0d9488;
+  --accent-soft: rgba(20, 184, 166, 0.18);
+  --muted: #94a3b8;
+  --border: #243248;
+  --success: #22c55e;
   --warning: #f59e0b;
-  --danger: #ef4444;
+  --danger: #f43f5e;
   --star: #fbbf24;
 }
 
@@ -30,7 +30,7 @@
   --color-warning: var(--warning);
   --color-danger: var(--danger);
   --color-star: var(--star);
-  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-sans: "Avenir Next", "Segoe UI", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
 }
 
@@ -39,7 +39,10 @@
 }
 
 body {
-  background: var(--background);
+  background:
+    radial-gradient(circle at 15% 10%, rgba(20, 184, 166, 0.22), transparent 28%),
+    radial-gradient(circle at 85% 5%, rgba(249, 115, 22, 0.22), transparent 24%),
+    linear-gradient(180deg, #08101d 0%, var(--background) 40%, #070f1a 100%);
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
   min-height: 100dvh;

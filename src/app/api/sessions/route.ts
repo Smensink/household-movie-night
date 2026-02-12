@@ -11,10 +11,13 @@ export async function GET() {
 
   const memberships = await prisma.householdMember.findMany({
     where: { userId },
-    select: { householdId: true },
+    select: { householdId: true, role: true },
   });
 
-  const householdIds = memberships.map((m) => m.householdId);
+  const householdIds = memberships.map((membership) => membership.householdId);
+  const roleByHouseholdId = new Map(
+    memberships.map((membership) => [membership.householdId, membership.role])
+  );
 
   const sessions = await prisma.movieNightSession.findMany({
     where: { householdId: { in: householdIds } },
@@ -34,7 +37,24 @@ export async function GET() {
     take: 20,
   });
 
-  return NextResponse.json(sessions);
+  return NextResponse.json(
+    sessions.map((movieNightSession) => {
+      const viewerRole =
+        roleByHouseholdId.get(movieNightSession.householdId) ?? "member";
+      const isParticipant = movieNightSession.participants.some(
+        (participant) => participant.user.id === userId
+      );
+      const canManage =
+        viewerRole === "admin" || movieNightSession.createdByUserId === userId;
+
+      return {
+        ...movieNightSession,
+        viewerRole,
+        isParticipant,
+        canManage,
+      };
+    })
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -98,9 +118,11 @@ export async function POST(req: NextRequest) {
   const movieNight = await prisma.movieNightSession.create({
     data: {
       householdId,
+      createdByUserId: userId,
       participants: {
         create: finalParticipantIds.map((id) => ({
           userId: id,
+          okWithRewatch: false,
         })),
       },
     },

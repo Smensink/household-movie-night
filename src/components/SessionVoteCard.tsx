@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Image from "next/image";
 import StarRating from "./StarRating";
 
@@ -10,6 +11,9 @@ interface SessionVoteCardProps {
     year?: number | null;
     posterUrl?: string | null;
     overview?: string | null;
+    directors?: string[];
+    actors?: string[];
+    studios?: string[];
   };
   sessionMovieId: string;
   userHasSeen?: boolean;
@@ -29,18 +33,20 @@ export default function SessionVoteCard({
   onRewatchToggle,
   available,
 }: SessionVoteCardProps) {
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+
   return (
     <div className="bg-card rounded-2xl border border-border overflow-hidden animate-slide-up">
-      <div className="flex">
+      <div className="flex flex-col sm:flex-row">
         {/* Poster */}
-        <div className="relative w-24 h-36 flex-shrink-0 bg-card-hover">
+        <div className="relative w-full h-52 sm:w-32 sm:h-auto flex-shrink-0 bg-card-hover">
           {movie.posterUrl ? (
             <Image
               src={movie.posterUrl}
               alt={movie.title}
               fill
               className="object-cover"
-              sizes="96px"
+              sizes="(max-width: 640px) 100vw, 128px"
             />
           ) : (
             <div className="w-full h-full flex items-center justify-center text-muted">
@@ -57,14 +63,60 @@ export default function SessionVoteCard({
         </div>
 
         {/* Content */}
-        <div className="flex-1 p-3 space-y-2">
+        <div className="flex-1 p-4 space-y-2">
           <div>
             <h3 className="font-semibold text-sm leading-tight">{movie.title}</h3>
             {movie.year && <span className="text-xs text-muted">{movie.year}</span>}
           </div>
 
           {movie.overview && (
-            <p className="text-[11px] text-muted line-clamp-2">{movie.overview}</p>
+            <div>
+              <p
+                className={`text-[11px] text-muted ${
+                  descriptionExpanded ? "" : "line-clamp-2"
+                }`}
+              >
+                {movie.overview}
+              </p>
+              {movie.overview.length > 140 && (
+                <button
+                  onClick={() => setDescriptionExpanded((prev) => !prev)}
+                  className="text-[11px] text-accent hover:underline mt-1"
+                >
+                  {descriptionExpanded ? "Show less" : "Show more"}
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="space-y-1 text-[11px] text-muted">
+            {movie.directors && movie.directors.length > 0 && (
+              <p>
+                Director:{" "}
+                <span className="text-foreground">{movie.directors.join(", ")}</span>
+              </p>
+            )}
+            {movie.actors && movie.actors.length > 0 && (
+              <p>
+                Lead actors:{" "}
+                <span className="text-foreground">{movie.actors.join(", ")}</span>
+              </p>
+            )}
+            {movie.studios && movie.studios.length > 0 && (
+              <p>
+                Studio: <span className="text-foreground">{movie.studios.join(", ")}</span>
+              </p>
+            )}
+          </div>
+
+          {userHasSeen ? (
+            <p className="text-[11px] text-success font-medium">
+              You have seen this before.
+            </p>
+          ) : (
+            <p className="text-[11px] text-warning font-medium">
+              You have not seen this yet.
+            </p>
           )}
 
           <div>
@@ -83,7 +135,9 @@ export default function SessionVoteCard({
                   : "bg-card-hover text-muted border border-border"
               }`}
             >
-              {willingToRewatch ? "Willing to rewatch" : "Seen it - tap if willing to rewatch"}
+              {willingToRewatch
+                ? "Willing to rewatch"
+                : "Seen it. Tap if willing to rewatch"}
             </button>
           )}
         </div>

@@ -7,6 +7,8 @@ const ALLOWED_ERA_PREFERENCES = new Set([
   "modern_classic",
   "classic",
 ]);
+const MIN_RELEASE_YEAR = 1900;
+const MAX_RELEASE_YEAR = new Date().getFullYear() + 1;
 
 export async function POST(
   req: NextRequest,
@@ -43,6 +45,16 @@ export async function POST(
   const genreRankings = Array.isArray(body?.genreRankings)
     ? (body.genreRankings as Array<{ genreId?: unknown; rank?: unknown }>)
     : undefined;
+  const minReleaseYear =
+    typeof body?.minReleaseYear === "number"
+      ? Math.trunc(body.minReleaseYear)
+      : undefined;
+  const maxReleaseYear =
+    typeof body?.maxReleaseYear === "number"
+      ? Math.trunc(body.maxReleaseYear)
+      : undefined;
+  const okWithRewatch =
+    typeof body?.okWithRewatch === "boolean" ? body.okWithRewatch : undefined;
 
   if (
     eraPreference !== undefined &&
@@ -70,6 +82,27 @@ export async function POST(
       { status: 400 }
     );
   }
+  const hasAnyYearRange =
+    minReleaseYear !== undefined || maxReleaseYear !== undefined;
+  if (hasAnyYearRange && (minReleaseYear === undefined || maxReleaseYear === undefined)) {
+    return NextResponse.json(
+      { error: "Both minReleaseYear and maxReleaseYear are required" },
+      { status: 400 }
+    );
+  }
+  if (
+    hasAnyYearRange &&
+    (minReleaseYear! < MIN_RELEASE_YEAR ||
+      maxReleaseYear! > MAX_RELEASE_YEAR ||
+      minReleaseYear! > maxReleaseYear!)
+  ) {
+    return NextResponse.json(
+      {
+        error: `Release year range must be between ${MIN_RELEASE_YEAR} and ${MAX_RELEASE_YEAR}`,
+      },
+      { status: 400 }
+    );
+  }
 
   const normalizedRankings = Array.from(
     normalizedRankingsRaw.reduce((map, ranking) => {
@@ -79,8 +112,27 @@ export async function POST(
   );
 
   await prisma.$transaction(async (tx) => {
-    // Update era preference
+    // Build participant update data
+    const participantUpdateData: {
+      eraPreference?: string | null;
+      minReleaseYear?: number;
+      maxReleaseYear?: number;
+      okWithRewatch?: boolean;
+    } = {};
+
     if (eraPreference !== undefined) {
+      participantUpdateData.eraPreference = eraPreference;
+    }
+    if (hasAnyYearRange) {
+      participantUpdateData.minReleaseYear = minReleaseYear;
+      participantUpdateData.maxReleaseYear = maxReleaseYear;
+    }
+    if (okWithRewatch !== undefined) {
+      participantUpdateData.okWithRewatch = okWithRewatch;
+    }
+
+    // Update participant preferences if any data to update
+    if (Object.keys(participantUpdateData).length > 0) {
       await tx.sessionParticipant.update({
         where: {
           sessionId_userId: {
@@ -88,7 +140,7 @@ export async function POST(
             userId,
           },
         },
-        data: { eraPreference },
+        data: participantUpdateData,
       });
     }
 

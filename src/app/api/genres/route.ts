@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { ensureDefaultGenres } from "@/lib/default-catalog";
 
 export async function GET() {
   const session = await auth();
   const userId = session?.user?.id;
+  await ensureDefaultGenres();
 
   const genres = await prisma.genre.findMany({
     orderBy: { name: "asc" },
@@ -31,6 +33,7 @@ export async function POST(req: NextRequest) {
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  await ensureDefaultGenres();
 
   const body = await req.json().catch(() => null);
   const rankings = Array.isArray(body?.rankings)

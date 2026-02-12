@@ -16,7 +16,7 @@ export async function resolveSessionActor(
   const loggedInUserId = loggedIn?.user?.id;
 
   if (loggedInUserId) {
-    const participant = await prisma.sessionParticipant.findUnique({
+    const existingParticipant = await prisma.sessionParticipant.findUnique({
       where: {
         sessionId_userId: {
           sessionId,
@@ -25,11 +25,57 @@ export async function resolveSessionActor(
       },
       select: { id: true },
     });
-    if (!participant) {
+    if (existingParticipant) {
+      return { userId: loggedInUserId, isGuest: false };
+    }
+
+    const movieNightSession = await prisma.movieNightSession.findUnique({
+      where: { id: sessionId },
+      select: {
+        householdId: true,
+        status: true,
+      },
+    });
+    if (!movieNightSession) {
       return null;
     }
 
-    return { userId: loggedInUserId, isGuest: false };
+    const householdMembership = await prisma.householdMember.findUnique({
+      where: {
+        userId_householdId: {
+          userId: loggedInUserId,
+          householdId: movieNightSession.householdId,
+        },
+      },
+      select: { id: true },
+    });
+    if (!householdMembership) {
+      return null;
+    }
+
+    if (
+      movieNightSession.status === "gathering" ||
+      movieNightSession.status === "voting"
+    ) {
+      await prisma.sessionParticipant.upsert({
+        where: {
+          sessionId_userId: {
+            sessionId,
+            userId: loggedInUserId,
+          },
+        },
+        create: {
+          sessionId,
+          userId: loggedInUserId,
+          okWithRewatch: false,
+        },
+        update: {},
+      });
+
+      return { userId: loggedInUserId, isGuest: false };
+    }
+
+    return null;
   }
 
   const guestToken =

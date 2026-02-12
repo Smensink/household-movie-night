@@ -43,6 +43,12 @@ export default function Home() {
           >
             Sign In
           </Link>
+          <Link
+            href="/setup/restore"
+            className="w-full text-sm text-accent hover:underline text-center py-1"
+          >
+            Restore from Backup
+          </Link>
         </div>
       </div>
     </div>

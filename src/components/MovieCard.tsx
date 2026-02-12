@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Image from "next/image";
 import StarRating from "./StarRating";
 
@@ -11,6 +12,9 @@ interface MovieCardProps {
     posterUrl?: string | null;
     overview?: string | null;
     era?: string | null;
+    directors?: string[];
+    actors?: string[];
+    studios?: string[];
   };
   rating?: number | null;
   hasSeen?: boolean;
@@ -31,6 +35,7 @@ export default function MovieCard({
   onNotHeardOf,
   compact = false,
 }: MovieCardProps) {
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const eraLabels: Record<string, string> = {
     new_release: "New Release",
     modern_classic: "Modern Classic",
@@ -43,7 +48,7 @@ export default function MovieCard({
         {/* Poster */}
         <div
           className={`relative flex-shrink-0 bg-card-hover ${
-            compact ? "w-16 h-24" : "w-full sm:w-28 h-40 sm:h-auto"
+            compact ? "w-16 h-24" : "w-full sm:w-36 h-48 sm:h-auto"
           }`}
         >
           {movie.posterUrl ? (
@@ -103,51 +108,107 @@ export default function MovieCard({
           </div>
 
           {!compact && movie.overview && (
-            <p className="text-xs text-muted mt-2 line-clamp-2">
-              {movie.overview}
-            </p>
+            <div className="mt-2">
+              <p
+                className={`text-xs text-muted ${
+                  descriptionExpanded ? "" : "line-clamp-2"
+                }`}
+              >
+                {movie.overview}
+              </p>
+              {movie.overview.length > 140 && (
+                <button
+                  onClick={() => setDescriptionExpanded((prev) => !prev)}
+                  className="text-[11px] text-accent hover:underline mt-1"
+                >
+                  {descriptionExpanded ? "Show less" : "Show more"}
+                </button>
+              )}
+            </div>
+          )}
+
+          {!compact && (
+            <div className="mt-2 space-y-1 text-[11px] text-muted">
+              {movie.directors && movie.directors.length > 0 && (
+                <p>
+                  Director:{" "}
+                  <span className="text-foreground">{movie.directors.join(", ")}</span>
+                </p>
+              )}
+              {movie.actors && movie.actors.length > 0 && (
+                <p>
+                  Lead actors:{" "}
+                  <span className="text-foreground">{movie.actors.join(", ")}</span>
+                </p>
+              )}
+              {movie.studios && movie.studios.length > 0 && (
+                <p>
+                  Studio:{" "}
+                  <span className="text-foreground">{movie.studios.join(", ")}</span>
+                </p>
+              )}
+            </div>
           )}
 
           {/* Rating & Actions */}
           {onRate && (
             <div className="mt-3 space-y-2">
+              {onSeenToggle && (
+                <div className="space-y-1">
+                  <p className="text-[11px] text-muted">
+                    Watch status for this title
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => onSeenToggle(false)}
+                      className={`text-xs px-2.5 py-1.5 rounded-lg border transition-all font-medium ${
+                        !hasSeen
+                          ? "bg-warning/15 text-warning border-warning/30"
+                          : "bg-card-hover text-muted border-border hover:text-foreground"
+                      }`}
+                    >
+                      Unseen
+                    </button>
+                    <button
+                      onClick={() => onSeenToggle(true)}
+                      className={`text-xs px-2.5 py-1.5 rounded-lg border transition-all font-medium ${
+                        hasSeen
+                          ? "bg-success/15 text-success border-success/30"
+                          : "bg-card-hover text-muted border-border hover:text-foreground"
+                      }`}
+                    >
+                      Seen
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-muted">
+                    Default is <span className="text-foreground">Unseen</span>.
+                  </p>
+                </div>
+              )}
+
               <StarRating
                 rating={rating ?? null}
                 onChange={onRate}
                 size={compact ? "sm" : "md"}
               />
 
-              <div className="flex items-center gap-3">
-                {onSeenToggle && (
-                  <button
-                    onClick={() => onSeenToggle(!hasSeen)}
-                    className={`text-xs px-2.5 py-1 rounded-lg transition-all ${
-                      hasSeen
-                        ? "bg-success/15 text-success border border-success/30"
-                        : "bg-card-hover text-muted border border-border hover:text-foreground"
-                    }`}
-                  >
-                    {hasSeen ? "Seen it" : "Haven't seen"}
-                  </button>
-                )}
-                {onNotHeardOf && (
-                  <button
-                    onClick={onNotHeardOf}
-                    className="text-xs px-2.5 py-1 rounded-lg bg-card-hover text-muted border border-border hover:text-foreground transition-all"
-                  >
-                    Never heard of it
-                  </button>
-                )}
-              </div>
+              {onNotHeardOf && (
+                <button
+                  onClick={onNotHeardOf}
+                  className="text-xs px-2.5 py-1 rounded-lg bg-card-hover text-muted border border-border hover:text-foreground transition-all"
+                >
+                  I haven&apos;t heard of this movie
+                </button>
+              )}
 
               {hasSeen && rating !== null && rating !== undefined && (
-                <p className="text-[10px] text-muted">
-                  Your rating: how much you liked it
+                <p className="text-[10px] text-muted font-medium">
+                  You marked this as seen. Stars mean how much you liked it.
                 </p>
               )}
               {!hasSeen && rating !== null && rating !== undefined && (
-                <p className="text-[10px] text-muted">
-                  Your rating: willingness to watch
+                <p className="text-[10px] text-muted font-medium">
+                  You marked this as unseen. Stars mean willingness to watch.
                 </p>
               )}
             </div>
