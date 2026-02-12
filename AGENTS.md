@@ -848,3 +848,15 @@ Core entities in `prisma/schema.prisma`:
     - `Uniquely Avoided`: now uses a percentile-based strong-uniqueness cutoff on hate margin for consistency.
   - Resulting behavior: the two positive rows become intentionally complementary (core favorites vs distinctive favorites) instead of near-duplicates.
   - Learned product preference: profile archetype sections should maximize informational diversity, not repeat the same titles across rows.
+- 2026-02-11 (Session start clarity + star-state robustness + redesign planning):
+  - Fixed stale star preview behavior on touch/mobile by hardening `StarRating` interaction reset paths:
+    - Clears transient hover state on click.
+    - Uses pointer events (mouse-only hover previews) with pointer leave/cancel/blur resets.
+  - Improved movie-night onboarding clarity in `/session/[id]` preferences step:
+    - Added explicit 3-step instruction block.
+    - Updated CTA copy to `Save Tonight Preferences & Start Rating`.
+    - Ensured no-genres fallback path also persists preferences before starting voting.
+  - Added `redesign_plans.md` documenting major product areas with:
+    - Current interaction model.
+    - Recommended future interaction model.
+  - Learned user workflow preference: wants clearer guided progression in session setup and a durable redesign brief that maps current UX to desired UX by feature block.

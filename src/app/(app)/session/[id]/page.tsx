@@ -673,6 +673,15 @@ export default function SessionPage() {
 
       {step === "preferences" && (
         <div className="space-y-6 animate-slide-up">
+          <div className="bg-card border border-border rounded-xl p-4 space-y-2">
+            <p className="text-sm font-semibold">Before rating movies tonight:</p>
+            <ol className="text-xs text-muted space-y-1 list-decimal pl-4">
+              <li>Set your release year range.</li>
+              <li>Choose whether you are open to rewatches.</li>
+              <li>Rank tonight&apos;s genres, then tap <span className="text-foreground font-medium">Save Tonight Preferences &amp; Start Rating</span>.</li>
+            </ol>
+          </div>
+
           <div>
             <h3 className="text-sm font-semibold mb-2">Choose your release year range</h3>
             <div className="bg-card border border-border rounded-xl p-4 space-y-4">
@@ -792,13 +801,22 @@ export default function SessionPage() {
                 await generateMovies();
               }}
               saving={generating}
-              title="Rank genres for tonight"
+              title="Step 3: Rank genres for tonight"
+              saveLabel="Save Tonight Preferences & Start Rating"
             />
           )}
 
           {genres.length === 0 && (
-            <Button onClick={generateMovies} loading={generating} className="w-full" size="lg">
-              Start Movie Queue
+            <Button
+              onClick={async () => {
+                await savePreferences([]);
+                await generateMovies();
+              }}
+              loading={generating}
+              className="w-full"
+              size="lg"
+            >
+              Save Tonight Preferences & Start Rating
             </Button>
           )}
         </div>

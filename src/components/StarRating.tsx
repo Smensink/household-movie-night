@@ -25,6 +25,8 @@ export default function StarRating({
 
   const handleClick = (star: number) => {
     if (readonly || !onChange) return;
+    // Ensure touch/mobile interactions don't leave a stale hover preview value.
+    setHovered(null);
     setAnimating(star);
     onChange(star);
     setTimeout(() => setAnimating(null), 200);
@@ -40,8 +42,15 @@ export default function StarRating({
           className={`${sizes[size]} transition-transform ${
             !readonly ? "hover:scale-110 cursor-pointer" : "cursor-default"
           } ${animating === star ? "star-animate" : ""}`}
-          onMouseEnter={() => !readonly && setHovered(star)}
-          onMouseLeave={() => setHovered(null)}
+          onPointerEnter={(event) => {
+            if (readonly) return;
+            if (event.pointerType === "mouse") {
+              setHovered(star);
+            }
+          }}
+          onPointerLeave={() => setHovered(null)}
+          onPointerCancel={() => setHovered(null)}
+          onBlur={() => setHovered(null)}
           onClick={() => handleClick(star)}
         >
           <svg viewBox="0 0 24 24" className="w-full h-full">

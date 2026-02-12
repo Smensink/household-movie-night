@@ -14,6 +14,7 @@ interface GenreRankerProps {
   onSave: (rankings: { genreId: string; rank: number }[]) => void;
   saving?: boolean;
   title?: string;
+  saveLabel?: string;
 }
 
 export default function GenreRanker({
@@ -22,6 +23,7 @@ export default function GenreRanker({
   onSave,
   saving,
   title = "Rank Your Genres",
+  saveLabel = "Save Rankings",
 }: GenreRankerProps) {
   const sortedByInitialRank = useMemo(
     () =>
@@ -85,7 +87,7 @@ export default function GenreRanker({
           disabled={saving}
           className="bg-accent hover:bg-accent-hover text-white text-sm font-medium px-4 py-2 rounded-xl transition-all disabled:opacity-50"
         >
-          {saving ? "Saving..." : "Save Rankings"}
+          {saving ? "Saving..." : saveLabel}
         </button>
       </div>
 
